@@ -68,28 +68,57 @@ def test_shift_log_R():
     assert torch.allclose(R_exp, R_act)
 
 
-def test_shift_log_R_inf_theta():
+def test_shift_log_R_inf_logits():
     torch.manual_seed(3291)
     T, N, k_max = 53, 5, 3
-    theta_lens = torch.randint(k_max, T + 1, (N,))
-    theta = []
+    logits_lens = torch.randint(k_max, T + 1, (N,))
+    logits = []
     R_exp = []
     g_exp = []
-    for theta_len in theta_lens.tolist():
-        theta_n = torch.randn(theta_len).requires_grad_(True)
-        R_n = poisson_binomial.shift_log_R(theta_n, k_max)
-        g_n, = torch.autograd.grad(R_n, theta_n, torch.ones_like(R_n))
+    for logits_len in logits_lens.tolist():
+        logits_n = torch.randn(logits_len).requires_grad_(True)
+        R_n = poisson_binomial.shift_log_R(logits_n, k_max)
+        g_n, = torch.autograd.grad(R_n, logits_n, torch.ones_like(R_n))
         R_exp.append(R_n)
         g_exp.append(g_n)
-        theta.append(theta_n)
-    theta = torch.nn.utils.rnn.pad_sequence(theta, padding_value=-float('inf'))
+        logits.append(logits_n)
+    logits = torch.nn.utils.rnn.pad_sequence(
+        logits, padding_value=-float('inf'))
     R_exp = torch.stack(R_exp, dim=-1)
-    theta.requires_grad_(True)
-    R_act = poisson_binomial.shift_log_R(theta, k_max)
+    logits.requires_grad_(True)
+    R_act = poisson_binomial.shift_log_R(logits, k_max)
     assert torch.allclose(R_exp, R_act)
-    g_act, = torch.autograd.grad(R_act, theta, torch.ones_like(R_act))
+    g_act, = torch.autograd.grad(R_act, logits, torch.ones_like(R_act))
     # zero weights can still have a gradient, but that shouldn't affect the
     # gradient of other weights
-    for theta_len, g_exp_n, g_act_n in zip(theta_lens, g_exp, g_act.T):
-        assert torch.allclose(g_exp_n[:theta_len], g_act_n[:theta_len])
-        assert torch.all(torch.isfinite(g_act_n[theta_len:]))
+    for logits_len, g_exp_n, g_act_n in zip(logits_lens, g_exp, g_act.T):
+        assert torch.allclose(g_exp_n[:logits_len], g_act_n[:logits_len])
+        assert torch.all(torch.isfinite(g_act_n[logits_len:]))
+
+
+def test_poisson_binomial_probs():
+    torch.manual_seed(400)
+    T, N = 10, 1000000
+    bern_p = torch.rand(T)
+    w = bern_p / (1 - bern_p)
+    s = torch.distributions.Bernoulli(
+        probs=bern_p.unsqueeze(-1).expand(T, N)).sample()
+    counts = s.sum(0)
+    mc_probs = (torch.arange(T + 1).unsqueeze(-1) == counts).float().mean(-1)
+    assert torch.isclose(mc_probs.sum(), torch.tensor(1.))
+    pred_probs = poisson_binomial.probs(w)
+    assert torch.allclose(pred_probs, mc_probs, atol=1e-3)
+
+
+def test_poisson_binomial_log_probs():
+    torch.manual_seed(24229027)
+    T, N = 30, 1000000
+    logits = torch.rand(T)
+    s = torch.distributions.Bernoulli(
+        logits=logits.unsqueeze(-1).expand(T, N)).sample()
+    counts = s.sum(0)
+    mc_probs = (torch.arange(T + 1).unsqueeze(-1) == counts).float().mean(-1)
+    assert torch.isclose(mc_probs.sum(), torch.tensor(1.))
+    pred_probs = poisson_binomial.lprobs(logits).exp()
+    assert torch.isclose(pred_probs.sum(), torch.tensor(1.))
+    assert torch.allclose(pred_probs, mc_probs, atol=1e-3)

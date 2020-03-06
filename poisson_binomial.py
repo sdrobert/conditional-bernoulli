@@ -30,16 +30,31 @@ def shift_R(w, k_max):
     return torch.cat([R0, Rrest])
 
 
-def shift_log_R(theta, k_max):
-    # in theta = (T, *)
+def shift_log_R(logits, k_max):
+    # in logits = (T, *)
     # out log_R = (k_max + 1, *)
-    log_R0 = torch.zeros_like(theta[:1, ...])
+    log_R0 = torch.zeros_like(logits[:1, ...])
     log_Rrest = torch.full(
-        (k_max,) + theta[0].size(), -float('inf'), device=theta.device)
-    theta = theta.unsqueeze(1)
-    for T in range(theta.shape[0]):
+        (k_max,) + logits[0].size(), -float('inf'), device=logits.device)
+    logits = logits.unsqueeze(1)
+    for T in range(logits.shape[0]):
         x = torch.cat([log_R0, log_Rrest[:-1]], 0)
-        x = torch.where(torch.isfinite(x), x + theta[T], x)
+        x = torch.where(torch.isfinite(x), x + logits[T], x)
         log_Rrest = torch.logsumexp(torch.stack([log_Rrest, x], 0), 0)
         del x
     return torch.cat([log_R0, log_Rrest])
+
+
+def probs(w):
+    # in w = (T, *)
+    # out p = (k_max + 1, *)
+    return shift_R(w, len(w)) / (1 + w).prod(0, keepdim=True)
+
+
+def lprobs(logits):
+    # in logits = (T, *)
+    # out log_p = (k_max + 1, *)
+    return (
+        shift_log_R(logits, len(logits)) +
+        torch.nn.functional.logsigmoid(-logits).sum(0, keepdim=True)
+    )
