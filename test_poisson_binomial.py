@@ -89,17 +89,18 @@ def test_shift_log_R_inf_logits():
     R_act = poisson_binomial.shift_log_R(logits, k_max)
     assert torch.allclose(R_exp, R_act)
     g_act, = torch.autograd.grad(R_act, logits, torch.ones_like(R_act))
-    # zero weights can still have a gradient, but that shouldn't affect the
-    # gradient of other weights
     for logits_len, g_exp_n, g_act_n in zip(logits_lens, g_exp, g_act.T):
         assert torch.allclose(g_exp_n[:logits_len], g_act_n[:logits_len])
-        assert torch.all(torch.isfinite(g_act_n[logits_len:]))
+        # the gradient isn't really defined for -inf in the log-space, but it
+        # works out to be the non-threatening zero here
+        assert torch.all(g_act_n[logits_len:] == 0.)
 
 
 def test_poisson_binomial_probs():
     torch.manual_seed(400)
     T, N = 10, 1000000
     bern_p = torch.rand(T)
+    bern_p /= torch.rand(T).sum()
     w = bern_p / (1 - bern_p)
     s = torch.distributions.Bernoulli(
         probs=bern_p.unsqueeze(-1).expand(T, N)).sample()
@@ -113,7 +114,7 @@ def test_poisson_binomial_probs():
 def test_poisson_binomial_log_probs():
     torch.manual_seed(24229027)
     T, N = 30, 1000000
-    logits = torch.rand(T)
+    logits = torch.randn(T)
     s = torch.distributions.Bernoulli(
         logits=logits.unsqueeze(-1).expand(T, N)).sample()
     counts = s.sum(0)
@@ -122,3 +123,24 @@ def test_poisson_binomial_log_probs():
     pred_probs = poisson_binomial.lprobs(logits).exp()
     assert torch.isclose(pred_probs.sum(), torch.tensor(1.))
     assert torch.allclose(pred_probs, mc_probs, atol=1e-3)
+
+
+def test_conditional_bernoulli_naive():
+    torch.manual_seed(3472196)
+    T, N = 10, 10000
+    bern_p = torch.rand(T)
+    bern_p /= bern_p.sum()
+    w = bern_p / (1 - bern_p)
+    counts = torch.arange(T + 1)
+    poisson_probs = poisson_binomial.probs(w)
+    s = poisson_binomial.sample_conditional_bernoulli_naive(
+        w.view(T, 1, 1).expand(T, T + 1, N),
+        counts.unsqueeze(-1).expand(T + 1, N)
+    )
+    assert torch.all(s.int().sum(0) == counts.unsqueeze(-1))
+
+    # this is the cool bit. Multiply our Monte Carlo conditional Bernoulli
+    # probability estimate with the Poisson-Binomial prior and we recover the
+    # original Bernoulli probabilities
+    mc_probs = (s.mean(-1) * poisson_probs).sum(-1)
+    assert torch.allclose(bern_p, mc_probs, atol=1e-2)
