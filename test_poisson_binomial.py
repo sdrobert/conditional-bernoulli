@@ -34,6 +34,33 @@ def test_shift_R():
     assert torch.allclose(R_exp, R_act[..., 11])
 
 
+def test_R_properties():
+    torch.manual_seed(4201)
+    T, N, k = 30, 4, 5
+    w = torch.rand(T, N)
+
+    # sum_j w_j R(k-1, C\{j}) = k R(k, C)
+    I = torch.eye(T, dtype=bool)
+    w_sub_j = w.unsqueeze(0).masked_fill(I.unsqueeze(-1), 0.).transpose(0, 1)
+    assert torch.allclose(w_sub_j.sum(1) / (T - 1), w)
+    R_sub_j = poisson_binomial.shift_R(w_sub_j, k)
+    R_k_act = (R_sub_j[-2] * w).sum(0) / k
+    R = poisson_binomial.shift_R(w, k)
+    R_k_exp = R[-1]
+    assert torch.allclose(R_k_act, R_k_exp)
+
+    # sum_j R(k - 1, C\{j}) = (T - k) R(k, C)
+    assert torch.allclose(R_sub_j[-1].sum(0), (T - k) * R[-1])
+
+    # sum_i R(i, C) R(k - i, C^c) = R(k, C)
+    w_left = w[:T // 2]
+    w_right = w[T // 2:]
+    R_left = poisson_binomial.shift_R(w_left, k)
+    R_right = poisson_binomial.shift_R(w_right, k)
+    R_k_act = (R_left * R_right.flip(0)).sum(0)
+    assert torch.allclose(R_k_act, R_k_exp)
+
+
 def test_shift_R_zero_weights():
     torch.manual_seed(1702)
     T, N, k_max = 30, 10, 4
@@ -125,7 +152,7 @@ def test_poisson_binomial_log_probs():
     assert torch.allclose(pred_probs, mc_probs, atol=1e-3)
 
 
-def test_conditional_bernoulli_naive():
+def test_naive_sample_conditional_bernoulli():
     torch.manual_seed(3472196)
     T, N = 10, 10000
     bern_p = torch.rand(T)
@@ -133,7 +160,7 @@ def test_conditional_bernoulli_naive():
     w = bern_p / (1 - bern_p)
     counts = torch.arange(T + 1)
     poisson_probs = poisson_binomial.probs(w)
-    s = poisson_binomial.sample_conditional_bernoulli_naive(
+    s = poisson_binomial.naive_sample_conditional_bernoulli(
         w.view(T, 1, 1).expand(T, T + 1, N),
         counts.unsqueeze(-1).expand(T + 1, N)
     )
