@@ -60,14 +60,16 @@ def lprobs(logits):
     )
 
 
-def sample_conditional_bernoulli_naive(w, counts):
+def naive_sample_conditional_bernoulli(w, counts):
+    # in w = (T, *), counts = int or (*)
+    # out b = (T, *)
     if not torch.is_tensor(counts):
         counts = torch.tensor(counts, device=w.device)
     w = w.detach()
     counts = counts.expand_as(w[0]).detach()
     T = w.shape[0]
-    max_count = counts.max()
-    assert T >= max_count
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
     min_count = counts.min()
     assert min_count >= 0
     with_replacement = torch.cartesian_prod(
@@ -133,16 +135,62 @@ def sample_conditional_bernoulli_naive(w, counts):
     return b
 
 
-# def sample_conditional_bernoulli_draft(w, counts):
-#     # in w = (T, *), counts = int or (*)
-#     # out b = (T, *)
-#     if not torch.is_tensor(counts):
-#         counts = torch.tensor(counts, device=w.device)
-#     counts = counts.expand_as(w[0]).detach()
-#     max_count = counts.max.item()
-#     assert max_count <= len(w)
-#     b = torch.full_like(w, False)
-#     for k in range(1, max_count + 1):
-#         going = (counts >= k)
+def draft_sample_conditional_bernoulli(w, counts):
+    # in w = (T, *), counts = int or (*)
+    # out b = (T, *)
+    w = w.detach()
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=w.device)
+    counts = counts.expand_as(w[0]).detach()
+    orig_shape = w.shape
+    T = orig_shape[0]
 
+    # we will largely sum over the T dimension, so for efficiency we transpose
+    # T to the last dimension. For clarity, we flatten the other dimensions
+    # into a single batch dimension
+    w = w.transpose(0, -1).reshape(-1, T)
+    N = w.shape[0]
+    counts = counts.reshape(-1)
+    assert counts.shape[0] == N
 
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    b = torch.zeros_like(w, dtype=bool)
+    if not max_count:
+        return b.view(orig_shape)  # all False, who cares about transpose?
+
+    # this is to replace zero-weight sequences
+    dummy_seq = torch.ones(T, device=w.device)
+    dummy_seq /= dummy_seq.sum()
+    dummy_seq = dummy_seq.view(1, T)
+
+    next_sample = torch.eye(T, device=w.device, dtype=bool)
+
+    # presented in '97 paper. Less efficient, but appears numerically
+    # more stable.
+    for k in range(1, max_count + 1):
+        still_sampling = (counts >= k).unsqueeze(-1)
+
+        w = w.masked_fill(b, 0.)
+
+        w_sub_j = w.T.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
+
+        R_sub_j = shift_R(w_sub_j, max_count - k)
+        R_km1 = R_sub_j.gather(
+           0,
+           (counts - k).clamp(0).unsqueeze(0).expand_as(w.T).unsqueeze(0)
+        )[0]
+
+        pi = w * R_km1.T
+        # R_k = shift_R(w.T, max_count - k + 1).gather(0, (counts - k + 1).clamp(0).unsqueeze(0))[0]
+        # assert torch.allclose(
+        #     pi.sum(-1).masked_select(counts > k),
+        #     (R_k * (counts - k + 1)).masked_select(counts > k)
+        # )
+        norm = pi.sum(-1, keepdim=True)
+        pi = torch.where(still_sampling, pi / norm, dummy_seq)
+
+        last = torch.distributions.OneHotCategorical(probs=pi).sample().bool()
+        b |= last & still_sampling
+
+    return b.T.float().view(orig_shape)

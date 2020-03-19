@@ -40,8 +40,8 @@ def test_R_properties():
     w = torch.rand(T, N)
 
     # sum_j w_j R(k-1, C\{j}) = k R(k, C)
-    I = torch.eye(T, dtype=bool)
-    w_sub_j = w.unsqueeze(0).masked_fill(I.unsqueeze(-1), 0.).transpose(0, 1)
+    w_sub_j = w.unsqueeze(0).masked_fill(
+        torch.eye(T, dtype=bool).unsqueeze(-1), 0.).transpose(0, 1)
     assert torch.allclose(w_sub_j.sum(1) / (T - 1), w)
     R_sub_j = poisson_binomial.shift_R(w_sub_j, k)
     R_k_act = (R_sub_j[-2] * w).sum(0) / k
@@ -171,3 +171,24 @@ def test_naive_sample_conditional_bernoulli():
     # original Bernoulli probabilities
     mc_probs = (s.mean(-1) * poisson_probs).sum(-1)
     assert torch.allclose(bern_p, mc_probs, atol=1e-2)
+
+
+def test_draft_sample_conditional_bernoulli():
+    torch.manual_seed(32412)
+    T, N = 10, 100000
+    w = torch.rand(T)
+    counts = torch.tensor([3, 4]).unsqueeze(0).expand(N, 2)
+
+    s = poisson_binomial.naive_sample_conditional_bernoulli(
+        w.view(T, 1, 1).expand(T, N, 2), counts
+    )
+    props = s.mean(1)
+    del s
+
+    s = poisson_binomial.draft_sample_conditional_bernoulli(
+        w.view(T, 1, 1).expand(T, N, 2), counts
+    )
+    assert torch.all(s.int().sum(0) == counts)
+    props2 = s.mean(1)
+
+    assert torch.allclose(props, props2, atol=1e-2)
