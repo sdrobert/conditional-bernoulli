@@ -3,6 +3,7 @@ import torch
 
 # this isn't numerically stable
 def naive_R(w, k_max):
+    # in w = (S,)
     S, = w.shape
     assert 0 <= k_max
     R = torch.ones(1, device=w.device)
@@ -142,55 +143,45 @@ def draft_sample_conditional_bernoulli(w, counts):
     if not torch.is_tensor(counts):
         counts = torch.tensor(counts, device=w.device)
     counts = counts.expand_as(w[0]).detach()
+
     orig_shape = w.shape
     T = orig_shape[0]
-
-    # we will largely sum over the T dimension, so for efficiency we transpose
-    # T to the last dimension. For clarity, we flatten the other dimensions
-    # into a single batch dimension
-    w = w.transpose(0, -1).reshape(-1, T)
-    N = w.shape[0]
-    counts = counts.reshape(-1)
-    assert counts.shape[0] == N
+    w = w.flatten(1)
+    counts = counts.flatten()
 
     max_count = counts.max().item()
     assert 0 <= max_count <= T
     b = torch.zeros_like(w, dtype=bool)
     if not max_count:
-        return b.view(orig_shape)  # all False, who cares about transpose?
+        return b.view(orig_shape)
 
     # this is to replace zero-weight sequences
-    dummy_seq = torch.ones(T, device=w.device)
-    dummy_seq /= dummy_seq.sum()
-    dummy_seq = dummy_seq.view(1, T)
+    dummy_seq = torch.ones_like(w.T)
+    dummy_seq /= T
 
     next_sample = torch.eye(T, device=w.device, dtype=bool)
 
-    # presented in '97 paper. Less efficient, but appears numerically
-    # more stable.
+    # presented in '97 paper. I've had better luck with numerical stability
+    # than the '94 one, though it's less efficient
     for k in range(1, max_count + 1):
-        still_sampling = (counts >= k).unsqueeze(-1)
+        still_sampling = (counts >= k).unsqueeze(0)
 
         w = w.masked_fill(b, 0.)
 
-        w_sub_j = w.T.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
+        w_sub_j = w.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
 
         R_sub_j = shift_R(w_sub_j, max_count - k)
         R_km1 = R_sub_j.gather(
            0,
-           (counts - k).clamp(0).unsqueeze(0).expand_as(w.T).unsqueeze(0)
+           (counts - k).clamp(0).unsqueeze(0).expand_as(w).unsqueeze(0)
         )[0]
 
-        pi = w * R_km1.T
-        # R_k = shift_R(w.T, max_count - k + 1).gather(0, (counts - k + 1).clamp(0).unsqueeze(0))[0]
-        # assert torch.allclose(
-        #     pi.sum(-1).masked_select(counts > k),
-        #     (R_k * (counts - k + 1)).masked_select(counts > k)
-        # )
+        pi = (w * R_km1).T.contiguous()
         norm = pi.sum(-1, keepdim=True)
-        pi = torch.where(still_sampling, pi / norm, dummy_seq)
+        pi = torch.where(still_sampling.T, pi / norm, dummy_seq)
 
-        last = torch.distributions.OneHotCategorical(probs=pi).sample().bool()
+        last = torch.distributions.OneHotCategorical(
+            probs=pi).sample().T.bool()
         b |= last & still_sampling
 
-    return b.T.float().view(orig_shape)
+    return b.float().view(orig_shape)
