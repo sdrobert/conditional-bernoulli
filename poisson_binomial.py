@@ -41,7 +41,10 @@ def shift_log_R(logits, k_max):
     for T in range(logits.shape[0]):
         x = torch.cat([log_R0, log_Rrest[:-1]], 0)
         x = torch.where(torch.isfinite(x), x + logits[T], x)
-        log_Rrest = torch.logsumexp(torch.stack([log_Rrest, x], 0), 0)
+        if k_max:
+            log_Rrest = torch.logsumexp(torch.stack([log_Rrest, x], 0), 0)
+        else:
+            log_Rrest = x
         del x
     return torch.cat([log_R0, log_Rrest])
 
@@ -155,7 +158,6 @@ def draft_sample_conditional_bernoulli(w, counts):
     if not max_count:
         return b.view(orig_shape)
 
-    # this is to replace zero-weight sequences
     dummy_seq = torch.ones_like(w.T)
     dummy_seq /= T
 
@@ -182,6 +184,56 @@ def draft_sample_conditional_bernoulli(w, counts):
 
         last = torch.distributions.OneHotCategorical(
             probs=pi).sample().T.bool()
+        b |= last & still_sampling
+
+    return b.float().view(orig_shape)
+
+
+def draft_sample_log_conditional_bernoulli(logits, counts):
+    # in logits = (T, *), counts = int or (*)
+    # out b = (T, *)
+    logits = logits.detach()
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=logits.device)
+    counts = counts.expand_as(logits[0]).detach()
+
+    orig_shape = logits.shape
+    T = orig_shape[0]
+    logits = logits.flatten(1)
+    counts = counts.flatten()
+
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    b = torch.zeros_like(logits, dtype=bool)
+    if not max_count:
+        return b.view(orig_shape)
+
+    dummy_seq = torch.full_like(logits.T, 0.)
+    next_sample = torch.eye(T, device=logits.device, dtype=bool)
+    ninf = -float('inf')
+
+    for k in range(1, max_count + 1):
+        still_sampling = (counts >= k).unsqueeze(0)
+
+        logits = logits.masked_fill(b, ninf)
+
+        logits_sub_j = logits.unsqueeze(1).masked_fill(
+            next_sample.unsqueeze(-1), ninf)
+
+        log_R_sub_j = shift_log_R(logits_sub_j, max_count - k)
+        log_R_km1 = log_R_sub_j.gather(
+           0,
+           (
+               (counts - k).clamp(0).unsqueeze(0)
+               .expand_as(logits).unsqueeze(0)
+            )
+        )[0]
+
+        log_pi = (logits + log_R_km1).T.contiguous()
+        log_pi = torch.where(still_sampling.T, log_pi, dummy_seq)
+
+        last = torch.distributions.OneHotCategorical(
+            logits=log_pi).sample().T.bool()
         b |= last & still_sampling
 
     return b.float().view(orig_shape)

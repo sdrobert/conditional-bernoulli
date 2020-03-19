@@ -192,3 +192,21 @@ def test_draft_sample_conditional_bernoulli():
     props2 = s.mean(1)
 
     assert torch.allclose(props, props2, atol=1e-2)
+
+
+def test_draft_sample_log_conditional_bernoulli():
+    torch.manual_seed(472043)
+    T, N = 30, 12
+    theta = torch.randn(T, N)
+    theta[::2] = -float('inf')
+    counts = torch.randint(1, T // 2, (N,))
+
+    torch.manual_seed(1)
+    b1 = poisson_binomial.draft_sample_conditional_bernoulli(
+        theta.exp(), counts)
+
+    torch.manual_seed(1)
+    b2 = poisson_binomial.draft_sample_log_conditional_bernoulli(
+        theta, counts)
+
+    assert torch.all(b1 == b2)
