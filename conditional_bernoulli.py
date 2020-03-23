@@ -454,3 +454,21 @@ def direct_lsample(logits, counts):
     del Rhist, U
 
     return torch.stack(b).float()
+
+
+def probs(w, b):
+    # in w = b = (T, *)
+    counts = b.sum(0).long()
+    w = w.masked_fill(~b.bool(), 1.)
+    num = w.prod(0)
+    denom = shift_R(w, counts.max()).gather(0, counts.unsqueeze(0))[0]
+    return num / denom
+
+
+def lprobs(logits, b):
+    # in logits = b = (T, *)
+    counts = b.sum(0).long()
+    logits = logits.masked_fill(~b.bool(), 0.)
+    num = logits.sum(0)
+    denom = shift_log_R(logits, counts.max()).gather(0, counts.unsqueeze(0))[0]
+    return num - denom

@@ -66,13 +66,13 @@ def shift_log_R(logits, k_max, keep_hist=False):
 
 def probs(w):
     # in w = (T, *)
-    # out p = (k_max + 1, *)
+    # out p = (T, *)
     return shift_R(w, len(w)) / (1 + w).prod(0, keepdim=True)
 
 
 def lprobs(logits):
     # in logits = (T, *)
-    # out log_p = (k_max + 1, *)
+    # out log_p = (T, *)
     return (
         shift_log_R(logits, len(logits)) +
         torch.nn.functional.logsigmoid(-logits).sum(0, keepdim=True)

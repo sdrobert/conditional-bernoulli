@@ -100,3 +100,42 @@ def test_direct_lsample():
     assert torch.all(b2.sum(0).int() == counts)
 
     assert torch.all(b1 == b2)
+
+
+def test_probs():
+    torch.manual_seed(234701)
+    T, N = 50, 13
+    w = torch.rand(T, N)
+    w[::3] = 0.
+    b = torch.randint(0, 2, (T, N), dtype=bool)
+    b &= w != 0.
+    counts = b.sum(0).long()
+
+    pb_prob = poisson_binomial.probs(w).gather(0, counts.unsqueeze(0))[0]
+    bern_prob = torch.where(b, w / (1. + w), 1 - w / (1. + w))
+    prob_exp = bern_prob.prod(0) / pb_prob
+    assert not torch.any(prob_exp == 0.)
+
+    prob_act = conditional_bernoulli.probs(w, b)
+    assert torch.allclose(prob_exp, prob_act)
+
+
+def test_lprobs():
+    torch.manual_seed(3284701)
+    T, N = 102, 18
+    logits = torch.randn(T, N)
+    logits[::4] = -float('inf')
+    b = torch.randint(0, 2, (T, N), dtype=bool)
+    b &= torch.isfinite(logits)
+
+    logits.requires_grad_(True)
+    p1 = conditional_bernoulli.lprobs(logits, b).exp()
+    g1, = torch.autograd.grad(p1, logits, torch.ones_like(p1))
+
+    logits.requires_grad_(True)
+    w = logits.exp()
+    p2 = conditional_bernoulli.probs(w, b)
+    g2, = torch.autograd.grad(p2, logits, torch.ones_like(p2))
+
+    assert torch.allclose(p1, p2)
+    assert torch.allclose(g1, g2)
