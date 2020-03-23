@@ -409,8 +409,8 @@ def direct_sample(w, counts):
     T = w.shape[0]
     max_count = counts.max().item()
     assert 0 <= max_count <= T
-    b = []
 
+    b = []
     Rhist = shift_R(w, max_count, True)  # [T + 1, ]
     U = torch.rand_like(w[0]) * Rhist[-1].gather(0, counts.unsqueeze(0))[0]
     # N.B. counts is now going to double for n - r in Chen '97
@@ -420,6 +420,37 @@ def direct_sample(w, counts):
         b.insert(0, match)
         U = torch.where(match, (U - R) / w[T - k], U)
         counts = counts - match.long()
-
     del Rhist, U
+
+    return torch.stack(b).float()
+
+
+def direct_lsample(logits, counts):
+    # in logits = (T, *), counts = int or (*)
+    # out b = (T, *)
+    logits = logits.detach()
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=logits.device)
+    counts = counts.expand_as(logits[0]).detach()
+
+    T = logits.shape[0]
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+
+    b = []
+    Rhist = shift_log_R(logits, max_count, True)  # [T + 1, ]
+    U = (
+        torch.rand_like(logits[0]).log() +
+        Rhist[-1].gather(0, counts.unsqueeze(0))[0]
+    )
+    # N.B. counts is now going to double for n - r in Chen '97
+    for k in range(1, T + 1):
+        R = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
+        match = U >= R
+        b.insert(0, match)
+        U = torch.where(
+            match, U + torch.log1p(-((R - U).exp())) - logits[T - k], U)
+        counts = counts - match.long()
+    del Rhist, U
+
     return torch.stack(b).float()

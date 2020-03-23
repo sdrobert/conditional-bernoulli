@@ -81,3 +81,22 @@ def test_direct_sample():
     props2 = s.mean(1)
 
     assert torch.allclose(props, props2, atol=1e-2)
+
+
+def test_direct_lsample():
+    torch.manual_seed(5429)
+    T, N = 30, 12
+    logits = torch.randn(T, N)
+    logits[1::2] = -float('inf')
+    counts = torch.randint(1, T // 2 - 1, (N,))
+
+    torch.manual_seed(1)
+    b1 = conditional_bernoulli.direct_sample(logits.exp(), counts)
+
+    torch.manual_seed(1)
+    b2 = conditional_bernoulli.direct_lsample(logits, counts)
+
+    assert torch.all(b1.sum(0).int() == counts)
+    assert torch.all(b2.sum(0).int() == counts)
+
+    assert torch.all(b1 == b2)
