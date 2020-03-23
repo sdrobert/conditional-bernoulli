@@ -181,7 +181,7 @@ def draft_lsample(logits, counts):
 # altdraft sampling should yield the same results as draft sampling, but using
 # a faster computation. They are based on Chen '94 and Chapter 5 of Tille's
 # "Sampling Algorithms". While at this point I'm fairly certain of correctness,
-# they are numerically unstable.
+# they are numerically unstable, which is why the asserts are there
 
 
 def altdraft_sample(w, counts):
@@ -396,3 +396,30 @@ def altdraft_lsample(logits, counts):
         b |= last & still_sampling
 
     return b.T.float().view(orig_shape)
+
+
+def direct_sample(w, counts):
+    # in w = (T, *), counts = int or (*)
+    # out b = (T, *)
+    w = w.detach()
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=w.device)
+    counts = counts.expand_as(w[0]).detach()
+
+    T = w.shape[0]
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    b = []
+
+    Rhist = shift_R(w, max_count, True)  # [T + 1, ]
+    U = torch.rand_like(w[0]) * Rhist[-1].gather(0, counts.unsqueeze(0))[0]
+    # N.B. counts is now going to double for n - r in Chen '97
+    for k in range(1, T + 1):
+        R = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
+        match = U >= R
+        b.insert(0, match)
+        U = torch.where(match, (U - R) / w[T - k], U)
+        counts = counts - match.long()
+
+    del Rhist, U
+    return torch.stack(b).float()

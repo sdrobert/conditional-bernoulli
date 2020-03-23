@@ -59,3 +59,25 @@ def test_draft_lsample():
     b2 = conditional_bernoulli.draft_lsample(theta, counts)
 
     assert torch.all(b1 == b2)
+
+
+def test_direct_sample():
+    torch.manual_seed(40272)
+    T, N = 10, 100000
+    w = torch.rand(T)
+    w[::2] = 0.
+    counts = torch.tensor([4, 5]).unsqueeze(0).expand(N, 2)
+
+    s = conditional_bernoulli.naive_sample(
+        w.view(T, 1, 1).expand(T, N, 2), counts
+    )
+    props = s.mean(1)
+    del s
+
+    s = conditional_bernoulli.direct_sample(
+        w.view(T, 1, 1).expand(T, N, 2), counts
+    )
+    assert torch.all(s.int().sum(0) == counts)
+    props2 = s.mean(1)
+
+    assert torch.allclose(props, props2, atol=1e-2)
