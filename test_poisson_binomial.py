@@ -1,5 +1,6 @@
 import poisson_binomial
 import torch
+import pytest
 
 
 def test_naive_R():
@@ -32,6 +33,23 @@ def test_shift_R():
     assert torch.allclose(R_exp, R_act)
     R_act = poisson_binomial.shift_R(w.unsqueeze(-1).expand(-1, 30), 10)
     assert torch.allclose(R_exp, R_act[..., 11])
+
+
+def test_shift_R_history():
+    torch.manual_seed(7420)
+    w = torch.rand(4)
+    w1, w2, w3, w4 = w.tolist()
+    Rhist_exp = torch.tensor([
+        [1, 1, 1, 1, 1],
+        [0, w1, w1 + w2, w1 + w2 + w3, w1 + w2 + w3 + w4],
+        [
+            0, 0, w1 * w2, w1 * w2 + w1 * w3 + w2 * w3, w1 * w2 +
+            w1 * w3 + w1 * w4 + w2 * w3 + w2 * w4 + w3 * w4
+        ]
+    ]).T
+    Rhist_act = poisson_binomial.shift_R(
+        w.unsqueeze(-1).expand(-1, 10), 2, True)
+    assert torch.allclose(Rhist_exp, Rhist_act[..., 4])
 
 
 def test_R_properties():
@@ -87,11 +105,12 @@ def test_shift_R_zero_weights():
         assert torch.allclose(g_exp_n[:w_len], g_act_n[:w_len])
 
 
-def test_shift_log_R():
+@pytest.mark.parametrize('keep_hist', [True, False])
+def test_shift_log_R(keep_hist):
     torch.manual_seed(198236)
     w = torch.rand(50, 4, 30, 10)
-    R_exp = poisson_binomial.shift_R(w, 20)
-    R_act = poisson_binomial.shift_log_R(w.log(), 20).exp()
+    R_exp = poisson_binomial.shift_R(w, 20, keep_hist)
+    R_act = poisson_binomial.shift_log_R(w.log(), 20, keep_hist).exp()
     assert torch.allclose(R_exp, R_act)
 
 
