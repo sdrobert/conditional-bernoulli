@@ -176,3 +176,221 @@ def draft_lsample(logits, counts):
         b |= last & still_sampling
 
     return b.float().view(orig_shape)
+
+
+# altdraft sampling should yield the same results as draft sampling, but using
+# a faster computation. They are based on Chen '94 and Chapter 5 of Tille's
+# "Sampling Algorithms". While at this point I'm fairly certain of correctness,
+# they are numerically unstable.
+
+
+def altdraft_sample(w, counts):
+    # in w = (T, *), counts = int or (*)
+    # out b = (T, *)
+    assert False, "Numerically unstable"
+    w = w.detach()
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=w.device)
+    counts = counts.expand_as(w[0]).detach()
+
+    orig_shape = w.shape
+    T = orig_shape[0]
+    w = w.flatten(1)
+    counts = counts.flatten()
+
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    b = torch.zeros_like(w.T, dtype=bool)
+    if not max_count:
+        return b.T.view(orig_shape)
+
+    dummy_val = 1 / T
+    dummy_seq = torch.full_like(w.T, dummy_val)
+
+    next_sample = torch.eye(T, device=w.device, dtype=bool)
+
+    # presented in the '94 paper. Should be more efficient, but less
+    # numerically stable
+
+    # first sample is the same as before
+    still_sampling = (counts >= 1).unsqueeze(-1)
+    w_sub_j = w.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
+
+    R_sub_j = shift_R(w_sub_j, max_count - 1)
+    R_km1 = R_sub_j.gather(
+        0,
+        (counts - 1).clamp(0).unsqueeze(0).expand_as(w).unsqueeze(0)
+    )[0]
+
+    pi = (w * R_km1).T.contiguous()
+    norm = pi.sum(-1, keepdim=True)
+    pi = torch.where(still_sampling, pi / norm, dummy_seq)
+
+    last = torch.distributions.OneHotCategorical(probs=pi).sample().bool()
+    b |= last & still_sampling
+
+    # until we're done, we operate on tensors with the row dim being the
+    # sequence dimension
+    w = w.T
+    del w_sub_j, R_sub_j, R_km1, norm
+
+    # remaining samples are defined relative to pi
+    for k in range(2, max_count + 1):
+        still_sampling = (counts >= k).unsqueeze(-1)  # (N, 1)
+
+        # tille 5.6.1
+
+        w_last = w[last].unsqueeze(-1)  # (N, 1)
+        # assert torch.all(w_last.ne(0.))
+        pi_last = pi[last].unsqueeze(-1)  # (N, 1)
+        # assert torch.all(pi_last.ne(0.))
+        c_m_k = (counts - k + 1).clamp(1).unsqueeze(-1).float()  # (N, 1)
+        num_minu = w_last * pi  # (N, T)
+        num_subtra = pi_last * w  # (N, T)
+        num = num_minu - num_subtra  # (N, T)
+        denom = c_m_k * (w_last - w) * pi_last  # (N, T)
+        match = num_minu == num_subtra
+        assert torch.all(match | ((num < 0) == (denom < 0))), k
+
+        pi = torch.where(match, torch.zeros_like(c_m_k), num / denom)  # (N, T)
+        assert torch.all(pi > -1e-5), pi
+        pi = pi.clamp(0.)
+        match_prob = (-pi.sum(-1).clamp_max(1.) + 1.) / match.float().sum(-1)
+        assert torch.all(match_prob >= 0.), match_prob
+        pi = torch.where(match, match_prob.unsqueeze(-1), pi)
+        pi = pi.masked_fill(b, 0)
+        pi = pi.masked_fill(~still_sampling, dummy_val)
+
+        # now that we have a probability distribution over the next sample,
+        # we can clear the weight for 'last'
+        w = w.masked_fill(last, 0.)
+
+        # w_sub_j = w.T.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
+
+        # R_sub_j = shift_R(w_sub_j, max_count - k)
+        # R_km1 = R_sub_j.gather(
+        #    0,
+        #    (counts - k).clamp(0).unsqueeze(0).expand_as(w.T).unsqueeze(0)
+        # )[0]
+
+        # pi2 = (w * R_km1.T)
+        # norm = pi2.sum(-1, keepdim=True)
+        # pi2 = torch.where(still_sampling, pi2 / norm, dummy_seq)
+
+        # print(pi[-1], pi2[-1], match[-1])
+        # assert torch.allclose(pi, pi2, atol=1e-4), k
+
+        last = torch.distributions.OneHotCategorical(probs=pi).sample().bool()
+        b |= last & still_sampling
+
+    return b.T.float().view(orig_shape)
+
+
+def altdraft_lsample(logits, counts):
+    # in logits = (T, *), counts = int or (*)
+    # out b = (T, *)
+    assert False, "Numerically unstable"
+    logits = logits.detach()
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=logits.device)
+    counts = counts.expand_as(logits[0]).detach()
+
+    orig_shape = logits.shape
+    T = orig_shape[0]
+    logits = logits.flatten(1)
+    counts = counts.flatten()
+
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    b = torch.zeros_like(logits.T, dtype=bool)
+    if not max_count:
+        return b.T.view(orig_shape)
+
+    ninf = torch.tensor(-float('inf'), device=logits.device)
+
+    next_sample = torch.eye(T, device=logits.device, dtype=bool)
+
+    # presented in the '94 paper. Should be more efficient, but less
+    # numerically stable
+
+    # first sample is the same as before
+    still_sampling = (counts >= 1).unsqueeze(-1)
+    logits_sub_j = logits.unsqueeze(1).masked_fill(
+        next_sample.unsqueeze(-1), ninf)
+
+    log_R_sub_j = shift_log_R(logits_sub_j, max_count - 1)
+    log_R_km1 = log_R_sub_j.gather(
+        0,
+        (counts - 1).clamp(0).unsqueeze(0).expand_as(logits).unsqueeze(0)
+    )[0]
+
+    logp = (logits + log_R_km1).T.contiguous()
+    logp = logp.masked_fill(~still_sampling, 0.)
+    logp = logp - logp.logsumexp(-1, keepdim=True)
+
+    last = torch.distributions.OneHotCategorical(logits=logp).sample().bool()
+    b |= last & still_sampling
+
+    logits = logits.T
+    del logits_sub_j, log_R_sub_j, log_R_km1
+
+    # remaining samples are defined relative to logp
+    for k in range(2, max_count + 1):
+        still_sampling = (counts >= k).unsqueeze(-1)  # (N, 1)
+
+        logits_last = logits[last].unsqueeze(-1)  # (N, 1)
+        logp_last = logp[last].unsqueeze(-1)  # (N, 1)
+        log_c_m_k = (counts - k + 1).clamp(1).unsqueeze(-1).float().log()
+
+        num_minu = logits_last + logp  # (N, T)
+        num_subtra = logp_last + logits  # (N, T)
+        match = num_minu == num_subtra
+        swap = ~match & (num_minu < num_subtra)
+        assert torch.all(swap == ((logits_last < logits) & ~match)), k
+
+        num = torch.where(
+            swap,
+            num_subtra + torch.log1p(-((num_minu - num_subtra).exp())),
+            num_minu + torch.log1p(-((num_subtra - num_minu).exp())),
+        )
+        del num_minu, num_subtra
+
+        denom = torch.where(
+            swap,
+            logits + torch.log1p(-((logits_last - logits).exp())),
+            logits_last + torch.log1p(-((logits - logits_last).exp())),
+        )
+        denom = log_c_m_k + denom + logp_last
+
+        logp = torch.where(match, ninf.view(1, 1).expand_as(num), num - denom)
+        match_logp = (
+            torch.log1p(-logp.logsumexp(-1)) - match.float().sum(-1).log())
+        logp = torch.where(match, match_logp.unsqueeze(-1), logp)
+        logp = logp.masked_fill(b, ninf)
+        logp = logp.masked_fill(~still_sampling, 0.)
+
+        logits = logits.masked_fill(b, ninf)
+
+        # logits_sub_j = logits.T.unsqueeze(1).masked_fill(
+        #     next_sample.unsqueeze(-1), ninf)
+
+        # log_R_sub_j = shift_log_R(logits_sub_j, max_count - k)
+        # log_R_km1 = log_R_sub_j.gather(
+        #    0,
+        #    (
+        #        (counts - k).clamp(0).unsqueeze(0)
+        #        .expand_as(logits.T).unsqueeze(0)
+        #     )
+        # )[0]
+
+        # logp2 = logits + log_R_km1.T
+        # logp2 = torch.where(torch.isinf(logp2), ninf, logp2 - logp2.logsumexp(-1, keepdim=True))
+        # logp2 = logp2.masked_fill(~still_sampling, 0.)
+
+        # assert torch.allclose(logp, logp2, atol=1e-2), k
+
+        last = torch.distributions.OneHotCategorical(
+            logits=logp).sample().bool()
+        b |= last & still_sampling
+
+    return b.T.float().view(orig_shape)
