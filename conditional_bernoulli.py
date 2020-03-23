@@ -384,7 +384,9 @@ def altdraft_lsample(logits, counts):
         # )[0]
 
         # logp2 = logits + log_R_km1.T
-        # logp2 = torch.where(torch.isinf(logp2), ninf, logp2 - logp2.logsumexp(-1, keepdim=True))
+        # logp2 = torch.where(
+        #     torch.isinf(logp2),
+        #     ninf, logp2 - logp2.logsumexp(-1, keepdim=True))
         # logp2 = logp2.masked_fill(~still_sampling, 0.)
 
         # assert torch.allclose(logp, logp2, atol=1e-2), k
