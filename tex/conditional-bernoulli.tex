@@ -1,0 +1,179 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{latexsym,bm}
+\usepackage[tbtags]{amsmath}
+\usepackage{amssymb}
+\usepackage{cool}
+\usepackage[numbers]{natbib}
+\usepackage{cleveref}
+
+\title{The Conditional Bernoulli and its Application to Speech Recognition}
+\author{Sean Robertson}
+
+\begin{document}
+\maketitle
+
+\section{Motivations} \label{sec:motivations}
+
+A major challenge in speech recognition involves converting a variable number
+of speech frames $\{x_t\}_{t \in [0, T)}$ into a variable number of
+transcription tokens $\{c_\ell\}_{\ell \in [0, L)}$, where $L \ll T$. In hybrid
+architectures, $c_\ell$ are generated as a by-product of transitioning between
+states $s_t$ in a weighted finite-state transducer. In end-to-end neural ASR,
+this process is commonly achieved either with Connectionist Temporal
+Classification (CTC) \cite{gravesConnectionistTemporalClassification2006} or
+sequence-to-sequence (seq2seq) architectures
+\cite{bahdanauNeuralMachineTranslation2015}. The former introduces a special
+blank label; performs a one-to-many mapping $c_\ell \mapsto \tilde{c}_t^{(i)}$ by
+injecting blank tokens until the transcription matches length $T$ in all
+possible configurations $(i)$ during training; and removes all blank labels
+during testing. Seq2seq architectures first encode the speech frames $x_t$ into
+some encoding $h$, then some separate recurrent neural network conditions on
+$h$ to generate the token sequence $c_t$.
+
+In 2017, \citeauthor{luoLearningOnlineAlignments2017} developed a novel
+end-to-end speech recognizer. Given a prefix of acoustic feature frames
+including the current frame $\{x_{t'}\}_{t' \leq t < T}$ and a prefix of
+Bernoulli samples excluding the current frame $\{b_{t'}\}_{t' < t < T}$, the
+recognizer produces a Bernoulli sample for the current frame $B_t \sim
+P_B(b_t|x_{\leq t}, b_{<t})$, plus or minus some additional conditioned terms.
+Whenever $B_t = 1$, the model ``emits'' a token drawn from a class distribution
+conditioned on the same information $C_t \sim P_C(c_t|x_{\leq t}, b_{<t})$. The
+paper had two primary motivations. First, though it resembles a decoder in a
+\textit{seq2seq} architecture \cite{bahdanauNeuralMachineTranslation2015}, it
+does not need to encode the entire input sequence $x_t$ before it can
+start making decisions about what was said, making it suitable to online
+recognition. Second, we can interpret the emission points, or ``highs,'' of the
+Bernoulli sequence $B_t = 1$ as a form of hard alignment: the token output
+according to $C_t$ is unaffected by speech $x_{>t}$\footnote{
+%
+    This is not necessarily a synchronous alignment. $B_t = 1$ may occur well
+    after whatever caused the emission. The last high $\arg\max_{t' < t} B_{t'}
+    = 1$ cannot be assumed to bound the event to times after $t'$ for the same
+    reason. Finite $t$ and vanishing gradients will force some synchronicity,
+    however.
+%
+}.
+
+Because of the stochasticity introduced by sampling $B_t$ discretely, the
+network cannot backpropagate through the Bernoulli parameterizations $w$. Thus,
+the authors rely on a REINFORCE gradient estimate
+\cite{williamsSimpleStatisticalGradientfollowing1992}:
+%
+\begin{equation} \label{eq:luo_reinforce}
+    \pderiv{R}{w_t} = \mathbb{E}_{b_t} \left[
+        \left(\Sum{R_{t'}}{t' \geq t}\right)
+        \pderiv{\log P_B(b_t|x_{\leq t}, b_{<t})}{w_t}
+    \right]
+\end{equation}
+%
+Where
+%
+\begin{equation} \label{eq:luo_reward}
+    R_t = \begin{cases}
+        \log P_C(C_t = c_{\Sum{b_{t'}}{t' < t}}|x_{\leq t}, b_{<t})
+            & \text{if }B_t = 1 \\
+        0 & \text{if }B_t = 0
+    \end{cases}
+\end{equation}
+%
+The reward (\cref{eq:luo_reward}) is the log probability of the $k$-th class
+label, where $k$ is the number of high Bernoulli values up to and including
+time $t$ whenever $B_t = 1$. The return for time step $t$ accumulates the
+instantaneous rewards for all non-past time steps $t' \geq t$.
+
+In practice, using \cref{eq:luo_reinforce} is very slow to train and yields
+mixed results. The authors found it was necessary to add a baseline function
+and an entropy function in order to converge. In a later publication
+\cite{lawsonLearningHardAlignments2018}, a bidirectional model\footnote{
+%
+    Forgoing the motivation for online speech recognition.
+%
+} used Variational Inference to speed up convergence, though this failed to
+improve the overall performance of the model on the TIMIT corpus. The mixed
+performance and convergence of these models was blamed on the high-variance
+gradient estimate of \cref{eq:luo_reinforce}
+\cite{lawsonLearningHardAlignments2018}.
+
+We believe that the performance and convergence issues of these models are not
+due, at least in whole, to a high-variance estimate. Instead, we propose that
+the training objective has two other critical issues.
+
+First, under the current regime, there is no natural choice of reward for when
+$B_t = 0$. \Cref{eq:luo_reinforce} accumulates future rewards to mitigate this,
+but the choice to do so biases the system to emit as soon as possible to reduce
+the number of total frames accumulating negative rewards. This bias could
+explain why, without an additional ``entropy penalty,'' the model would learn
+to emit entirely at the beginning of the utterance
+\cite{luoLearningOnlineAlignments2017}.
+
+Second, in order to ensure the total number of high Bernoulli values matched
+the total number of labels $L$ during training, i.e. $\sum_t b_t = L$, the
+authors would force later samples to some specific value. This implies that
+$B_t \nsim P_B(b_t|\ldots)$, making the Monte Carlo estimate of
+\cref{eq:luo_reinforce} biased. This bias could interact with the previous
+issue to produce a model that learns to immediately and repeatedly emit without
+stopping, since $b_{\geq L} = 0$, pushing $P_B(b_t|\ldots) \to 1$.
+
+To solve both of these problems, we propose replacing the $T$ i.i.d. Bernoulli
+random variables $B_t$ sampled during training with a single sample $B$ from
+the Conditional Bernoulli (CB) distribution, discussed in \cref{sec:cb}. We
+will show that the switch elegantly supports the same inference procedure.
+Further, since the CB uses parameters generated at all time steps, rather than
+just the current time step, the rewards from when $B_t = 1$ will induce an
+error signal in the parameters for $B_{t'} = 0$. In addition to modifying
+\cref{eq:luo_reinforce}, we will also show how the CB can be applied to other
+gradient estimation methods, such as Straight-Through Estimators (STEs)
+\cite{bengioEstimatingPropagatingGradients2013} or RELAX-like estimators
+\cite{maddisonConcreteDistributionContinuous2017,grathwohlBackpropagationVoidOptimizing2018}.
+
+
+\section{The Conditional Bernoulli} \label{sec:cb}
+
+The Conditional Bernoulli, discussed initially by
+\citet{chenWeightedFinitePopulation1994}, is defined as
+%
+\begin{equation} \label{eq:cd}
+    P\left(b\middle|\sum_i b_i = k; w\right) = \frac{\prod_i w_i^{b_i}}
+        {\sum_{\left\{b' : \sum_\ell b_\ell' = k\right\}} \prod_j w_i^{b'_j}}
+\end{equation}
+%
+Where $w_i = p_i/(1 - p_i)$ are the odds of a Bernoulli random variable $B_i
+\sim P(b_i;w_i) = p_i^{b_i} (1 - p_i)^{(1 - b_i)} = w_i^{b_i} (1 - p_i)$.
+\Cref{eq:cd} reads as ``what is the probability that Bernoulli random variables
+$\{B_i\}_i$ have values $\{b_i\}_i$, given that exactly $k$ of them are high
+($\sum_i b_i = k$)?'' Letting $K = \sum_i B_i$, $K$ is a random variable that
+counts the total number of ``highs'' in a series of Bernoulli trials. $K$ is
+distributed according to the Poisson-Binomial distribution, a generalization of
+the Binomial distribution for when $p_i \neq p_j$. It is defined as
+%
+\begin{equation} \label{eq:pb}
+    \begin{split}
+    P(K = k;w) & = \sum_{\left\{b : \sum_\ell b_\ell = k\right\}} P(b;w) \\
+               & = \left(\prod_i (1 - p_i)\right)
+               \sum_{\left\{b : \sum_\ell b_\ell = k\right\}} \prod_j w_j^{b_j}
+    \end{split}
+\end{equation}
+%
+If we use \cref{eq:pb} to marginalize out $K$ from \cref{eq:cd}, we recover the
+independent Bernoulli probabilities:
+%
+\begin{equation}
+    \begin{split}
+    P(b; w) &= \sum_k P(b|k) P(k) \\
+            &= P(b|k') P(k') \text{ for some } k' = \sum_i b_i\\
+            &= \left(\prod_i (1 - p_i)\right)\frac{\prod_i w_i^{b_i}}
+                {\sum_{\left\{b' : \sum_\ell b_\ell' = k'\right\}}
+                    \prod_j w_i^{b'_j}}
+                \left(\sum_{\left\{b' : \sum_\ell b_\ell' = k'\right\}}
+                    \prod_j w_j^{b'_j}\right) \\
+            &= \prod_i (1 - p_i) w_i^{b_i}
+    \end{split}
+\end{equation}
+%
+
+
+\bibliographystyle{plainnat}
+\bibliography{conditional-bernoulli}
+
+\end{document}
