@@ -132,6 +132,7 @@ gradient estimation methods, such as Straight-Through Estimators (STEs)
 
 
 \section{The Conditional Bernoulli} \label{sec:cb}
+\subsection{Definitions} \label{sec:cb_defns}
 
 The Conditional Bernoulli distribution
 \cite{chenWeightedFinitePopulation1994,tilleUnequalProbabilityExponential2006,bondessonParetoSamplingSampford2006},
@@ -256,7 +257,7 @@ treatment of the CB. This procedure builds $A$ by iterating over Bernoulli
 trials and making binary decisions whether to include the trial in $A$. First,
 choose and fix an order $j$ in which samples $I$ will potentially be
 added to $A$. Let $A_{r_j,j} \subseteq A_j = (t_1, t_2, \ldots, t_j)$ be the
-subset of $r_j$ samples ($|A_{r, j}| = r_j$) that have been added to $A$. At
+subset of $r_j$ samples ($|A_{r_j, j}| = r_j$) that have been added to $A$. At
 every step $j$, we choose to either add $t_j$ to $A_{r_{j-1},j-1}$ and
 recurse on $A_{r_j,j} = A_{r_{j-1},j-1} \cup \{t_j\}$ or exclude $t_j$
 and recurse on $A_{r_j, j} = A_{r_{j-1},j-1}$. The
@@ -305,6 +306,17 @@ $i$ is present and the probability of the data can be estimated via
 \cref{eq:cb}. The authors note that it was insufficient to rely on the implicit
 prior induced by training via \cref{eq:cb} and had to explicitly learn and
 condition on it.
+
+\citet{xieReparameterizableSubsetSampling2019} approximates the $n$-choose-$k$
+sampling procedure by using a top-$k$ procedure called Weighted Reservoir
+Sampling. This procedure produces samples in an identical fashion to the
+Plackett-Luce (PL) distribution \cite{yellottRelationshipLuceChoice1977}, which
+has also been explored in the realm of gradient estimation
+\cite{gadetskyLowvarianceBlackboxGradient2020}. While the PL distribution has a
+similar construction to the DB, its top-$k$ rankings do not have a uniform
+distribution over permutations and, as such, the PL does not match the
+expectation of the CB. Nonetheless, estimators involving the DB can be
+trivially modified to sample from the PL.
 
 \subsection{REINFORCE Objective} \label{sec:reinforce}
 
@@ -455,12 +467,12 @@ the entire set of odds from all frames. While there are ways to decompose
 would still be distributed according to the log-odds of non-past trials
 $w_{\geq t}$.
 
-In \Cref{sec:cb}, we noted that an expectation over a DB variable will yield
-the same expected value as the same expectation over a CB variable assuming
-that the value function in the expectation is not conditioned on the order in
-which samples are drafted. The total reward in \cref{eq:cb_reinforce} satisfies
-this criterion. Thus the global DB REINFORCE objective maximizes the same
-expectation as the CB REINFORCE objective:
+In \Cref{sec:cb_defns}, we noted that an expectation over a DB variable will
+yield the same expected value as the same expectation over a CB variable
+assuming that the value function in the expectation is not conditioned on the
+order in which samples are drafted. The total reward in \cref{eq:cb_reinforce}
+satisfies this criterion. Thus the global DB REINFORCE objective maximizes the
+same expectation as the CB REINFORCE objective:
 %
 \begin{equation} \label{eq:db_reinforce}
     \pderiv{R}{\theta} = \pderiv{\log P(L)}{\theta} +
@@ -530,6 +542,144 @@ will cancel out the tendencies. By alternating directions, on average, every
 weight $w_t$ should receive a signal from $L / 2$ nonzero rewards $R_t$.
 
 \subsection{Continuous relaxations} \label{sec:relaxations}
+
+A continuous relaxation is a continuous random variable that approximates
+(relaxes) some discrete random variable. Of particular note is the
+Concrete/Gumbel-Softmax distribution
+\cite{maddisonConcreteDistributionContinuous2017,jangCategoricalReparameterizationGumbelSoftmax2017},
+which approximates a categorical random variable $B \in [1, N]$ with odds
+$\{w_n\}_{n \in [1, N]}$, Gumbel noise
+$G_n = -\log(-\log U_n), U_n \sim Uniform(0, 1)$, and a scalar
+temperature $\lambda \in \mathbb{R}^+$. The Concrete random variable
+$Z \in \{x \in [0, 1]^N; \Sum{x_n}{n} = 1\}$ is defined as
+%
+\begin{equation} \label{eq:concrete}
+    Z_n = \frac{\Exp{(\log w_n + G_n)/\lambda}}
+            {\Sum{\Exp{(\log w_{n'} + G_{n'})/\lambda}}{n',1,N}}
+\end{equation}
+
+A categorical sample $B \sim P(n; N)$ can be recovered from a Concrete sample
+in two equivalent manners. First, by the Gumbel-Max trick
+\cite{yellottRelationshipLuceChoice1977}:
+%
+\begin{equation} \label{eq:gumbel_max}
+P(\forall n'. Z_n \geq Z_{n'}) = \frac{w_n}{\Sum{w_{n'}}{n',1,N}} = P(B = n)
+\end{equation}
+%
+Which implies that $B = H(Z) = \arg_n \Max{Z_n}$ is a Categorical sample.
+Alternatively, $Z$ approaches a one-hot representation of $B$ as
+$\lambda \to 0$:
+%
+\begin{equation} \label{eq:zero_temperature}
+    P(\lim_{\lambda \to 0} Z_n = 1) = \frac{w_n}{\Sum{w_{n'}}{n',1,N}}
+    = P(B = n)
+\end{equation}
+
+When $N = 2$, $P(B = n)$ is Bernoulli, the Concrete variable is defined as
+%
+\begin{equation} \label{eq:concrete_bernoulli}
+    Z = \frac{1}{1 + \Exp{-(\log w + D)/\lambda}}, D = \log U - \log (1 - U)
+\end{equation}
+%
+and the deterministic mapping $B = H(Z) = 1_{Z > 0.5}$.
+
+Using the mapping $\Prod{w_a}{a \in A} = w'$, the CB can be considered a
+categorical distribution and suitable for a Concrete relaxation. Unfortunately,
+using this mapping directly would convert an $N$-length vector of weights $w_n$
+to a vector of $N$-choose-$k$ weights, which is intractable for large $N$.
+The numerator in \cref{eq:concrete} cannot be teased into a combination of
+random variables $W_1(w_1), W_2(w_2), \ldots$, because the Gumbel noise
+$G_n$, which would now represent the combination of noise of the $W_a$ terms,
+would no longer be independent of $G_{n'}, n' \neq n$. Thus, the CB is not
+directly suited to continuous relaxation.
+
+However, reframing the CB in terms of intermediate variables defined in the
+DB and IDB recursive definitions will allow us a tractable number of
+independent, non-identical random variables to relax. Specifically, we will
+relax the recursive step distributions in \cref{eq:draft,eq:id_step}.
+The drafting procedure in \cref{eq:draft} can be reframed as a categorical
+distribution over $T - j$, where $P(i \in A_j|\ldots) \mapsto w'_i$. We can
+use the Concrete distribution to relax the draft and repeat the relaxation
+$L$ times, with a combined representation of size $\Sum{T - j}{j,0,L-1}$
+values. Similarly, the choice of including $t_j$ in the sample $A_{r_j, j}$
+from \cref{eq:id_step} is a binary decision and can be reframed as a
+Bernoulli distribution where $P(t_j \in A_{r_j, j}|\ldots) \mapsto p_{t_j}$.
+Again, the Concrete distribution can be used to relax each of the $T$
+decisions, with a combined representation of size $T$.
+
+While both the DB and IDB relaxations are continuous within a single step,
+discontinuities will arise between steps. This is because the probabilities of
+the next step are conditioned on a discrete decision $H(Z)$ made in the
+previous step. Better continuous relaxations that smooth the decision function
+across steps may exist, and are left for future work.
+
+When the objective can be reframed in terms of the relaxation $Z$, a network
+can start by optimizing a high temperature $\lambda$, then slowly lower it over
+the course of training so that $Z$ approaches the discrete distribution. At
+test time, the deterministic mapping $H(Z)$ can be used. Unfortunately, our
+objective requires $L$ hard choices of frames to emit on. A relaxed emission
+does not make sense, since we need to come up with $L$ distinct distributions
+for each of the class labels in sequence.
+
+We focus on two uses of continuous relaxations with a discrete objective. The
+first is to use a RELAX-based gradient estimator
+\cite{grathwohlBackpropagationVoidOptimizing2018,tuckerREBARLowvarianceUnbiased2017}.
+RELAX-based gradient estimators augment the REINFORCE estimator with some
+additional terms that are intendent to reduce its variance. Letting $B$ be
+a discrete random variable of a continuous relaxation $Z$, the gradient of
+the expected value of some $f$ (where $f$ can be a reward, e.g.) is defined
+as
+%
+\begin{equation} \label{eq:relax}
+    \pderiv{\mathbb{E}_b[f(b)]}{\theta} =
+    \mathbb{E}_b\left[
+        \left(f(b) - \mathbb{E}_{z|b}[c(z)]\right)\pderiv{\log P(b)}{\theta}
+        - \pderiv{\mathbb{E}_{z|b}[c(z)]}{\theta}
+    \right] + \pderiv{\mathbb{E}_z[c(z)]}{\theta}
+\end{equation}
+%
+Where $c(z)$ is a control variate, e.g. a neural network trained on the
+values of the relaxation to minimize the difference between the objective
+$f(b)$ and itself. $P(z|b)$ is the truncated distribution over $Z$ such that
+the value of $Z$ obeys the relationship $H(Z) = b$.
+
+The second is the so-called Straight-Through (ST) estimator
+\cite{bengioEstimatingPropagatingGradients2013,jangCategoricalReparameterizationGumbelSoftmax2017}.
+An ST estimator uses the discrete sample $H(X)$ during the forward pass, and
+estimates the partial derivative of $H(X)$ in the backward pass with that of
+$X$, i.e. $\pderiv{H(X)}{\theta} \approx \pderiv{X}{\theta}$. This estimator is
+biased, but can work well in practice. If we output a one-hot representation
+$H(X^{(\ell)}) = b^{(\ell)} \in \{0, 1\}^T, b_t^{(\ell)} = 1_{t = n^{(\ell)}}$
+for the $\ell$-th drafted sample, adding them together $b =
+\Sum{b^{(\ell)}}{\ell,1,L}$ produces our CB sample. If we substitute
+$\pderiv{b_t^{(\ell)}}{\theta} \approx \pderiv{X_t^{(\ell)}}{\theta}$ then
+$\pderiv{b_t}{\theta} = \Sum{\pderiv{b_t^{(\ell)}}{\theta}}{\ell}$ is
+well-defined. Alternatively, we can construct $b$ by concatenating together the
+relaxed Bernoulli trials of the IDB, $b = [b^{(1)}, b^{(2)}, \ldots, b^{(T)}],
+b^{(t)} = H(X^{(t)})$. Again, the partial derivatives are well-defined:
+$\pderiv{b_t}{\theta} = \pderiv{b^{(t)}}{\theta}$. From there, we maximize
+the likelihood of the data using the conditional distribution derived
+from \cref{eq:luo_factorization}:
+%
+\begin{equation} \label{eq:st_lik}
+    P(c|b, L) = \Prod{P(c_{\ell_t}|h_t, b_{\leq t})^{b_t}}{t,1,T}
+\end{equation}
+%
+where $h_t$ is a hidden state of the network at timestep $t$. Conditioning on
+$b_{\leq t}$ is implicit in the definition of $c_{\ell_t}$, though this
+conditioning is ignored by the ST estimator.
+
+By taking the log-probability, only the timesteps where $B_t = 1$ will have
+nonzero loss. Were the relaxation a series of independent Bernoulli trials,
+only the odds $w_t$ of those trials would be updated in backpropagation. Since
+both \cref{eq:draft,eq:id_step} involve all ``future'' odds, the CB-based ST
+estimators will update more weights with the likelihood of the data. The DB has
+a clear advantage in this regard: drafting involves $T - j + 1$ odds for the
+$j$-th draft, whereas the IDB involves only $T - t + 1$ odds. Since the ST
+estimators already ignore conditioning on past labels, we can ensure that, on
+average, the each weight receives $L / 2$ updates from the data by shuffling
+the order in which timesteps are processed $t_j$. In either case, optimizing
+the PB term $\pderiv{P(L)}{\theta}$ will give a blanket update to all weights.
 
 \bibliographystyle{plainnat}
 \bibliography{conditional-bernoulli}
