@@ -66,6 +66,7 @@ def lsample(logits, counts):
 
 def probs(w, b):
     # in w = b = (T, *)
+    # out p = (*)
     counts = b.sum(0).long()
     w = w.masked_fill(~b.bool(), 1.)
     num = w.prod(0)
@@ -75,6 +76,7 @@ def probs(w, b):
 
 def lprobs(logits, b):
     # in logits = b = (T, *)
+    # out lp = (*)
     counts = b.sum(0).long()
     logits = logits.masked_fill(~b.bool(), 0.)
     num = logits.sum(0)
