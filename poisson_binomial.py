@@ -20,7 +20,7 @@ def naive_R(w, k_max):
     return R
 
 
-def shift_R(w, k_max, keep_hist=False):
+def shift_R(w, k_max, keep_hist=False, reverse=False):
     # in w = (T, *)
     # out R = (k_max + 1, *) if keep_hist is False, otherwise
     # R = (T + 1, k_max + 1, *)
@@ -29,8 +29,11 @@ def shift_R(w, k_max, keep_hist=False):
     w = w.unsqueeze(1)
     if keep_hist:
         hist = [torch.cat([R0, Rrest])]
-    for T in range(w.shape[0]):
-        Rrest = Rrest + w[T] * torch.cat([R0, Rrest[:-1]], 0)
+    T = w.shape[0]
+    for t in range(T):
+        if reverse:
+            t = T - t - 1
+        Rrest = Rrest + w[t] * torch.cat([R0, Rrest[:-1]], 0)
         if keep_hist:
             hist.append(torch.cat([R0, Rrest]))
     if keep_hist:
@@ -39,7 +42,7 @@ def shift_R(w, k_max, keep_hist=False):
         return torch.cat([R0, Rrest])
 
 
-def shift_log_R(logits, k_max, keep_hist=False):
+def shift_log_R(logits, k_max, keep_hist=False, reverse=False):
     # in logits = (T, *)
     # out log_R = (k_max + 1, *)
     log_R0 = torch.zeros_like(logits[:1, ...])
@@ -48,13 +51,16 @@ def shift_log_R(logits, k_max, keep_hist=False):
     logits = logits.unsqueeze(1)
     if keep_hist:
         hist = [torch.cat([log_R0, log_Rrest])]
-    for T in range(logits.shape[0]):
+    T = logits.shape[0]
+    for t in range(T):
+        if reverse:
+            t = T - t - 1
         x = torch.cat([log_R0, log_Rrest[:-1]], 0)
         # if x is infinite or logits is infinite, we don't want a gradient
         x = torch.where(
-            torch.isfinite(x + logits[T]),
-            x + logits[T],
-            x.detach() + logits[T].detach()
+            torch.isfinite(x + logits[t]),
+            x + logits[t],
+            x.detach() + logits[t].detach()
         )
         if k_max:
             log_Rrest = torch.logsumexp(torch.stack([log_Rrest, x], 0), 0)
