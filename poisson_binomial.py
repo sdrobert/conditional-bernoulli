@@ -50,7 +50,12 @@ def shift_log_R(logits, k_max, keep_hist=False):
         hist = [torch.cat([log_R0, log_Rrest])]
     for T in range(logits.shape[0]):
         x = torch.cat([log_R0, log_Rrest[:-1]], 0)
-        x = torch.where(torch.isfinite(x), x + logits[T], x)
+        # if x is infinite or logits is infinite, we don't want a gradient
+        x = torch.where(
+            torch.isfinite(x + logits[T]),
+            x + logits[T],
+            x.detach() + logits[T].detach()
+        )
         if k_max:
             log_Rrest = torch.logsumexp(torch.stack([log_Rrest, x], 0), 0)
         else:

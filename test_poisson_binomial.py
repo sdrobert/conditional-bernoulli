@@ -87,7 +87,9 @@ def test_shift_R_zero_weights():
     R_exp = []
     g_exp = []
     for w_len in w_lens.tolist():
-        w_n = torch.rand(w_len).requires_grad_(True)
+        w_n = torch.rand(w_len)
+        w_n[0] = 0.
+        w_n.requires_grad_(True)
         R_n = poisson_binomial.shift_R(w_n, k_max)
         g_n, = torch.autograd.grad(R_n, w_n, torch.ones_like(R_n))
         R_exp.append(R_n)
@@ -102,6 +104,7 @@ def test_shift_R_zero_weights():
     # zero weights can still have a gradient, but that shouldn't affect the
     # gradient of other weights
     for w_len, g_exp_n, g_act_n in zip(w_lens, g_exp, g_act.T):
+        assert torch.all(torch.isfinite(g_exp_n))
         assert torch.allclose(g_exp_n[:w_len], g_act_n[:w_len])
 
 
@@ -122,7 +125,9 @@ def test_shift_log_R_inf_logits():
     R_exp = []
     g_exp = []
     for logits_len in logits_lens.tolist():
-        logits_n = torch.randn(logits_len).requires_grad_(True)
+        logits_n = torch.randn(logits_len)
+        logits_n[0] = -float('inf')
+        logits_n.requires_grad_(True)
         R_n = poisson_binomial.shift_log_R(logits_n, k_max)
         g_n, = torch.autograd.grad(R_n, logits_n, torch.ones_like(R_n))
         R_exp.append(R_n)
@@ -136,6 +141,7 @@ def test_shift_log_R_inf_logits():
     assert torch.allclose(R_exp, R_act)
     g_act, = torch.autograd.grad(R_act, logits, torch.ones_like(R_act))
     for logits_len, g_exp_n, g_act_n in zip(logits_lens, g_exp, g_act.T):
+        assert not torch.any(torch.isnan(g_exp_n))
         assert torch.allclose(g_exp_n[:logits_len], g_act_n[:logits_len])
         # the gradient isn't really defined for -inf in the log-space, but it
         # works out to be the non-threatening zero here
