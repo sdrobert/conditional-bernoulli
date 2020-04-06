@@ -3,6 +3,25 @@ import torch
 import pytest
 
 
+# this isn't numerically stable
+def naive_R(w, k_max):
+    # in w = (S,)
+    S, = w.shape
+    assert 0 <= k_max
+    R = torch.ones(1, device=w.device)
+    T = (
+        ((-w).unsqueeze(0) ** torch.arange(1, k_max + 2).unsqueeze(1))
+        / w.unsqueeze(0)
+    ).sum(1)[1:].flip(0)  # [-1^{k+1} T(k), -1^k T(k - 1), ..., T(1)]
+    for k in range(1, k_max + 1):
+        if k <= S:
+            R_new = (R * T[-k:]).sum(0, keepdim=True) / k
+        else:
+            R_new = torch.zeros(1)
+        R = torch.cat([R, R_new], dim=0)
+    return R
+
+
 def test_naive_R():
     torch.manual_seed(10237)
     w = torch.rand(4)
@@ -18,7 +37,7 @@ def test_naive_R():
     ], 0)
     g_exp, = torch.autograd.grad(R_exp, w, torch.ones_like(R_exp))
     w.requires_grad_(True)
-    R_act = poisson_binomial.naive_R(w, 6)
+    R_act = naive_R(w, 6)
     assert R_exp.shape == R_act.shape
     assert torch.allclose(R_exp, R_act, atol=1e-5)
     g_act, = torch.autograd.grad(R_act, w, torch.ones_like(R_act))
@@ -29,10 +48,10 @@ def test_naive_R():
 def test_shift_R(reverse):
     torch.manual_seed(2154)
     w = torch.rand(50)
-    R_exp = poisson_binomial.naive_R(w, 10)
-    R_act = poisson_binomial.shift_R(w, 10, reverse=reverse)
+    R_exp = naive_R(w, 10)
+    R_act = poisson_binomial.R(w, 10, reverse=reverse)
     assert torch.allclose(R_exp, R_act)
-    R_act = poisson_binomial.shift_R(w.unsqueeze(-1).expand(-1, 30), 10)
+    R_act = poisson_binomial.R(w.unsqueeze(-1).expand(-1, 30), 10)
     assert torch.allclose(R_exp, R_act[..., 11])
 
 
@@ -59,7 +78,7 @@ def test_shift_R_history(reverse):
                 w1 * w3 + w1 * w4 + w2 * w3 + w2 * w4 + w3 * w4
             ]
         ]).T
-    Rhist_act = poisson_binomial.shift_R(
+    Rhist_act = poisson_binomial.R(
         w.unsqueeze(-1).expand(-1, 10), 2, True, reverse)
     assert torch.allclose(Rhist_exp, Rhist_act[..., 4])
 
@@ -73,9 +92,9 @@ def test_R_properties():
     w_sub_j = w.unsqueeze(0).masked_fill(
         torch.eye(T, dtype=bool).unsqueeze(-1), 0.).transpose(0, 1)
     assert torch.allclose(w_sub_j.sum(1) / (T - 1), w)
-    R_sub_j = poisson_binomial.shift_R(w_sub_j, k)
+    R_sub_j = poisson_binomial.R(w_sub_j, k)
     R_k_act = (R_sub_j[-2] * w).sum(0) / k
-    R = poisson_binomial.shift_R(w, k)
+    R = poisson_binomial.R(w, k)
     R_k_exp = R[-1]
     assert torch.allclose(R_k_act, R_k_exp)
 
@@ -85,8 +104,8 @@ def test_R_properties():
     # sum_i R(i, C) R(k - i, C^c) = R(k, C)
     w_left = w[:T // 2]
     w_right = w[T // 2:]
-    R_left = poisson_binomial.shift_R(w_left, k)
-    R_right = poisson_binomial.shift_R(w_right, k)
+    R_left = poisson_binomial.R(w_left, k)
+    R_right = poisson_binomial.R(w_right, k)
     R_k_act = (R_left * R_right.flip(0)).sum(0)
     assert torch.allclose(R_k_act, R_k_exp)
 
@@ -103,7 +122,7 @@ def test_shift_R_zero_weights(reverse):
         w_n = torch.rand(w_len)
         w_n[0] = 0.
         w_n.requires_grad_(True)
-        R_n = poisson_binomial.shift_R(w_n, k_max, reverse=reverse)
+        R_n = poisson_binomial.R(w_n, k_max, reverse=reverse)
         g_n, = torch.autograd.grad(R_n, w_n, torch.ones_like(R_n))
         R_exp.append(R_n)
         g_exp.append(g_n)
@@ -111,7 +130,7 @@ def test_shift_R_zero_weights(reverse):
     w = torch.nn.utils.rnn.pad_sequence(w)
     R_exp = torch.stack(R_exp, dim=-1)
     w.requires_grad_(True)
-    R_act = poisson_binomial.shift_R(w, k_max, reverse=reverse)
+    R_act = poisson_binomial.R(w, k_max, reverse=reverse)
     assert torch.allclose(R_exp, R_act)
     g_act, = torch.autograd.grad(R_act, w, torch.ones_like(R_act))
     # zero weights can still have a gradient, but that shouldn't affect the
@@ -126,8 +145,8 @@ def test_shift_R_zero_weights(reverse):
 def test_shift_log_R(keep_hist, reverse):
     torch.manual_seed(198236)
     w = torch.rand(50, 4, 30, 10)
-    R_exp = poisson_binomial.shift_R(w, 20, keep_hist, reverse)
-    R_act = poisson_binomial.shift_log_R(w.log(), 20, keep_hist, reverse).exp()
+    R_exp = poisson_binomial.R(w, 20, keep_hist, reverse)
+    R_act = poisson_binomial.lR(w.log(), 20, keep_hist, reverse).exp()
     assert torch.allclose(R_exp, R_act)
 
 
@@ -143,7 +162,7 @@ def test_shift_log_R_inf_logits(reverse):
         logits_n = torch.randn(logits_len)
         logits_n[0] = -float('inf')
         logits_n.requires_grad_(True)
-        R_n = poisson_binomial.shift_log_R(logits_n, k_max, reverse=reverse)
+        R_n = poisson_binomial.lR(logits_n, k_max, reverse=reverse)
         g_n, = torch.autograd.grad(R_n, logits_n, torch.ones_like(R_n))
         R_exp.append(R_n)
         g_exp.append(g_n)
@@ -152,7 +171,7 @@ def test_shift_log_R_inf_logits(reverse):
         logits, padding_value=-float('inf'))
     R_exp = torch.stack(R_exp, dim=-1)
     logits.requires_grad_(True)
-    R_act = poisson_binomial.shift_log_R(logits, k_max, reverse=reverse)
+    R_act = poisson_binomial.lR(logits, k_max, reverse=reverse)
     assert torch.allclose(R_exp, R_act)
     g_act, = torch.autograd.grad(R_act, logits, torch.ones_like(R_act))
     for logits_len, g_exp_n, g_act_n in zip(logits_lens, g_exp, g_act.T):

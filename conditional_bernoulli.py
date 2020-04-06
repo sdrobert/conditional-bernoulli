@@ -1,6 +1,6 @@
 import torch
 
-from poisson_binomial import shift_log_R, shift_R
+from poisson_binomial import lR, R
 
 
 def naive_sample(w, counts):
@@ -111,7 +111,7 @@ def draft_sample(w, counts):
 
         w_sub_j = w.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
 
-        R_sub_j = shift_R(w_sub_j, max_count - k)
+        R_sub_j = R(w_sub_j, max_count - k)
         R_km1 = R_sub_j.gather(
            0,
            (counts - k).clamp(0).unsqueeze(0).expand_as(w).unsqueeze(0)
@@ -159,7 +159,7 @@ def draft_lsample(logits, counts):
         logits_sub_j = logits.unsqueeze(1).masked_fill(
             next_sample.unsqueeze(-1), ninf)
 
-        log_R_sub_j = shift_log_R(logits_sub_j, max_count - k)
+        log_R_sub_j = lR(logits_sub_j, max_count - k)
         log_R_km1 = log_R_sub_j.gather(
            0,
            (
@@ -216,7 +216,7 @@ def altdraft_sample(w, counts):
     still_sampling = (counts >= 1).unsqueeze(-1)
     w_sub_j = w.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
 
-    R_sub_j = shift_R(w_sub_j, max_count - 1)
+    R_sub_j = R(w_sub_j, max_count - 1)
     R_km1 = R_sub_j.gather(
         0,
         (counts - 1).clamp(0).unsqueeze(0).expand_as(w).unsqueeze(0)
@@ -267,7 +267,7 @@ def altdraft_sample(w, counts):
 
         # w_sub_j = w.T.unsqueeze(1).masked_fill(next_sample.unsqueeze(-1), 0.)
 
-        # R_sub_j = shift_R(w_sub_j, max_count - k)
+        # R_sub_j = R(w_sub_j, max_count - k)
         # R_km1 = R_sub_j.gather(
         #    0,
         #    (counts - k).clamp(0).unsqueeze(0).expand_as(w.T).unsqueeze(0)
@@ -318,7 +318,7 @@ def altdraft_lsample(logits, counts):
     logits_sub_j = logits.unsqueeze(1).masked_fill(
         next_sample.unsqueeze(-1), ninf)
 
-    log_R_sub_j = shift_log_R(logits_sub_j, max_count - 1)
+    log_R_sub_j = lR(logits_sub_j, max_count - 1)
     log_R_km1 = log_R_sub_j.gather(
         0,
         (counts - 1).clamp(0).unsqueeze(0).expand_as(logits).unsqueeze(0)
@@ -374,7 +374,7 @@ def altdraft_lsample(logits, counts):
         # logits_sub_j = logits.T.unsqueeze(1).masked_fill(
         #     next_sample.unsqueeze(-1), ninf)
 
-        # log_R_sub_j = shift_log_R(logits_sub_j, max_count - k)
+        # log_R_sub_j = lR(logits_sub_j, max_count - k)
         # log_R_km1 = log_R_sub_j.gather(
         #    0,
         #    (
@@ -411,14 +411,14 @@ def direct_sample(w, counts):
     assert 0 <= max_count <= T
 
     b = []
-    Rhist = shift_R(w, max_count, True)  # [T + 1, ]
+    Rhist = R(w, max_count, True)  # [T + 1, ]
     U = torch.rand_like(w[0]) * Rhist[-1].gather(0, counts.unsqueeze(0))[0]
     # N.B. counts is now going to double for n - r in Chen '97
     for k in range(1, T + 1):
-        R = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
-        match = U >= R
+        R_k = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
+        match = U >= R_k
         b.insert(0, match)
-        U = torch.where(match, (U - R) / w[T - k], U)
+        U = torch.where(match, (U - R_k) / w[T - k], U)
         counts = counts - match.long()
     del Rhist, U
 
@@ -438,7 +438,7 @@ def direct_lsample(logits, counts):
     assert 0 <= max_count <= T
 
     b = []
-    Rhist = shift_log_R(logits, max_count, True)  # [T + 1, ]
+    Rhist = lR(logits, max_count, True)  # [T + 1, ]
     U = (
         torch.rand_like(logits[0]).log() +
         Rhist[-1].gather(0, counts.unsqueeze(0))[0]
@@ -461,7 +461,7 @@ def probs(w, b):
     counts = b.sum(0).long()
     w = w.masked_fill(~b.bool(), 1.)
     num = w.prod(0)
-    denom = shift_R(w, counts.max()).gather(0, counts.unsqueeze(0))[0]
+    denom = R(w, counts.max()).gather(0, counts.unsqueeze(0))[0]
     return num / denom
 
 
@@ -470,5 +470,5 @@ def lprobs(logits, b):
     counts = b.sum(0).long()
     logits = logits.masked_fill(~b.bool(), 0.)
     num = logits.sum(0)
-    denom = shift_log_R(logits, counts.max()).gather(0, counts.unsqueeze(0))[0]
+    denom = lR(logits, counts.max()).gather(0, counts.unsqueeze(0))[0]
     return num - denom

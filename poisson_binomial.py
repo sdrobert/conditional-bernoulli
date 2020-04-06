@@ -1,26 +1,7 @@
 import torch
 
 
-# this isn't numerically stable
-def naive_R(w, k_max):
-    # in w = (S,)
-    S, = w.shape
-    assert 0 <= k_max
-    R = torch.ones(1, device=w.device)
-    T = (
-        ((-w).unsqueeze(0) ** torch.arange(1, k_max + 2).unsqueeze(1))
-        / w.unsqueeze(0)
-    ).sum(1)[1:].flip(0)  # [-1^{k+1} T(k), -1^k T(k - 1), ..., T(1)]
-    for k in range(1, k_max + 1):
-        if k <= S:
-            R_new = (R * T[-k:]).sum(0, keepdim=True) / k
-        else:
-            R_new = torch.zeros(1)
-        R = torch.cat([R, R_new], dim=0)
-    return R
-
-
-def shift_R(w, k_max, keep_hist=False, reverse=False):
+def R(w, k_max, keep_hist=False, reverse=False):
     # in w = (T, *)
     # out R = (k_max + 1, *) if keep_hist is False, otherwise
     # R = (T + 1, k_max + 1, *)
@@ -42,7 +23,7 @@ def shift_R(w, k_max, keep_hist=False, reverse=False):
         return torch.cat([R0, Rrest])
 
 
-def shift_log_R(logits, k_max, keep_hist=False, reverse=False):
+def lR(logits, k_max, keep_hist=False, reverse=False):
     # in logits = (T, *)
     # out log_R = (k_max + 1, *)
     log_R0 = torch.zeros_like(logits[:1, ...])
@@ -78,13 +59,13 @@ def shift_log_R(logits, k_max, keep_hist=False, reverse=False):
 def probs(w):
     # in w = (T, *)
     # out p = (T, *)
-    return shift_R(w, len(w)) / (1 + w).prod(0, keepdim=True)
+    return R(w, len(w)) / (1 + w).prod(0, keepdim=True)
 
 
 def lprobs(logits):
     # in logits = (T, *)
     # out log_p = (T, *)
     return (
-        shift_log_R(logits, len(logits)) +
+        lR(logits, len(logits)) +
         torch.nn.functional.logsigmoid(-logits).sum(0, keepdim=True)
     )
