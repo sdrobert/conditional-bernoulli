@@ -3,6 +3,81 @@ import poisson_binomial
 import conditional_bernoulli
 
 
+def naive_sample(w, counts):
+    # in w = (T, *), counts = int or (*)
+    # out b = (T, *)
+    if not torch.is_tensor(counts):
+        counts = torch.tensor(counts, device=w.device)
+    w = w.detach()
+    counts = counts.expand_as(w[0]).detach()
+    T = w.shape[0]
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    min_count = counts.min()
+    assert min_count >= 0
+    with_replacement = torch.cartesian_prod(
+        *(torch.eye(2, device=w.device, dtype=bool)[-1],) * T).T
+
+    # first thing we do is get rid of the combinations that will *never* match
+    match = with_replacement.sum(0)
+    match = (match <= max_count) & (match >= min_count)
+    with_replacement = with_replacement[:, match]
+    combos = with_replacement.shape[-1]
+    del match
+
+    # get combos to last dimension
+    with_replacement = with_replacement.view(
+        *((T,) + (1,) * counts.dim() + (combos,)))
+    with_replacement = with_replacement.expand(
+        *((-1,) + counts.shape + (-1,)))
+
+    # then only keep the lines with matching counts
+    wo_replacement = with_replacement.sum(0) == counts.unsqueeze(-1)
+    wo_replacement = wo_replacement.unsqueeze(0) & with_replacement
+    del with_replacement
+
+    # copy weights to those lines
+    w = torch.where(
+        wo_replacement, w.unsqueeze(-1), torch.tensor(1., device=w.device))
+
+    # take the product of count weights
+    w = torch.where(
+        wo_replacement.any(0),
+        w.prod(0),
+        torch.zeros_like(w[0]),
+    )
+
+    # normalize into a categorical probability distribution and sample
+    if min_count:
+        # there should be at least one weight
+        p = w / w.sum(-1, keepdim=True)
+    else:
+        # some conditional expects zero samples, meaning no weights in the
+        # denominator. There's only one sample this can be, b = 0.
+        norm = w.sum(-1, keepdim=True)
+        zero_p = torch.ones_like(w)
+        zero_p = zero_p.masked_fill(wo_replacement.any(0), 0.)
+        p = torch.where(
+            norm > 0.,
+            w / norm,
+            zero_p
+        )
+        del zero_p, norm
+
+    idxs = torch.distributions.Categorical(probs=p).sample()
+    del w, p
+
+    # the categorical sample points us to the index in combos per batch
+    # element. We need to convert to the bernoulli sample by pulling out
+    # terms from wo_replacement
+    idxs = idxs.view(1, *counts.shape, 1)
+    idxs = idxs.expand(T, *(-1,) * (idxs.dim() - 1))
+    b = wo_replacement.gather(-1, idxs)[..., 0].float()
+    del wo_replacement
+
+    return b
+
+
 def test_naive_sample():
     torch.manual_seed(3472196)
     T, N = 10, 10000
@@ -11,7 +86,7 @@ def test_naive_sample():
     w = bern_p / (1 - bern_p)
     counts = torch.arange(T + 1)
     poisson_probs = poisson_binomial.probs(w)
-    s = conditional_bernoulli.naive_sample(
+    s = naive_sample(
         w.view(T, 1, 1).expand(T, T + 1, N),
         counts.unsqueeze(-1).expand(T + 1, N)
     )
@@ -24,57 +99,20 @@ def test_naive_sample():
     assert torch.allclose(bern_p, mc_probs, atol=1e-2)
 
 
-def test_draft_sample():
-    torch.manual_seed(32412)
-    T, N = 10, 100000
-    w = torch.rand(T)
-    counts = torch.tensor([3, 4]).unsqueeze(0).expand(N, 2)
-
-    s = conditional_bernoulli.naive_sample(
-        w.view(T, 1, 1).expand(T, N, 2), counts
-    )
-    props = s.mean(1)
-    del s
-
-    s = conditional_bernoulli.draft_sample(
-        w.view(T, 1, 1).expand(T, N, 2), counts
-    )
-    assert torch.all(s.int().sum(0) == counts)
-    props2 = s.mean(1)
-
-    assert torch.allclose(props, props2, atol=1e-2)
-
-
-def test_draft_lsample():
-    torch.manual_seed(472043)
-    T, N = 30, 12
-    theta = torch.randn(T, N)
-    theta[::2] = -float('inf')
-    counts = torch.randint(1, T // 2, (N,))
-
-    torch.manual_seed(1)
-    b1 = conditional_bernoulli.draft_sample(theta.exp(), counts)
-
-    torch.manual_seed(1)
-    b2 = conditional_bernoulli.draft_lsample(theta, counts)
-
-    assert torch.all(b1 == b2)
-
-
-def test_direct_sample():
+def test_sample():
     torch.manual_seed(40272)
     T, N = 10, 100000
     w = torch.rand(T)
     w[::2] = 0.
     counts = torch.tensor([4, 5]).unsqueeze(0).expand(N, 2)
 
-    s = conditional_bernoulli.naive_sample(
+    s = naive_sample(
         w.view(T, 1, 1).expand(T, N, 2), counts
     )
     props = s.mean(1)
     del s
 
-    s = conditional_bernoulli.direct_sample(
+    s = conditional_bernoulli.sample(
         w.view(T, 1, 1).expand(T, N, 2), counts
     )
     assert torch.all(s.int().sum(0) == counts)
@@ -83,7 +121,7 @@ def test_direct_sample():
     assert torch.allclose(props, props2, atol=1e-2)
 
 
-def test_direct_lsample():
+def test_lsample():
     torch.manual_seed(5429)
     T, N = 30, 12
     logits = torch.randn(T, N)
@@ -91,10 +129,10 @@ def test_direct_lsample():
     counts = torch.randint(1, T // 2 - 1, (N,))
 
     torch.manual_seed(1)
-    b1 = conditional_bernoulli.direct_sample(logits.exp(), counts)
+    b1 = conditional_bernoulli.sample(logits.exp(), counts)
 
     torch.manual_seed(1)
-    b2 = conditional_bernoulli.direct_lsample(logits, counts)
+    b2 = conditional_bernoulli.lsample(logits, counts)
 
     assert torch.all(b1.sum(0).int() == counts)
     assert torch.all(b2.sum(0).int() == counts)
