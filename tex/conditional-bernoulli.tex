@@ -7,6 +7,7 @@
 \usepackage{url}
 \usepackage[numbers]{natbib}
 \usepackage{cleveref}
+\usepackage{graphicx}
 
 \title{The Conditional Bernoulli and its Application to Speech Recognition}
 \author{Sean Robertson}
@@ -837,7 +838,7 @@ To show this is possible, we will use the BB distribution:
                 \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)P(c_\ell|t_\ell)}
                     {t_\ell,t_{\ell - 1} + 1,T - L + \ell}
             }{\ell,1,L} \\
-         &= \Sum{
+         &= P(L)\Sum{
             \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)P(c_\ell|t_\ell)}
                 {t_\ell,1,T}
             }{\ell,1,L}
@@ -851,6 +852,47 @@ Treating $P(t_\ell|t_{\ell - 1}, L)$ as the transition probability between
 states $t \in [1, T]$ and $P(c_\ell|t_\ell)$ as the emission probability,
 \cref{eq:marginalization} can be considered a Hidden Markov Model. Thus, $P(c)$
 can be efficiently calculated using the forward algorithm.
+
+Alternatively, recalling that $P(L)P(b|L) = P(b)$, the independent Bernoulli
+probabilities, then define a new distribution over augmented class label set
+$c_t' = c_t \cup \{\_\}$ as
+%
+\begin{equation} \label{eq:augmented_class}
+    P(c'_t) = \begin{cases}
+        P(B_t = 0) & c'_t = \_ \\
+        P(B_t = 1)P(c_t) & \text{otherwise}
+    \end{cases}
+\end{equation}
+%
+where the label ``\_'' acts as a stand-in for choosing not to emit at a given
+time step. Letting $\beta(c')$ remove all the ``\_'' labels from the augmented
+label set,
+%
+\begin{equation} \label{eq:ctc_obj}
+    \begin{split}
+        P(c) &= \Sum{\Sum{P(b_t)P(c_{\ell_t})^{b_t}}{t,1,T}}{b} \\
+             &= \sum_{\{c': |c| = T \land \beta(c') = c\}}\Sum{P(c'_t)}{t,1,T}
+    \end{split}
+\end{equation}
+
+This expression of the data likelihood is almost identical to that of CTC
+\cite{gravesConnectionistTemporalClassification2006}, with two restrictions.
+First, it assumes the distribution over labels factors as described in
+\cref{eq:augmented_class}. In general, \cref{eq:augmented_class} will lead
+to different gradient updates than directly parameterizing the augmented
+vocabulary $P(c'_t)$ since the blank label has its own parameterization.
+Second, $\beta(c')$ in \cref{eq:ctc_obj} does not reduce repeated labels in
+$c'$\footnote{
+%
+    To the best of our knowledge, there has been no attempt to explore whether
+    the reduction operation leads to any performance benefits over just using
+    the blank label. \citet{gravesConnectionistTemporalClassification2012}
+    mention that reducing repeated labels existed prior to the blank label in
+    the formation of the CTC objective.
+%
+}. Assuming it allows for the non-standard adjustment to $\beta$, the data
+likelihood marginalized over latent Bernoulli sequences can be trivially
+implemented using an existing CTC loss function.
 
 \bibliographystyle{plainnat}
 \bibliography{conditional-bernoulli}
