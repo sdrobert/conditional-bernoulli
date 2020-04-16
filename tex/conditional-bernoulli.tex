@@ -152,7 +152,7 @@ is defined as
 \end{equation}
 %
 Where $w_t = p_t/(1 - p_t)$ are the odds/weights of a Bernoulli random variable
-$B_t \sim P(b_t;w_t) = p_t^{b_t} (1 - p_t)^{(1 - b_t)} = w_t^{b_t} (1 - p_t)$.
+$B_t \sim P(b_t;w_t) = p_t^{b_t} (1 - p_t)^{(1 - b_t)} = w_t^{b_t}/(1 + w_t)$.
 \Cref{eq:cb} reads as ``what is the probability that Bernoulli random variables
 $B = \{B_t\}_{t \in [1,T]}$ have values $\{b_t\}_t$, given that exactly $k$ of
 them are high ($\Sum{b_t}{t} = k$)?'' Letting $K = \Sum{B_t}{t}$, $K$ is a
@@ -164,7 +164,7 @@ p_j$. It is defined as
 \begin{equation} \label{eq:pb}
     \begin{split}
     P(K = k;w) & = \Sum{P(b;w)}{\left\{b : \sum_t b_t = k\right\}} \\
-               & = \left(\Prod{1 - p_t}{t,1,T}\right)
+               & = \left(\Prod{1 + w_t}{t,1,T}\right)^{-1}
                \Sum{\Prod{w_t^{b_t}}{t,1,T}}{\left\{b : \sum_t b_t = k\right\}}
     \end{split}
 \end{equation}
@@ -176,10 +176,10 @@ independent Bernoulli probabilities:
     \begin{split}
     P(b; w) &= \Sum{P(b, k; w)}{k,0,T} = \Sum{P(b|k; w) P(k; w)}{k,0,T} \\
             &= P(b|k'; w) P(k'; w) \text{ for exactly one } k' = \sum_t b_t\\
-            &= \left(\Prod{1 - p_t}{t}\right)\frac{\Prod{w_t^{b_t}}{t,1,T}}
+            &= \left(\Prod{1 + w_t}{t}\right)^{-1}\frac{\Prod{w_t^{b_t}}{t,1,T}}
                 {\Sum{\Prod{w_t^{b'_t}}{t,1,T}}{\left\{b' : \sum_t b_t' = k'\right\}}}
                 \left(\Sum{\Prod{w_t^{b'_t}}{t,1,T}}{\left\{b' : \sum_t b_t' = k'\right\}}\right) \\
-            &= \Prod{(1 - p_t) w_t^{b_t}}{t,1,T}
+            &= \Prod{(1 + w_t)^{-1} w_t^{b_t}}{t,1,T}
     \end{split}
 \end{equation}
 %
@@ -378,30 +378,28 @@ variables such that the total number of emissions/highs matches the number of
 tokens $L$ during training. We will start by considering the probability of a
 token sequence $c = \{c_\ell\}_{\ell \in [1, L]}$ under a model and work our
 way to a REINFORCE objective. For brevity, we supress conditioning on the
-acoustic data $\{x_t\}_{t \in [0, T]}$ and model parameters.
+acoustic data $\{x_t\}_{t \in [1, T]}$ and model parameters.
 %
-\begin{equation*}
+\begin{equation} \label{eq:breakdown_condition}
 \begin{split}
     P(c)    &= P(c, L) \\
             &= \Sum{P(c, b, L)}{b} \\
-            &= P(L) \Sum{P(b|L)P(c|b, L)}{b} \\
-            &= P(L) \mathbb{E}_{b|L}\left[P(c|b, L)\right]
+            &= \Sum{P(b, L)P(c|b)}{b} \\
+            &= \mathbb{E}_{b; L}\left[P(c|b)\right]
 \end{split}
-\end{equation*}
+\end{equation}
 %
 Where $P(c) = P(c, L)$ follows from the fact that $L$ is a deterministic
-function of $c$. Note that the expectation conditioning on $L$ requires that
-the individual samples $B_t$ are not entirely independent\footnote{
-%
-    Except the pathological case where exactly $P(B_t = 1) = 1$ for exactly $L$
-    of $T$ variables, and $0$ otherwise.
-%
-}. Taking the log, we get
+function of $c$. We use the notation $b; L$ to indicate that the expectation is
+over the joint probability of variable $B$ and some fixed $L$, but not $B$
+given $L$.
+
+Taking the log, we get
 %
 \begin{equation*}
 \begin{split}
-    \log P(c) &= \log P(L) + \log \mathbb{E}_{b|L}\left[P(c|b, L)\right] \\
-              &\geq \log P(L) + \mathbb{E}_{b|L}\left[\log P(c|b, L)\right]
+    \log P(c) &= \log \mathbb{E}_{b; L}\left[P(c|b)\right] \\
+              &\geq \mathbb{E}_{b; L}\left[\log P(c|b)\right]
 \end{split}
 \end{equation*}
 %
@@ -410,16 +408,16 @@ bound $R$ and differentiating with respect to some parameter $\theta$, we get
 %
 \begin{equation} \label{eq:lower_bound}
 \begin{split}
-    \pderiv{R}{\theta}  &= \pderiv{\log P(L)}{\theta} + \pderiv{}{\theta}
-                           \mathbb{E}_{b|L}\left[\log P(c|b, L)\right]
+    \pderiv{R}{\theta}  &= \pderiv{}{\theta}
+                           \mathbb{E}_{b; L}\left[\log P(c|b)\right]
 \end{split}
 \end{equation}
 %
 We have yet to make any assumptions about the distributions of any $P(\cdot)$,
 except to say that $|c| = L$. To recover the REINFORCE objective of
-\cref{eq:luo_reinforce}, we remove all mention of $L$ (including $P(L)$) and
-factor the conditional probability of the class labels as
-\cite{lawsonLearningHardAlignments2018}:
+\cref{eq:luo_reinforce}, we assume $B$ is a sequence of independent Bernoulli
+trials. Further, we approximate $P(b, L) \approx P(b)$. Then we factor
+$P(c, b)$ as \cite{lawsonLearningHardAlignments2018}:
 %
 \begin{equation} \label{eq:luo_factorization}
     P(c,b) = \Prod{P(c_{\ell_t}|b_{\leq t}, c_{<\ell_t})^{b_t}
@@ -463,42 +461,102 @@ decomposes into\footnote{
             \right)}{t,1,T}\right]
 \end{split}
 \end{equation*}
-%
+
 The expectation of the sum of frame-wise objectives is the same as the
 expectation of the ``global'' objective, where no subset of $B$ are attributed
 to a given class label $c_\ell$:
 %
 \begin{equation*}
     \pderiv{}{\theta} \mathbb{E}_b\left[\log P(c|b)\right] =
-        \mathbb{E}_{b|L}\left[
+        \mathbb{E}_{b}\left[
             \Sum{\left(\pderiv{\log P(c_\ell|b)}{\theta} +
             \log P(c_\ell|b) \pderiv{}{\theta}\log P(b)}{\ell,1,L}
         \right)\right]
 \end{equation*}
 %
-However, the frame-wise - or ``local'' - signal is expected to be less noisy
+However, the frame-wise - or ``local'' - signal is assumed to be less noisy
 \cite{mnihNeuralVariationalInference2014}.
 
 We can see the two issues with the above REINFORCE objective discussed in
 \cref{sec:motivations} by observing \cref{eq:luo_factorization}. First,
-$c_{\ell_t}$ is undefined when $\ell_t$ exceeds $L$. Second, $P(c, b)$ is
-maximized whenever $B_t = 0$ for all $t$. The second problem (a tendency to
-emit early) may be solved by skipping the factorization of class label
-probabilities and using the aforementioned global objective. However, in this
-case, $L$ is still ignored and the first problem is still a problem.
-Furthermore, we would lose the ability to attribute credit to the $t$-th frame
-for classifying label $c_{\ell_t}$. Alternatively, we could remove the
-auto-regressive property of the network and make the Bernoulli trials
-independent $P(b) = \Prod{P(b_t)}{t,1,T}$, but all the ``low'' Bernoulli trials
-would receive no gradient updates.
+$c_{\ell_t}$ is undefined when $\ell_t$ exceeds $L$. This is only a problem
+because we ignored the $L$ term in the expectation $\mathbb{E}_{b; L}[\cdot]$.
+Given the restrictions that $\Sum{B_t}{t,1,T} = L$ and that $P(b, L) = P(b)$,
+we can define a distribution over the restriction of samples to those of length
+$L$ as
+%
+\begin{equation} \label{eq:restricted_dist}
+    P_L(b)
+        = \frac{P(b)I\left[\Sum{b_t}{t,1,T} = L\right]}
+               {\sum_{b'} P(b')I\left[\Sum{b'_t}{t,1,T} = L\right]}
+\end{equation}
+%
+Where $I[\cdot]$ is the indicator function. Since $P_L(b)$ differs from $P(b,
+L)$ only by a normalization constant, we can equivalently sample from $P_L(b)$
+or $P(b, L)$. Were $B_t \perp\!\!\!\perp B_{t'}$, $P_L(b) = P(b|L)$, the CB
+distribution, and we could sample from that. This is not true since the model
+is autoregressive. We could brute force $P_L(b)$ by calculating $P_L(b)$ over
+all $B$ such that $\Sum{B_t}{t} = L$, or draw an unaltered sample $B$ from
+$P(b)$ and reject it whenever $\Sum{B_t}{t} \neq L$. The former is infeasible.
+The latter can be feasible when $\Sum{p_t}{t,1,T} = L$, which we would expect
+for a model near convergence, but not at initialization.
 
-The primary concerns above may be addressed by assuming $P(L)$ is
-PB-distributed and $P(b|L)$ is CB-distributed. Letting $t_\ell$ be the inverse
+Second, $P(c, b)$ is maximized whenever $B_t = 0$ for all $t$. The second
+problem (a tendency to emit early) may be solved by skipping the factorization
+of class label probabilities and using the aforementioned global objective.
+However, in this case, $L$ is still ignored and the first problem is still a
+problem. Furthermore, we would lose the ability to attribute credit to the
+$t$-th frame for classifying label $c_{\ell_t}$.
+
+The easiest fix is to remove the auto-regressive property over Bernoulli trials
+and treat each as independent: $P(b) = \Prod{P(b_t)}{t,1,T}$. This allows us to
+sample $B$ from $P_L(b) = P(b|L)$. Further, since each trial is independent,
+the credit for $c_{\ell_t}$ belongs exclusively to the first emitting $B_t$ for
+that label (i.e. when $\ell_t \neq \ell_{t - 1}$). The the REINFORCE objective
+becomes
+%
+\begin{equation} \label{eq:b_nonauto}
+    \pderiv{R}{\theta} = \mathbb{E}_{b; L}\left[
+        \Sum{\left(\pderiv{R_t}{\theta} +
+        R_t\pderiv{}{\theta}\log P(b_t, L)
+        \right)}{t,1,T}\right]
+\end{equation}
+%
+where $R_t = b_t \log P(c_{\ell_t}|b_{\leq t}, c_{<\ell_t})$. This objective is
+well-defined, tractable, and is not maximized when $\forall t. B_t = 0$.
+However, we can no longer feed the previous Bernoulli sample into the model for
+each time step, nor will $w_t$ be updated unless $R_t \neq 0$. We expect both
+issues to slow down training.
+
+The former requirement is a by-product of sampling from $P(b, L) =
+P(b)I[\Sum{b_t}{t} = L]$. Since the only drawn samples $b$ have $L$ emissions,
+we either accept the possibility that the entire sample could be rejected or
+somehow incorporate $L$ into $P(b)$, requiring knowledge of future events. That
+being said, even though $w_t$ cannot condition on prior samples or class
+labels, $R_t = P(c_{\ell_t}|\ldots)$ can. The model can still be
+auto-regressive, as long as that auto-regression does not impact the odds of a
+given Bernoulli sample. We can re-inject the auto-regressive property into the
+model by treating $P(c_{\ell_t}|\cdots)$ as the output of an auto-regressive
+decoder whose decision to step forward depends on whether $B_t = 1$. We discuss
+some additional possibilities for auto-regressive dependencies in
+\cref{sec:fake_it}.
+
+To address the problem of update sparsity, we can factor the $P(L)$ term out
+of the expectation as:
+%
+\begin{equation}
+    \log P(c) \geq \log P(L) + \mathbb{E}_{b|L}\left[\log P(c|b)\right]
+\end{equation}
+%
+Assuming the model is not auto-regressive and $P(b)$ is the product of
+probabilities of independent Bernoulli trials, $P(L)$ is PB-distributed and
+$P(b|L)$ is CB-distributed. Letting $t_\ell$ be the inverse
 mapping of $\ell_t$, we define
 %
 \begin{equation} \label{eq:cb_factorization}
     P(c, b|L) = P(c|b, L)P(b|L) =
-        \left(\Prod{P(c_\ell|b_{t_{\leq \ell}})}{\ell,1,L}\right)P(b|L)
+        \left(\Prod{P(c_\ell|b_{t_{\leq \ell}}, c_{<\ell})}{\ell,1,L}\right)
+        P(b|L)
 \end{equation}
 %
 and plug the conditional probability $P(c|b, L)$ into the expectation in
@@ -512,18 +570,20 @@ and plug the conditional probability $P(c|b, L)$ into the expectation in
             \right)\right]
 \end{equation}
 %
-Where $R_\ell = \log P(c_\ell|b_{t_{\leq \ell}})$.
+Where $R_\ell = \log P(c_\ell|b_{t_{\leq \ell}}, c_{<\ell})$.
 
 Since the set of all samples $B \sim P(b|L)$ will have exactly $L$ highs
 $\Sum{B_t}{t} = L$, the decomposition of the class label sequence probability
 is well-defined. The pathological case where reward is maximized when $B_t$ is
 no longer a problem because we have switched to a global reward rather than a
-per-frame reward.
+per-frame reward. $P(L)$ can be optimized without estimation, and $P(b|L)$
+involves all the odds $w$ rather than just those that are high, like in
+\cref{eq:b_nonauto}.
 
 There are, however, two new issues introduced by \cref{eq:cb_reinforce}. The
 first is the same as if we stopped using a per-frame reward in
 \cref{eq:luo_reinforce}: we can no longer use the error signal for a specific
-$c_\ell$ to optimize a subset of $B$. The second problem is that $P(b|L)$ can
+$c_\ell$ to optimize a subset of The second problem is that $P(b|L)$ can
 no longer be auto-regressive. \Cref{eq:cb} uses the entire set of odds from all
 frames. While there are ways to decompose \cref{eq:cb} into a fixed-order
 series of binary decisions
@@ -678,10 +738,10 @@ A continuous relaxation is a continuous random variable that approximates
 Concrete/Gumbel-Softmax distribution
 \cite{maddisonConcreteDistributionContinuous2017,jangCategoricalReparameterizationGumbelSoftmax2017},
 which approximates a categorical random variable $B \in [1, N]$ with odds
-$\{w_n\}_{n \in [1, N]}$, Gumbel noise
-$G_n = -\log(-\log U_n), U_n \sim Uniform(0, 1)$, and a scalar
-temperature $\lambda \in \mathbb{R}^+$. The Concrete random variable
-$Z \in \{x \in [0, 1]^N; \Sum{x_n}{n} = 1\}$ is defined as
+$\{w_n\}_{n \in [1, N]}$, Gumbel noise $G_n = -\log(-\log U_n), U_n \sim
+Uniform(0, 1)$, and a scalar temperature $\lambda \in \mathbb{R}^+$. The
+Concrete random variable $Z \in \{x \in [0, 1]^N; \Sum{x_n}{n} = 1\}$ is
+defined as
 %
 \begin{equation} \label{eq:concrete}
     Z_n = \frac{\Exp{(\log w_n + G_n)/\lambda}}
@@ -893,6 +953,33 @@ $c'$\footnote{
 }. Assuming it allows for the non-standard adjustment to $\beta$, the data
 likelihood marginalized over latent Bernoulli sequences can be trivially
 implemented using an existing CTC loss function.
+
+\subsection{Inference} \label{sec:inference}
+
+\subsection{Fake it until you make it} \label{sec:fake_it}
+
+In \cref{sec:reinforce}, we discussed how it is infeasible to sample $B$ in an
+iterative, auto-regressive fashion, i.e. sample $B_t$ conditioned on $B_{<t}$
+given length restriction $L$. While this is still true, it is often the case
+that, at test time, ``samples'' are the result of some deterministic process.
+For example, the decision to emit at time step $t$ occurs whenever $w_t > 1$.
+If we replace stochastic sample $B_t \sim P(b_t|b_{<t}, x)$ as the input to our
+neural network with the test-time deterministic function $\tilde{B}_t =
+f(\tilde{B}_{<t}, x)$ \emph{during} training, then it is still possible to
+build an auto-regressive model. However, there is no guarantee that the
+deterministic samples $\tilde{B}$ will be the same as the sampled ones $B$. At
+the beginning of training, $\Sum{\tilde{B}_t}{t} \approx T/2 \gg \Sum{B_t}{t}$,
+meaning the model will (hopefully) learn to ignore $\tilde{B}$ early on. As the
+model converges and the distribution over $B$ becomes more sparse, $\tilde{B}
+\to B$ and the model can start to rely on $\tilde{B}$. We can also imitate
+conditioning $B_t$ on $c_{<\ell_t}$ by constructing $\tilde{\ell}_t$ from
+$\tilde{B}_{\leq t}$ and filling $c_{\tilde{\ell}_t}$ for $\tilde{\ell}_t > L$
+arbitrarily\footnote{
+%
+    Factoring $P(L)$ out of the expectation is critical here to ensure the
+    model is pushed to emit the correct number of labels.
+%
+}. Doing so will not bias the expectation over $B$.
 
 \bibliographystyle{plainnat}
 \bibliography{conditional-bernoulli}
