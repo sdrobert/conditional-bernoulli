@@ -84,6 +84,21 @@
   number = {3}
 }
 
+@inproceedings{chiuMonotonicChunkwiseAttention2018,
+  title = {Monotonic {{Chunkwise Attention}}},
+  booktitle = {6th {{International Conference}} on {{Learning Representations}}},
+  author = {Chiu, Chung-Cheng and Raffel, Colin},
+  year = {2018},
+  address = {{Vancouver, Canada}},
+  url = {https://openreview.net/forum?id=Hko85plCW},
+  series = {{{ICLR}} '18}
+}
+% == BibTeX quality report for chiuMonotonicChunkwiseAttention2018:
+% Missing required field 'pages'
+% Missing required field 'publisher'
+% ? Unsure about the formatting of the booktitle
+% ? Title looks like it was stored in title-case in Zotero
+
 @inproceedings{gadetskyLowvarianceBlackboxGradient2020,
   title = {Low-Variance Black-Box Gradient Estimates for the {{Plackett}}-{{Luce}} Distribution},
   booktitle = {Thirty-{{Fourth AAAI Conference}} on {{Artificial Intelligence}}},
@@ -211,6 +226,24 @@
   series = {{{ICML}} '14}
 }
 
+@inproceedings{raffelOnlineLineartimeAttention2017,
+  title = {Online and Linear-Time Attention by Enforcing Monotonic Alignments},
+  booktitle = {International {{Conference}} on {{Machine Learning}} ({{ICML}})},
+  author = {Raffel, Colin and Luong, Minh-Thang and Liu, Peter J. and Weiss, Ron J. and Eck, Douglas},
+  year = {2017},
+  month = aug,
+  volume = {70},
+  pages = {2837--2846},
+  publisher = {{PMLR}},
+  address = {{Sydney, Australia}},
+  url = {http://proceedings.mlr.press/v70/raffel17a.html},
+  abstract = {Recurrent neural network models with an attention mechanism have proven to be extremely effective on a wide variety of sequence-to-sequence problems. However, the fact that soft attention mechanisms perform a pass over the entire input sequence when producing each element in the output sequence precludes their use in online settings and results in a quadratic time complexity. Based on the insight that the alignment between input and output sequence elements is monotonic in many problems of interest, we propose an end-to-end differentiable method for learning monotonic alignments which, at test time, enables computing attention online and in linear time. We validate our approach on sentence summarization, machine translation, and online speech recognition problems and achieve results competitive with existing sequence-to-sequence models.},
+  pdf = {http://proceedings.mlr.press/v70/raffel17a/raffel17a.pdf},
+  series = {Proceedings of Machine Learning Research}
+}
+% == BibTeX quality report for raffelOnlineLineartimeAttention2017:
+% ? Unsure about the formatting of the booktitle
+
 @incollection{swerskyProbabilisticNchoosekModels2012,
   title = {Probabilistic N-Choose-k Models for Classification and Ranking},
   booktitle = {Advances in {{Neural Information Processing Systems}}},
@@ -258,6 +291,33 @@
   abstract = {This article presents a general class of associative reinforcement learning algorithms for connectionist networks containing stochastic units. These algorithms, called REINFORCE algorithms, are shown to make weight adjustments in a direction that lies along the gradient of expected reinforcement in both immediate-reinforcement tasks and certain limited forms of delayed-reinforcement tasks, and they do this without explicitly computing gradient estimates or even storing information from which such estimates could be computed. Specific examples of such algorithms are presented, some of which bear a close relationship to certain existing algorithms while others are novel but potentially interesting in their own right. Also given are results that show how such algorithms can be naturally integrated with backpropagation. We close with a brief discussion of a number of additional issues surrounding the use of such algorithms, including what is known about their limiting behaviors as well as further considerations that might be used to help develop similar but potentially more powerful reinforcement learning algorithms.},
   journal = {Machine Learning},
   number = {3}
+}
+
+@inproceedings{wuExactHardMonotonic2019,
+  title = {Exact Hard Monotonic Attention for Character-Level Transduction},
+  booktitle = {Proceedings of the 57th {{Annual Meeting}} of the {{Association}} for {{Computational Linguistics}}},
+  author = {Wu, Shijie and Cotterell, Ryan},
+  year = {2019},
+  month = jul,
+  pages = {1530--1537},
+  publisher = {{Association for Computational Linguistics}},
+  address = {{Florence, Italy}},
+  doi = {10.18653/v1/P19-1148},
+  abstract = {Many common character-level, string-to-string transduction tasks, e.g., grapheme-to-phoneme conversion and morphological inflection, consist almost exclusively of monotonic transduction. Neural sequence-to-sequence models with soft attention, non-monotonic models, outperform popular monotonic models. In this work, we ask the following question: Is monotonicity really a helpful inductive bias in these tasks? We develop a hard attention sequence-to-sequence model that enforces strict monotonicity and learns alignment jointly. With the help of dynamic programming, we are able to compute the exact marginalization over all alignments. Our models achieve state-of-the-art performance on morphological inflection. Furthermore, we find strong performance on two other character-level transduction tasks. Code is available at https://github.com/shijie-wu/neural-transducer.},
+  series = {{{ACL}} '19}
+}
+
+@inproceedings{wuHardNonmonotonicAttention10,
+  title = {Hard Non-Monotonic Attention for Character-Level Transduction},
+  booktitle = {Proceedings of the 2018 {{Conference}} on {{Empirical Methods}} in {{Natural Language Processing}}},
+  author = {Wu, Shijie and Shapiro, Pamela and Cotterell, Ryan},
+  year = {10},
+  pages = {4425--4438},
+  publisher = {{Association for Computational Linguistics}},
+  address = {{Brussels, Belgium}},
+  doi = {10.18653/v1/D18-1473},
+  abstract = {Character-level string-to-string transduction is an important component of various NLP tasks. The goal is to map an input string to an output string, where the strings may be of different lengths and have characters taken from different alphabets. Recent approaches have used sequence-to-sequence models with an attention mechanism to learn which parts of the input string the model should focus on during the generation of the output string. Both soft attention and hard monotonic attention have been used, but hard non-monotonic attention has only been used in other sequence modeling tasks and has required a stochastic approximation to compute the gradient. In this work, we introduce an exact, polynomial-time algorithm for marginalizing over the exponential number of non-monotonic alignments between two strings, showing that hard attention models can be viewed as neural reparameterizations of the classical IBM Model 1. We compare soft and hard non-monotonic attention experimentally and find that the exact algorithm significantly improves performance over the stochastic approximation and outperforms soft attention.},
+  series = {{{EMNLP}} '18}
 }
 
 @inproceedings{xieReparameterizableSubsetSampling2019,
