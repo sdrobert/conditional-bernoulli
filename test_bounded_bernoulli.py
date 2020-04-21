@@ -51,3 +51,21 @@ def test_lsample():
     assert torch.all((b2 >= 0).sum(0).int() == counts)
 
     assert torch.all(b1 == b2)
+
+
+def test_probs():
+    torch.manual_seed(31017)
+    T, N = 7, 20
+    w = torch.rand(T, N)
+    counts = torch.randint(1, T + 1, (N,))
+    b = bounded_bernoulli.sample(w, counts)
+    w.requires_grad_(True)
+
+    p = bounded_bernoulli.probs(w, b)
+    g, = torch.autograd.grad(p, w, torch.ones_like(p))
+    # every weight should have a gradient, if from the first draft alone
+    assert not torch.any(torch.isclose(g, torch.tensor(0.)))
+
+    b = to_one_hot(b, T)
+    p2 = conditional_bernoulli.probs(w, b)
+    assert torch.allclose(p.prod(0), p2)
