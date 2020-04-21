@@ -68,9 +68,9 @@ def probs(w, b):
     # in w = b = (T, *)
     # out p = (*)
     counts = b.sum(0).long()
+    denom = R(w, counts.max()).gather(0, counts.unsqueeze(0))[0]
     w = w.masked_fill(~b.bool(), 1.)
     num = w.prod(0)
-    denom = R(w, counts.max()).gather(0, counts.unsqueeze(0))[0]
     return num / denom
 
 
@@ -78,7 +78,7 @@ def lprobs(logits, b):
     # in logits = b = (T, *)
     # out lp = (*)
     counts = b.sum(0).long()
+    denom = lR(logits, counts.max()).gather(0, counts.unsqueeze(0))[0]
     logits = logits.masked_fill(~b.bool(), 0.)
     num = logits.sum(0)
-    denom = lR(logits, counts.max()).gather(0, counts.unsqueeze(0))[0]
     return num - denom

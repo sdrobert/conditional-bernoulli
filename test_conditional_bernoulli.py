@@ -142,7 +142,7 @@ def test_lsample():
 
 def test_probs():
     torch.manual_seed(234701)
-    T, N = 50, 13
+    T, N = 12, 13
     w = torch.rand(T, N)
     w[::3] = 0.
     b = torch.randint(0, 2, (T, N), dtype=bool)
@@ -150,7 +150,7 @@ def test_probs():
     counts = b.sum(0).long()
 
     pb_prob = poisson_binomial.probs(w).gather(0, counts.unsqueeze(0))[0]
-    bern_prob = torch.where(b, w / (1. + w), 1 - w / (1. + w))
+    bern_prob = torch.where(b, w / (1. + w), 1 / (1. + w))
     prob_exp = bern_prob.prod(0) / pb_prob
     assert not torch.any(prob_exp == 0.)
 
@@ -160,7 +160,7 @@ def test_probs():
 
 def test_lprobs():
     torch.manual_seed(3284701)
-    T, N = 102, 18
+    T, N = 12, 18
     logits = torch.randn(T, N)
     logits[::4] = -float('inf')
     b = torch.randint(0, 2, (T, N), dtype=bool)
