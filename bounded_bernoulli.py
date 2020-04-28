@@ -141,3 +141,47 @@ def probs(w, b):
 
     p += [dummy_ps] * (v - max_count)
     return torch.stack(p, 0).view(v, *orig_shape[1:])
+
+
+def lprobs(logits, b):
+    # in logits = (T, *), b = (v, *)
+    # out = (v, *)
+
+    orig_shape = logits.shape
+    T = orig_shape[0]
+    counts = (b >= 0).long().sum(0)
+    max_count = counts.max().item()
+    assert 0 <= max_count <= T
+    if not max_count:
+        return torch.zeros_like(b, dtype=logits.dtype)
+
+    Rhist = lR(logits, max_count, True, True).flip(0)
+
+    # this function is mostly index selection. To avoid two gathers on Rhist,
+    # we flatten arrays and perform a single take() per index selection.
+    Rhist = Rhist.flatten()  # ((T + 1) * (max_count + 1) * N,)
+    N = len(Rhist) // ((T + 1) * (max_count + 1))
+    v = b.shape[0]
+    counts = counts.flatten()  # (N,)
+    logits = logits.flatten()  # (T * N,)
+    b = b.flatten(1)  # (v, N)
+    t_lm1 = torch.full_like(b[0], -1)  # (N,)
+    N_range = torch.arange(N, dtype=torch.long, device=logits.device)
+    L_offs = N
+    T_offs = (max_count + 1) * L_offs
+    dummy_ps = torch.zeros(N, device=logits.device, dtype=logits.dtype)
+
+    lp = []
+    for l in range(1, max_count + 1):
+        Lm1 = counts - l  # (N,)
+        t_l = b[l - 1]  # (N,)
+        R_t_l = Rhist.take(
+            ((t_l + 1) * T_offs + Lm1 * L_offs + N_range).clamp(0))
+        R_t_lm1 = Rhist.take(
+            ((t_lm1 + 1) * T_offs + (Lm1 + 1) * L_offs + N_range).clamp(0))
+        logits_t_l = logits.take((t_l * N + N_range).clamp(0))
+        lp.append(torch.where(Lm1 < 0, dummy_ps, logits_t_l + R_t_l - R_t_lm1))
+        t_lm1 = t_l
+
+    lp += [dummy_ps] * (v - max_count)
+    return torch.stack(lp, 0).view(v, *orig_shape[1:])

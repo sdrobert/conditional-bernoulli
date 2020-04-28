@@ -69,3 +69,24 @@ def test_probs():
     b = to_one_hot(b, T)
     p2 = conditional_bernoulli.probs(w, b)
     assert torch.allclose(p.prod(0), p2)
+
+
+def test_lprobs():
+    torch.manual_seed(3284701)
+    T, N = 13, 20
+    logits = torch.randn(T, N)
+    logits[::2] = -float('inf')
+    counts = torch.randint(1, T // 2, (N,))
+    b = bounded_bernoulli.lsample(logits, counts)
+
+    logits.requires_grad_(True)
+    p1 = bounded_bernoulli.lprobs(logits, b).exp()
+    g1, = torch.autograd.grad(p1, logits, torch.ones_like(p1))
+
+    logits.requires_grad_(True)
+    w = logits.exp()
+    p2 = bounded_bernoulli.probs(w, b)
+    g2, = torch.autograd.grad(p2, logits, torch.ones_like(p2))
+
+    assert torch.allclose(p1, p2, atol=1e-5)
+    assert torch.allclose(g1, g2, atol=1e-5)
