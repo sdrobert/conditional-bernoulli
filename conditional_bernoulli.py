@@ -19,14 +19,16 @@ def sample(w, counts):
     assert 0 <= max_count <= T
 
     b = []
-    Rhist = R(w, max_count, True)  # [T + 1, ]
+    # Rhist adds odds in reverse order, so R[1] could include w_T or not,
+    # and R[T] could include w_1 or not.
+    Rhist = R(w, max_count, True, True)  # [T + 1, ]
     U = torch.rand_like(w[0]) * Rhist[-1].gather(0, counts.unsqueeze(0))[0]
     # N.B. counts is now going to double for n - r in Chen '97
     for k in range(1, T + 1):
         R_k = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
         match = U >= R_k
-        b.insert(0, match)
-        U = torch.where(match, (U - R_k) / w[T - k], U)
+        b.append(match)
+        U = torch.where(match, (U - R_k) / w[k - 1], U)
         counts = counts - match.long()
     del Rhist, U
 
@@ -46,7 +48,7 @@ def lsample(logits, counts):
     assert 0 <= max_count <= T
 
     b = []
-    Rhist = lR(logits, max_count, True)  # [T + 1, ]
+    Rhist = lR(logits, max_count, True, True)  # [T + 1, ]
     U = (
         torch.rand_like(logits[0]).log() +
         Rhist[-1].gather(0, counts.unsqueeze(0))[0]
@@ -55,9 +57,9 @@ def lsample(logits, counts):
     for k in range(1, T + 1):
         R = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
         match = U >= R
-        b.insert(0, match)
+        b.append(match)
         U = torch.where(
-            match, U + torch.log1p(-((R - U).exp())) - logits[T - k], U)
+            match, U + torch.log1p(-((R - U).exp())) - logits[k - 1], U)
         counts = counts - match.long()
     del Rhist, U
 
