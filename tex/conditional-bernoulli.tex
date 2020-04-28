@@ -1,13 +1,16 @@
 \documentclass{article}
 \usepackage[utf8]{inputenc}
 \usepackage{latexsym,bm}
-\usepackage[tbtags]{amsmath}
+\usepackage{mathtools}
 \usepackage{amssymb}
 \usepackage{cool}
 \usepackage{url}
 \usepackage[numbers]{natbib}
 \usepackage{cleveref}
 \usepackage{graphicx}
+
+\newcommand{\gbinom}{\genfrac[]\z@{}}
+\newcommand{\ind}{\perp\!\!\!\!\perp}
 
 \title{The Conditional Bernoulli and its Application to Speech Recognition}
 \author{Sean Robertson}
@@ -19,19 +22,19 @@
 
 A major challenge in speech recognition involves converting a variable number
 of speech frames $\{x_t\}_{t \in [1, T]}$ into a variable number of
-transcription tokens $\{c_\ell\}_{\ell \in [1, L]}$, where $L \ll T$. In hybrid
-architectures, $c_\ell$ are generated as a by-product of transitioning between
+transcription tokens $\{y_\ell\}_{\ell \in [1, L]}$, where $L \ll T$. In hybrid
+architectures, $y_\ell$ are generated as a by-product of transitioning between
 states $s_t$ in a weighted finite-state transducer. In end-to-end neural ASR,
 this process is commonly achieved either with Connectionist Temporal
 Classification (CTC) \cite{gravesConnectionistTemporalClassification2006} or
 sequence-to-sequence (seq2seq) architectures
 \cite{bahdanauNeuralMachineTranslation2015}. The former introduces a special
-blank label; performs a one-to-many mapping $c_\ell \mapsto \tilde{c}_t^{(i)}$
+blank label; performs a one-to-many mapping $y_\ell \mapsto \tilde{y}_t^{(i)}$
 by injecting blank tokens until the transcription matches length $T$ in all
 possible configurations $(i)$ during training; and removes all blank labels
 during testing. Seq2seq architectures first encode the speech frames $x_t$ into
 some encoding $h$, then some separate recurrent neural network conditions on
-$h$ to generate the token sequence $c_t$.
+$h$ to generate the token sequence $y_t$.
 
 In 2017, \citeauthor{luoLearningOnlineAlignments2017} developed a novel
 end-to-end speech recognizer. Given a prefix of acoustic feature frames
@@ -40,14 +43,14 @@ Bernoulli samples excluding the current frame $\{b_{t'}\}_{t' \in [t+1,T]}$,
 the recognizer produces a Bernoulli sample for the current frame $B_t \sim
 P(b_t|x_{\leq t}, b_{<t})$, plus or minus some additional conditioned terms.
 Whenever $B_t = 1$, the model ``emits'' a token drawn from a class distribution
-conditioned on the same information $C_t \sim P(c_t|x_{\leq t}, b_{<t})$. The
+conditioned on the same information $Y_t \sim P(y_t|x_{\leq t}, b_{<t})$. The
 paper had two primary motivations. First, though it resembles a decoder in a
 \textit{seq2seq} architecture \cite{bahdanauNeuralMachineTranslation2015}, it
 does not need to encode the entire input sequence $x_t$ before it can start
 making decisions about what was said, making it suitable to online recognition.
 Second, we can interpret the emission points, or ``highs,'' of the Bernoulli
 sequence $B_t = 1$ as a form of hard alignment: the token output according to
-$C_t$ is unaffected by speech $x_{>t}$\footnote{
+$Y_t$ is unaffected by speech $x_{>t}$\footnote{
 %
     This is not necessarily a synchronous alignment. $B_t = 1$ may occur well
     after whatever caused the emission. The last high $\arg\max_{t' < t} B_{t'}
@@ -66,7 +69,7 @@ Thus, the authors rely on an estimate of the REINFORCE gradient
     \pderiv{R}{\theta} = \mathbb{E}_b\left[
         \Sum{\left(\pderiv{R_t}{\theta} +
         \left(\Sum{R_{t'}}{t' \geq t}\right)
-            \pderiv{}{\theta}\log P(b_t|b_{<t},c_{<\ell_{t}})
+            \pderiv{}{\theta}\log P(b_t|b_{<t},y_{<\ell_{t}})
         \right)}{t,1,T}\right]
 \end{equation}
 %
@@ -74,8 +77,8 @@ where
 %
 \begin{equation} \label{eq:luo_reward}
     R_t = \begin{cases}
-        \log P(C_t = c_{\Sum{b_{t'}}{t' < t}}|
-                x_{\leq t}, b_{<t}, c_{\Sum{b_{t'}}{t' < t - 1}})
+        \log P(Y_t = y_{\Sum{b_{t'}}{t' < t}}|
+                x_{\leq t}, b_{<t}, y_{\Sum{b_{t'}}{t' < t - 1}})
             & \text{if }B_t = 1 \\
         0 & \text{if }B_t = 0
     \end{cases}
@@ -100,42 +103,88 @@ gradient estimate of \cref{eq:luo_reinforce}
 \cite{lawsonLearningHardAlignments2018}.
 
 We believe that the performance and convergence issues of these models are not
-due, at least in whole, to a high-variance estimate. Instead, we propose that
-the training objective has two other critical issues.
+due, at least in whole, to a high-variance estimate. Instead, we propose that a
+bias in \cref{eq:luo_reward} is responsible for the early training difficulty.
 
-First, in order to ensure the total number of high Bernoulli values matched
-the total number of labels $L$ during training, i.e. $\sum_t b_t = L$, the
-authors would force later samples to some specific value. This implies that
-$B_t \nsim P_B(b_t|\ldots)$, making the Monte Carlo estimate of
-\cref{eq:luo_reinforce} biased.
+In order to ensure the total number of high Bernoulli values matched the total
+number of labels $L$ during training, i.e. $\sum_t b_t = L$, the authors would
+force later samples to some specific value. For example, if at point $t = T - L
++ \ell$ only $\ell$ samples emitted, $B_t = 1$ regardless of $P(b_t)$.
+Likewise, if $L$ samples emitted before $t$, $B_t = 0$.
 
-Second, under the current regime, $B_t = 0$ maximizes the per-step reward by
-avoiding a negative reward associated with $\log P(c_t|\ldots)$.
-\Cref{eq:luo_reinforce} accumulates future rewards to mitigate this, but the
-choice to do so biases the system to emit as soon as possible to reduce the
-number of total frames accumulating negative rewards. This bias could explain
-why, without an additional ``entropy penalty,'' the model would learn to emit
-entirely at the beginning of the utterance
-\cite{luoLearningOnlineAlignments2017}. It could interact with the previous
-issue to produce a model that learns to immediately and repeatedly emit without
-stopping, since $b_{\geq L} = 0$, pushing $P_B(b_t|\ldots) \to 1$.
+\begin{figure}
+    \centering
+    \begin{minipage}{.45\textwidth}
+        \begin{tabular}{c c c | c}
+            $b_1$ & $b_2$ & $b_3$ & Bias weight \\
+            \hline
+            0 & 0 & 0 & \\[-1.5ex]
+            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+            0 & 0 & 1 & $2 \times$ \\
+            0 & 1 & 0 & $2 \times$ \\
+            0 & 1 & 1 & \\[-1.5ex]
+            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+            1 & 0 & 0 & $4 \times$ \\
+            1 & 0 & 0 & \\[-1.5ex]
+            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+            1 & 0 & 1 & \\[-1.5ex]
+            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+            1 & 1 & 1 & \\[-1.5ex]
+            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+        \end{tabular}
+    \end{minipage}
+    \begin{minipage}{.45\textwidth}
+        \begin{tabular}{c | c}
+                        & Average $\sum R_t$ \\
+            \hline
+            Unbiased    & $R_1 / 3 + R_2 / 3 + R_3 / 3$ \\
+            Biased      & $R_1 / 2 + R_2 / 4 + R_3 / 4$
+        \end{tabular}
+    \end{minipage}
+    \caption{
+        Example of the effect of sample bias on total reward under a uniform
+        prior.}
+    \label{fig:bias}
+\end{figure}
 
-To solve both of these problems, we propose replacing the $T$ independent
+Though this bias appears harmless at first, it has great ramifications for the
+estimator early on during training. In short, the bias leads to earlier samples
+having greater impact on the total reward than later ones. \Cref{fig:bias}
+provides an illustrative example for $T = 3$ and $L = 1$. At the beginning of
+training, $P(b_t|\ldots) \approx 0.5$ and each $b$ is assumed to be equally
+likely. Though there are $2^3 = 8$ such equally-probable $b$, only
+$\binom{T}{L} = 3$ feature only one high Bernoulli value (i.e. $\sum b_t = L$).
+They are still equally probable, so an unbiased estimator should weigh the
+possibilities equally, leading to a total expected reward distributed evenly
+among the pointwise rewards. However, under the biased sampling procedure, the
+sequence $b = (1, 0, 0)$ will appear twice as often as the other two valid
+sequences, meaning $R_1$ has twice the impact on the total reward versus $R_2$
+or $R_3$.
+
+The bias also has a strong impact on the gradient estimates. We can see from
+\cref{eq:luo_reinforce} that $R_{\geq t} = 0$ once $\sum b_{<t} = L$. Thus,
+parameter $\theta$ will receive no update from such $t$. For $T \gg L$, we
+expect a model to be done emitting high Bernoulli trials after about $2L$
+frames, which would mean the tail $T - 2L$ frames would have no impact on the
+gradient. This could explain why, without an additional ``entropy penalty,''
+the model would learn to emit entirely at the beginning of the utterance
+\cite{luoLearningOnlineAlignments2017}.
+
+To solve the problem of bias, we propose replacing the $T$ independent
 Bernoulli random variables $B_t$ sampled during training with a single sample
 $B$ from the Conditional Bernoulli (CB) distribution during training. The CB
 conditions on the required number of high trials, which will make the objective
-well-defined during testing and avoiding the first problem entirely. The CB can
-be decomposed into a series of $T$ Bernoulli trials that condition on past
-trial results, similar to \cref{eq:luo_reward}, but with an arbitrary ordering
-of trials. We can alternate forward and backward conditioning to mitigate the
-system's tendency to emit early. If we also train the model to fit a certain
-prior, CB training elegantly segues into the same Bernoulli testing scheme. In
-addition to modifying \cref{eq:luo_reinforce}, we will also show how the CB can
-be relaxed to a continuous variable for use in Straight-Through estimators
+well-defined during training. It avoids placing undue emphasis on earlier
+trials, which should curtail the convergence problems faced by
+\citet{luoLearningOnlineAlignments2017}. In addition, the CB can be decomposed
+into Bernoulli trials that condition on past trial results, similar to
+\cref{eq:luo_reward}. We also show how the CB can be relaxed to a continuous
+variable for use in Straight-Through estimators
 \cite{bengioEstimatingPropagatingGradients2013,jangCategoricalReparameterizationGumbelSoftmax2017}
 or RELAX-like estimators
 \cite{maddisonConcreteDistributionContinuous2017,grathwohlBackpropagationVoidOptimizing2018}.
-
+Finally, we outline under which conditions the likelihood of $y$ can be
+exactly and efficiently calculated under the assumptions of the CB.
 
 \section{The Conditional Bernoulli} \label{sec:cb}
 \subsection{Definitions} \label{sec:cb_defns}
@@ -199,20 +248,20 @@ distribution into useful forms for different objectives.
 To better describe these algorithms, we define the set of indices $t \in [1, T]
 = I$ s.t. $B = \{B_t\}_{t \in I}$. The set $A \subseteq I$ maps to some sample
 $B$ such that all the high Bernoulli variables' indices can be found in $A$,
-i.e. $B_t = 1 \Leftrightarrow t \in A$. Then the CB can be restated as
+i.e. $B_t = 1 \iff t \in A$. Then the CB can be restated as
 %
 \begin{equation} \label{eq:cb_set}
-    P(A|k; w) = \frac{\prod_{a \in A} w_a}{R(k, I; w)}
+    P(A|k; w) = \frac{\prod_{a \in A} w_a}{C(k, I; w)}
 \end{equation}
 %
 where
 %
-\begin{equation} \label{eq:R}
-    R(v, S; w) = \Sum{\Prod{w_a}{a \in A'}}{\{A' \subseteq S : |A'| = v\}}
+\begin{equation} \label{eq:C}
+    C(v, S; w) = \Sum{\Prod{w_a}{a \in A'}}{\{A' \subseteq S : |A'| = v\}}
 \end{equation}
 %
-normalizes over all possible $k$-tuples of $w_i$ in some set $S$. \Cref{eq:R}
-can be considered a generalization of $T$-choose-$k$: $T$-choose-$k$ can be
+normalizes over all possible $k$-tuples of $w_i$ in some set $S$. \Cref{eq:C}
+can be considered a generalization of the binomial coefficient, which can be
 recovered by setting all $w_t = 1$. If we identify the product of weights from
 a set $A$ as a weight indexed by $A$ (i.e. $\Prod{w_a}{a \in A} \mapsto w'_A$),
 we can interpret \cref{eq:cb_set} as a categorical distribution.
@@ -227,8 +276,8 @@ A^c_{j - 1}$ is the $j$-th sample to be drafted into $A$ is defined as
 %
 \begin{equation} \label{eq:draft}
     P(t \in A_j|A_{j-1}, k; w) =
-        \frac{w_t R(k - j, A^c_{j-1} \setminus \{t\}; w)}
-        {(k - j + 1) R(k - j + 1, A^c_{j-1}; w)}
+        \frac{w_t C(k - j, A^c_{j-1} \setminus \{t\}; w)}
+        {(k - j + 1) C(k - j + 1, A^c_{j-1}; w)}
 \end{equation}
 %
 Terms in both the numerator and denominator of \cref{eq:draft} sum over suffix
@@ -242,11 +291,11 @@ The total probability of a drafted sample is
     \begin{split}
         P(A_k|k; w) &= \Prod{P(t_j \in A_j|A_{j-1}, k; w)}{j,1,k} \\
                     &= \Prod{\frac{
-                            w_{t_j} R(k - j, A^c_j, k)}{
-                            (k - j + 1)R(k - j + 1, A^c_{j - 1})}
+                            w_{t_j} C(k - j, A^c_j, k)}{
+                            (k - j + 1)C(k - j + 1, A^c_{j - 1})}
                         }{j,1,k} \\
                     &= \left(\Prod{w_{t_j}}{j,1,k}\right)
-                        \frac{R(0,A^c_k)}{\Factorial{k} R(k, I)} \\
+                        \frac{C(0,A^c_k)}{\Factorial{k} C(k, I)} \\
                     &= \frac{1}{\Factorial{k}} P(A|k, w)
     \end{split}
 \end{equation}
@@ -274,8 +323,8 @@ probability of including $t_j$ is
 %
 \begin{equation} \label{eq:id_step}
     P(t_j \in A_{r_j,j}|A_{r_{j-1}, j-1}, k; w) =
-        \frac{w_{t_j} R(k - r_{j-1} - 1, A_j^c; w)}
-             {R(k - r_{j-1}, A_{j-1}u^c; w)}
+        \frac{w_{t_j} C(k - r_{j-1} - 1, A_j^c; w)}
+             {C(k - r_{j-1}, A_{j-1}u^c; w)}
 \end{equation}
 
 From the perspective of Bernoulli trials, $P(t_j \in A_{r_j, j}|\ldots) =
@@ -294,9 +343,11 @@ equals
     P(b_{t_{\leq j}}|k - r_j; w)
         &= \Prod{P(b_{t_{j'}}|k - r_{j'}; w)}{j',1,j} \\
         &= \Prod{
-                \frac{w_{t_{j'}}^{b_{t_{j'}}}R(k - r_{j'}, A_j^c; w)}
-                     {R(k - r_{j' - 1}, A_{j-1}^c; w)}
-            }{j',1,j}
+                \frac{w_{t_{j'}}^{b_{t_{j'}}}C(k - r_{j'}, A_{j'}^c; w)}
+                     {C(k - r_{j' - 1}, A_{j'-1}^c; w)}
+            }{j',1,j} \\
+        &= \left(\Prod{w_{t_{j'}}^{b_{t_{j'}}}}{j',1,j}\right)
+           \frac{C(k - r_j, A^c_{j}; w)}{C(k, I; w)}
 \end{split}
 \end{equation}
 %
@@ -309,46 +360,95 @@ the CB distribution.
 We will find a novel third decomposition useful. This method combines the
 ID-Checking and Drafting methods so that the draft at a given step must come
 from a bounded suffix of weights. Define $A_{r, j_r} \subseteq A_{j_r} = (t_1,
-t_2, \ldots t_{j_r})$ to be the $r$ samples of $A_{j_r}$ that have been added
-to $A$. Define the probability that the next sample $j$ is drafted from
-$A_{j_r}^c$ to be
+t_2, \ldots t_{j_r})$ to be the $C$ samples of $A_{j_r}$ that have been added
+to $A$. Define the probability that the next sample $t_j \in A_{t_{j_{r - 1}}}$
+is the $C$-th drafted sample to be
 %
 \begin{equation} \label{eq:bounded_draft}
-    P(t_j \in A_{r, j_r}|k - r, j_{r-1}; w) =
-        \frac{w_{t_j}R(k - r, A_{t_j}^c;w)}
-             {R(k - r + 1, A_{t_{j_{r-1}}}^c;w)}
+    P(j = j_r|k - r, j_{r-1}; w) =
+        \frac{w_{t_j}C(k - r, A_{t_j}^c;w)}
+             {C(k - r + 1, A_{t_{j_{r-1}}}^c;w)}
 \end{equation}
 
 The draft is bound to the suffix $A_{t_{j_{r-1}}}^c = (t_{j_{r-1} + 1},
 t_{j_{r-1} + 2}, \ldots, t_{j_T})$. Further, the draft requires that if $t_j$
-is the $r$-th draft, the remaining drafts must come from indexed values
+is the $C$-th draft, the remaining drafts must come from indexed values
 $t_{>j}$. To balance the restriction, earlier $t_j$ will be more probable than
-later $t_j$ to be drafted earlier. Using the fact that $R(k - r + 1, A_{t_j}^c; w)
-= w_{t_j + 1} R(k - r, A_{t_j + 1}^c; w) + R(k - r + 1, A_{t_j + 1}^c; w)$, it
-is easily shown via induction that $R(k - r + 1, A_{t_{j_{r-1}}}^c; w) =
-\Sum{w_{t_j}R(k - r, A_{t_j}^c;w)}{j,j_{r-1}+1,T}$, proving that
+later $t_j$ to be drafted earlier. Using the fact that $C(k - r + 1, A_{t_j}^c;
+w) = w_{t_j + 1} C(k - r, A_{t_j + 1}^c; w) + C(k - r + 1, A_{t_j + 1}^c; w)$,
+it is easily shown via induction that $C(k - r + 1, A_{t_{j_{r-1}}}^c; w) =
+\Sum{w_{t_j}C(k - r, A_{t_j}^c;w)}{j,j_{r-1}+1,T}$, proving that
 \cref{eq:bounded_draft} is a valid probability distribution. The probability of
 a draft prefix is calculated as
 %
 \begin{equation} \label{eq:bb}
 \begin{split}
     P(A_{r, j_r}|k - r; w)
-        &= \Prod{P(t_{j_{r'}} \in A_{r', j_{r'}}|k - r', j_{r'-1}; w)}
+        &= \Prod{P(j_{r'}|k - r', j_{r'-1}; w)}
                 {r',1,r} \\
         &= \Prod{
-                \frac{w_{t_{j_{r'}}}R(k - r', A_{t_{j_{r'}}}^c;w)}
-                     {R(k - r' + 1, A_{t_{j_{r'-1}}}^c;w)}
+                \frac{w_{t_{j_{r'}}}C(k - r', A_{t_{j_{r'}}}^c;w)}
+                     {C(k - r' + 1, A_{t_{j_{r'-1}}}^c;w)}
             }{r',1,r} \\
         &= \left(\Prod{w_{t_{j_{r'}}}}{r',1,r}\right)
-            \frac{R(k - r, A_{t_{j_r}}^c; w)}{R(k, I; w)}
+            \frac{C(k - r, A_{t_{j_r}}^c; w)}{C(k, I; w)}
 \end{split}
 \end{equation}
 %
 We call this distribution the Bounded Bernoulli (BB). When $r = k$, the BB
 matches the CB. The BB fixes the multiple orderings problem of the DB. The
 conditional probabilities of \cref{eq:bounded_draft} can be efficiently
-calculated using intermediate values when calculating $R$ using Method 2
-from \cite{chenStatisticalApplicationsPoissonBinomial1997}.
+calculated using intermediate values when calculating $C$ using Method 2 from
+\cite{chenStatisticalApplicationsPoissonBinomial1997}. Observing
+\cref{eq:idb,eq:bb}, the probability of a prefix under the IDB matches a
+probability of some BB draft prefix whenever the last sampled Bernoulli from
+the IDB was high. Assuming $b_{t_j} = 1$ and $\Sum{b_{t_{j'}}}{j',1,j} = r$,
+$b_{t_{\leq j}} \mapsto A_{r,j_r}$ by the relation $b_{t'} = 1 \Leftrightarrow
+t' \in A_{r,j_r}$. The BB allows us to marginalize out prior drafted samples
+and ask what the probability is that $t_j$ is the $r$-th drafted sample:
+%
+\begin{equation} \label{eq:bb_margin}
+\begin{split}
+    P(j = j_r|k - r; w)
+        &= \sum_{A_{r, j_{r - 1}}} P(A_{r, j_r}|k - r; w) \\
+        &= \left(
+                \sum_{\{j_{< r} : j_{r'} < j\}}
+                \Prod{w_{t_{j_{r'}}}}{r',1,r-1}
+            \right)
+            \frac{w_{t_j}C(k - r, A_{t_j}^c; w)}{C(k, I; w)}  \\
+        &= \frac{C(r - 1, A_{t_{j-1}}; w)w_{t_j}C(k - r, A_{t_j}^c; w)}{C(k, I; w)}
+\end{split}
+\end{equation}
+%
+The second line features sums over the possible size-($r-1$) prefixes that
+could have been drafted prior to $j$, which means that each occurs within the
+subset $A_{t_{j - 1}}$. Intuitively, the numerator enumerates all possible
+prefixes and all possible suffixes around $w_{t_j}$, subject to the constraint
+that $r - 1$ elements come before and $k - r$ come after.
+
+$t_j$ being the $r$-th drafted sample and $t_j$ being the $(r + 1)$-th drafted
+sample are clearly disjoint events. Summing over these disjoint probabilities
+recovers the probability that $t_j$ belongs to $A$:
+%
+\begin{equation}
+\begin{split}
+    \Sum{P(j = j_r|k - r; w)}{r,1,k}
+        &= \frac{w_{t_j}}{C(k, I; w)}
+           \Sum{C(r - 1, A_{t_{j-1}}; w)C(k - r, A_{t_j}^c; w)}{r,1,k} \\
+        &= \frac{w_{t_j} C(k - 1, I \setminus \{t_j\})}{C(k, I; w)}
+\end{split}
+\end{equation}
+%
+where the second line follows from noting $A_{t_{j-1}} \cup A_{t_j}^c = I
+\setminus \{t_j\}$ and applying Proposition 1.c. from
+\citet{chenWeightedFinitePopulation1994}:
+%
+\begin{equation} \label{eq:vandermonde_r}
+    \forall S \subseteq I \quad C(k, I; w) =
+        \Sum{C(r, S; w)C(k - r, I \setminus S; w)}{r,0,k}
+\end{equation}
+%
+a generalization of Vandermonde's identity.
 
 Outside of statistics, \citet{swerskyProbabilisticNchoosekModels2012} linked
 the CB distribution with the goal of choosing a subset of $k$ items from a set
@@ -376,30 +476,29 @@ trivially modified to sample from the PL.
 From \cref{sec:motivations}, we are interested in sampling $T$ Bernoulli random
 variables such that the total number of emissions/highs matches the number of
 tokens $L$ during training. We will start by considering the probability of a
-token sequence $c = \{c_\ell\}_{\ell \in [1, L]}$ under a model and work our
+token sequence $y = \{y_\ell\}_{\ell \in [1, L]}$ under a model and work our
 way to a REINFORCE objective. For brevity, we supress conditioning on the
 acoustic data $\{x_t\}_{t \in [1, T]}$ and model parameters.
 %
 \begin{equation} \label{eq:breakdown_condition}
 \begin{split}
-    P(c)    &= P(c, L) \\
-            &= \Sum{P(c, b, L)}{b} \\
-            &= \Sum{P(b, L)P(c|b)}{b} \\
-            &= \mathbb{E}_{b; L}\left[P(c|b)\right]
+    P(y)    &= P(y, L) \\
+            &= \Sum{P(y, b, L)}{b} \\
+            &= \Sum{P(b, L)P(y|b)}{b} \\
+            &= \Sum{P(b|L)P(y|b)}{b|L} \\
+            &= P(L)\mathbb{E}_{b|L}\left[P(y|b)\right]
 \end{split}
 \end{equation}
 %
-Where $P(c) = P(c, L)$ follows from the fact that $L$ is a deterministic
-function of $c$. We use the notation $b; L$ to indicate that the expectation is
-over the joint probability of variable $B$ and some fixed $L$, but not $B$
-given $L$.
+Where $P(y) = P(y, L)$ follows from the fact that $L$ is a deterministic
+function of $y$.
 
 Taking the log, we get
 %
 \begin{equation*}
 \begin{split}
-    \log P(c) &= \log \mathbb{E}_{b; L}\left[P(c|b)\right] \\
-              &\geq \mathbb{E}_{b; L}\left[\log P(c|b)\right]
+    \log P(y) &= \log P(y) + \log \mathbb{E}_{b| L}\left[P(y|b)\right] \\
+              &\geq \log P(y) + \mathbb{E}_{b| L}\left[\log P(y|b)\right]
 \end{split}
 \end{equation*}
 %
@@ -408,23 +507,23 @@ bound $R$ and differentiating with respect to some parameter $\theta$, we get
 %
 \begin{equation} \label{eq:lower_bound}
 \begin{split}
-    \pderiv{R}{\theta}  &= \pderiv{}{\theta}
-                           \mathbb{E}_{b; L}\left[\log P(c|b)\right]
+    \pderiv{R}{\theta}  &= \pderiv{P(L)}{\theta} + \pderiv{}{\theta}
+                           \mathbb{E}_{b| L}\left[\log P(y|b)\right]
 \end{split}
 \end{equation}
 %
 We have yet to make any assumptions about the distributions of any $P(\cdot)$,
-except to say that $|c| = L$. To recover the REINFORCE objective of
+except to say that $|y| = L$. To recover the REINFORCE objective of
 \cref{eq:luo_reinforce}, we assume $B$ is a sequence of independent Bernoulli
 trials. Further, we approximate $P(b, L) \approx P(b)$. Then we factor
-$P(c, b)$ as \cite{lawsonLearningHardAlignments2018}:
+$P(y, b)$ as \cite{lawsonLearningHardAlignments2018}:
 %
 \begin{equation} \label{eq:luo_factorization}
-    P(c,b) = \Prod{P(c_{\ell_t}|b_{\leq t}, c_{<\ell_t})^{b_t}
-             P(b_t|b_{\leq t}, c_{<\ell_t})}{t,1,T}
+    P(y,b) = \Prod{P(y_{\ell_t}|b_{\leq t}, y_{<\ell_t})^{b_t}
+             P(b_t|b_{\leq t}, y_{<\ell_t})}{t,1,T}
 \end{equation}
 %
-where $\ell_t = \Sum{b_t'}{t',0,t}$.
+where $\ell_t = \Sum{b_t'}{t',1,t}$.
 
 Under these assumptions, the rightmost expectation in \cref{eq:lower_bound}
 decomposes into\footnote{
@@ -435,9 +534,9 @@ decomposes into\footnote{
 %
 \begin{equation*}
 \begin{split}
-    \pderiv{}{\theta} \mathbb{E}_{b}\left[\log P(c|b)\right]
+    \pderiv{}{\theta} \mathbb{E}_{b}\left[\log P(y|b)\right]
         &=  \pderiv{}{\theta} \mathbb{E}_{b}\left[
-            \Sum{b_t \log P(c_{\ell_t}|b_{\leq t}, c_{<\ell_t})}
+            \Sum{b_t \log P(y_{\ell_t}|b_{\leq t}, y_{<\ell_t})}
                 {t,1,T}\right]\\
         &=  \Sum{\pderiv{}{\theta} \mathbb{E}_{b}\left[R_t\right]}{t,1,T}
             \text{ from \cref{eq:luo_reward}} \\
@@ -446,178 +545,87 @@ decomposes into\footnote{
             \text{ since }R_t\text{ not based on }b_{>t} \\
         &=  \Sum{\mathbb{E}_{b_{\leq t}}\left[
                 \pderiv{R_t}{\theta} +
-                R_t \pderiv{}{\theta} \log P(b_{\leq t}|c_{<\ell_t})
+                R_t \pderiv{}{\theta} \log P(b_{\leq t}|y_{<\ell_t})
             \right]}{t,1,T} \\
         &= \Sum{\mathbb{E}_{b_{\leq t}}\left[
                 \pderiv{R_t}{\theta} +
                 R_t \Sum{
-                    \pderiv{}{\theta}\log P(b_{t'}|b_{t'-1},c_{<\ell_{t'}})}
+                    \pderiv{}{\theta}\log P(b_{t'}|b_{t'-1},y_{<\ell_{t'}})}
                     {t' \leq t}
             \right]}{t,1,T} \\
         &= \mathbb{E}_b\left[
             \Sum{\left(\pderiv{R_t}{\theta} +
             \left(\Sum{R_{t'}}{t' \geq t}\right)
-                \pderiv{}{\theta}\log P(b_t|b_{<t},c_{<\ell_{t}})
+                \pderiv{}{\theta}\log P(b_t|b_{<t},y_{<\ell_{t}})
             \right)}{t,1,T}\right]
 \end{split}
 \end{equation*}
 
 The expectation of the sum of frame-wise objectives is the same as the
-expectation of the ``global'' objective, where no subset of $B$ are attributed
-to a given class label $c_\ell$:
+expectation of the ``global'' objective, where no subset of $B$ is attributed
+to a given class label $y_\ell$:
 %
 \begin{equation*}
-    \pderiv{}{\theta} \mathbb{E}_b\left[\log P(c|b)\right] =
+    \pderiv{}{\theta} \mathbb{E}_b\left[\log P(y|b)\right] =
         \mathbb{E}_{b}\left[
-            \Sum{\left(\pderiv{\log P(c_\ell|b)}{\theta} +
-            \log P(c_\ell|b) \pderiv{}{\theta}\log P(b)}{\ell,1,L}
+            \Sum{\left(\pderiv{\log P(y_\ell|b)}{\theta} +
+            \log P(y_\ell|b) \pderiv{}{\theta}\log P(b)}{\ell,1,L}
         \right)\right]
 \end{equation*}
 %
 However, the frame-wise - or ``local'' - signal is assumed to be less noisy
 \cite{mnihNeuralVariationalInference2014}.
 
-We can see the two issues with the above REINFORCE objective discussed in
-\cref{sec:motivations} by observing \cref{eq:luo_factorization}. First,
-$c_{\ell_t}$ is undefined when $\ell_t$ exceeds $L$. This is only a problem
-because we ignored the $L$ term in the expectation $\mathbb{E}_{b; L}[\cdot]$.
-Given the restrictions that $\Sum{B_t}{t,1,T} = L$ and that $P(b, L) = P(b)$,
-we can define a distribution over the restriction of samples to those of length
-$L$ as
-%
-\begin{equation} \label{eq:restricted_dist}
-    P_L(b)
-        = \frac{P(b)I\left[\Sum{b_t}{t,1,T} = L\right]}
-               {\sum_{b'} P(b')I\left[\Sum{b'_t}{t,1,T} = L\right]}
-\end{equation}
-%
-Where $I[\cdot]$ is the indicator function. Since $P_L(b)$ differs from $P(b,
-L)$ only by a normalization constant, we can equivalently sample from $P_L(b)$
-or $P(b, L)$. Were $B_t \perp\!\!\!\perp B_{t'}$, $P_L(b) = P(b|L)$, the CB
-distribution, and we could sample from that. This is not true since the model
-is autoregressive. We could brute force $P_L(b)$ by calculating $P_L(b)$ over
-all $B$ such that $\Sum{B_t}{t} = L$, or draw an unaltered sample $B$ from
-$P(b)$ and reject it whenever $\Sum{B_t}{t} \neq L$. The former is infeasible.
-The latter can be feasible when $\Sum{p_t}{t,1,T} = L$, which we would expect
-for a model near convergence, but not at initialization.
+The decomposition of $P(y, b)$ from \cref{eq:luo_factorization} is only
+well-defined when $|y| = \Sum{b_t}{t,1,T}$. This is not a problem during
+testing but it is during training when $|y|$ is fixed. For that reason,
+\citet{luoLearningOnlineAlignments2017} hacks the Bernoulli sequence
+probabilities using the methods described in \cref{sec:motivations}. This
+produces a biased estimator with a variety of problems. If we can condition
+the joint on the number of highs in $y$, we can avoid the problem entirely.
 
-Second, $P(c, b)$ is maximized whenever $B_t = 0$ for all $t$. The second
-problem (a tendency to emit early) may be solved by skipping the factorization
-of class label probabilities and using the aforementioned global objective.
-However, in this case, $L$ is still ignored and the first problem is still a
-problem. Furthermore, we would lose the ability to attribute credit to the
-$t$-th frame for classifying label $c_{\ell_t}$.
-
-The easiest fix is to remove the auto-regressive property over Bernoulli trials
-and treat each as independent: $P(b) = \Prod{P(b_t)}{t,1,T}$. This allows us to
-sample $B$ from $P_L(b) = P(b|L)$. Further, since each trial is independent,
-the credit for $c_{\ell_t}$ belongs exclusively to the first emitting $B_t$ for
-that label (i.e. when $\ell_t \neq \ell_{t - 1}$). The the REINFORCE objective
-becomes
-%
-\begin{equation} \label{eq:nonauto_reinforce}
-    \pderiv{R}{\theta} = \mathbb{E}_{b; L}\left[
-        \Sum{\left(\pderiv{R_t}{\theta} +
-        R_t\pderiv{}{\theta}\log P(b_t, L)
-        \right)}{t,1,T}\right]
-\end{equation}
-%
-where $R_t = b_t \log P(c_{\ell_t}|b_{\leq t}, c_{<\ell_t})$. This objective is
-well-defined, tractable, and is not maximized when $\forall t. B_t = 0$.
-However, we can no longer feed the previous Bernoulli sample into the model for
-each time step, nor will $w_t$ be updated unless $R_t \neq 0$. We expect both
-issues to slow down training.
-
-The former requirement is a by-product of sampling from $P(b, L) =
-P(b)I[\Sum{b_t}{t} = L]$. Since the only drawn samples $b$ have $L$ emissions,
-we either accept the possibility that the entire sample could be rejected or
-somehow incorporate $L$ into $P(b)$, requiring knowledge of future events. That
-being said, even though $w_t$ cannot condition on prior samples or class
-labels, $R_t = P(c_{\ell_t}|\ldots)$ can. The model can still be
-auto-regressive, as long as that auto-regression does not impact the odds of a
-given Bernoulli sample. We can re-inject the auto-regressive property into the
-model by treating $P(c_{\ell_t}|\cdots)$ as the output of an auto-regressive
-decoder whose decision to step forward depends on whether $B_t = 1$. We discuss
-some additional possibilities for auto-regressive dependencies in
-\cref{sec:fake_it}.
-
-To address the problem of update sparsity, we can factor the $P(L)$ term out
-of the expectation as:
-%
-\begin{equation}
-    \log P(c) \geq \log P(L) + \mathbb{E}_{b|L}\left[\log P(c|b)\right]
-\end{equation}
-%
-Assuming the model is not auto-regressive and $P(b)$ is the product of
-probabilities of independent Bernoulli trials, $P(L)$ is PB-distributed and
-$P(b|L)$ is CB-distributed. Factoring $P(L)$ out of the expectation is
-desirable because a) expectations of the same value will have lower
-variance:
-%
-\begin{equation*}
-\begin{split}
-\mathbb{E}_{b; L}[X^2] - (\mathbb{E}_{b; L}[X])^2
-    &= P(L)\mathbb{E}_{b|L}[X^2] - P(L)^2\mathbb{E}_{b|L}[X]^2 \\
-    &= P(L)\left(\mathbb{E}_{b|L}[X^2] - P(L)\mathbb{E}_{b|L}[X]^2\right) \\
-    &\geq P(L)\left(\mathbb{E}_{b|L}[X^2] - \mathbb{E}_{b|L}[X]^2\right)
-\end{split}
-\end{equation*}
-%
-and b) it ensures all $w$ receive an error signal to backpropagate,
-regardless of whether they emit. Letting $t_\ell$ be the inverse mapping of
-$\ell_t$, we define
-%
-\begin{equation} \label{eq:cb_factorization}
-    P(c, b|L) = P(c|b, L)P(b|L) =
-        \left(\Prod{P(c_\ell|b_{t_{\leq \ell}}, c_{<\ell})}{\ell,1,L}\right)
-        P(b|L)
-\end{equation}
-%
-and plug the conditional probability $P(c|b, L)$ into the expectation in
-\cref{eq:lower_bound} to get the ``global'' CB REINFORCE gradient:
+The easiest fix to being ill-defined is to remove the auto-regressive property
+over Bernoulli trials and treat them as independent: $P(b) =
+\Prod{P(b_t)}{t,1,T}$. In this case, $P(b|L)$ is the CB a global REINFORCE
+objective can be defined as
 %
 \begin{equation} \label{eq:cb_reinforce}
-    \pderiv{R}{\theta} = \pderiv{\log P(L)}{\theta} +
-            \mathbb{E}_{b|L}\left[
-            \Sum{\left(\pderiv{R_\ell}{\theta} +
-            R_\ell \pderiv{}{\theta}\log P(b|L)}{\ell,1,L}
-            \right)\right]
+    \pderiv{R}{\theta} = \pderiv{P(L)}{\theta} + \mathbb{E}_{b|L}
+        \left[
+            \pderiv{\Sum{R_t}{t,1,T}}{\theta} +
+            \left(\Sum{R_t}{t,1,T}\right)\pderiv{}{\theta}
+            \log P(b|L)
+        \right]
 \end{equation}
 %
-Where $R_\ell = \log P(c_\ell|b_{t_{\leq \ell}}, c_{<\ell})$.
+\Cref{eq:cb_reinforce} is tractable and, unlike \cref{eq:luo_reinforce},
+well-defined. Unfortunately, it is no longer autoregressive nor local.
 
-Since the set of all samples $B \sim P(b|L)$ will have exactly $L$ highs
-$\Sum{B_t}{t} = L$, the decomposition of the class label sequence probability
-is well-defined. The pathological case where reward is maximized when $B_t$ is
-no longer a problem because we have switched to a global reward rather than a
-per-frame reward. $P(L)$ can be optimized without estimation, and $P(b|L)$
-involves all the odds $w$ rather than just those that are high, like in
-\cref{eq:nonauto_reinforce}. Unfortunately, \cref{eq:cb_reinforce} may result
-in a higher-variance estimate than \cref{eq:nonauto_reinforce} because the
-former uses a global signal rather than a local\footnote{
-%
-    Though the expected values are the same, the values need not be. Hence
-    they can have different variances.
-%
-}.
+The requirement that the model is not auto-regressive with respect to
+sequential $B_t$ is a by-product of sampling from $P(b|L)$. If $P(b|L)$ is a
+Conditional Bernoulli, the odds of each Bernoulli trial $w_t$ must be known
+before sampling a prefix. In an auto-regressive model, $w_t$ depends on the
+prefix of samples. We know of no way to determine all $w_t$ without iterating
+through all the sequences of Bernoulli trials with $L$ highs, which would be
+intractable. Some distribution other than the CB could be chosen for $P(b|L)$,
+but this distribution would need to be able to sample both $P(b_t|b_{< t}, L)$
+and $P(b_t|b_{< t})$ (i.e. with or without conditioning on the number of class
+labels) without conditioning on the odds of future events. To the best of our
+knowledge, existing research meets one, but not both, requirements.
 
-In \Cref{sec:cb_defns}, we mentioned that an expectation over a DB variable
-will yield the same expected value as the same expectation over a CB variable
-assuming that the value function in the expectation is not conditioned on the
-order in which samples are drafted. The total reward in \cref{eq:cb_reinforce}
-satisfies this criterion. Thus the global DB REINFORCE objective maximizes the
-same expectation as the CB REINFORCE objective:
-%
-\begin{equation} \label{eq:db_reinforce}
-    \pderiv{R}{\theta} = \pderiv{\log P(L)}{\theta} +
-            \mathbb{E}_{A_L|L}\left[
-            \Sum{\left(\pderiv{R_\ell}{\theta} +
-            R_\ell \pderiv{}{\theta}\log P(A_L|L)}{\ell,1,L}
-            \right)\right]
-\end{equation}
-%
-The advantage of the DB REINFORCE objective over the CB REINFORCE objective is
-it can leverage the relaxation of the DB, discussed in \cref{sec:relaxations}.
+That being said, even though $w_t$ cannot condition on prior samples or class
+labels, $R_t = b_t \log P(y_{\ell_t}|\ldots)$ can. The model can still be
+auto-regressive, as long as that auto-regression does not impact the odds of a
+given Bernoulli sample. We can re-inject the auto-regressive property into the
+model by treating $P(y_{\ell_t}|\cdots)$ as the output of an auto-regressive
+decoder whose decision to step forward depends on whether $B_t = 1$. We discuss
+some additional possibilities for auto-regressive dependencies in
+\cref{sec:fake_it}. From now on, we assume $P(b_t|b_{< t}) = P(b_t)$.
+
+If we still assume no prior dependence between Bernoulli trials $B_t$, the
+expectation is over the CB distribution $P(b|L)$. We can use the various
+decompositions of the CB defined in \cref{sec:cb_defns} to derive local
+gradient estimates.
 
 Our first frame-wise objective is courtesy of the IDB decomposition of the CB
 from \cref{eq:idb}. Though a given trial sample $B_{t_j}$ is conditioned on
@@ -625,12 +633,12 @@ non-past weights $w_{t_{\geq j}}$, it is only conditioned on samples from the
 past $b_{t_{< j}}$. Setting $t_j = j$, we decompose the joint probability of
 the class label sequence and the CB sample as
 %
-\begin{equation} \label{eq:idb_factorization_fwd}
-    P(c, b|L) = P(c|b,L)P(B|L) =
-        \Prod{P(c_{\ell_t}|b_{\leq t},c_{<\ell_t})^{b_t}P(b_t|L - r_t)}{t,1,T}
+\begin{equation} \label{eq:idb_factorization}
+    P(y, b|L) = P(y|b,L)P(B|L) =
+        \Prod{P(y_{\ell_t}|b_{\leq t},y_{<\ell_t})^{b_t}P(b_t|L - r_t)}{t,1,T}
 \end{equation}
 
-\Cref{eq:idb_factorization_fwd} is very similar to \cref{eq:luo_factorization},
+\Cref{eq:idb_factorization} is very similar to \cref{eq:luo_factorization},
 except the conditioning on the number of class labels $L$ forces $\ell_t$ to
 be well-defined whenever $B_t = 1$. The derivation of the IDB REINFORCE
 gradient is almost identical to that for \cref{eq:luo_reinforce}, yielding
@@ -641,120 +649,116 @@ gradient is almost identical to that for \cref{eq:luo_reinforce}, yielding
         \mathbb{E}_{b|L}\left[
         \Sum{\left(\pderiv{R_t}{\theta} +
         \left(\Sum{R_{t'}}{t' \geq t}\right)
-            \pderiv{}{\theta}\log P(b_t|L - r_t)
+            \pderiv{}{\theta}\log P(b_t|L - \ell_t)
         \right)}{t,1,T}\right]
 \end{equation}
 %
-where $R_t = b_t \log P(c_{\ell_t}|b_{\leq t}, c_{\ell_t})$.
+where $R_t = b_t \log P(y_{\ell_t}|b_{\leq t}, y_{< \ell_t})$.
 
-The IDB REINFORCE gradient solves the problem of ill-defined $\ell_t$,
-provides a frame-wise gradient update, and avoids the pathological case of
-maximum probability when $\forall t. B_t = 0$. However, were we to use
-\cref{eq:idb_reinforce,eq:idb_factorization_fwd} on their own, the model
-would likely still learn to emit early so as to minimize future accumulated
-(negative) rewards.
+\Cref{eq:idb_reinforce} is very similar to \cref{eq:luo_reinforce}, but is
+unbiased. In the example given in \cref{fig:bias}, the IDB estimate will
+treat each valid sequence of Bernoulli trials as equally likely. The sum of
+rewards over future trials is a function of the dependence of $R_t$ on past
+trials $b_{< t}$. In \cref{sec:proofs}, we prove that the local IDB REINFORCE
+estimator has variance no worse than that of the global CB REINFORCE estimator.
 
-To mitigate this tendency, we can leverage the fact that the IDB factors the
-CB in a fixed but arbitrary order of trials $\{t_j\}_j$. Denoting
-\cref{eq:idb_factorization_fwd} as the forward IDB joint probability, we
-define the backward IDB joint probability as
+The IDB REINFORCE gradient can be more efficiently calculated using the BB
+step function. Letting $R_{t_\ell}$ denote the reward for timestep $t_\ell$
+whenever $B_t = 1$, all remaining $R_t$ have reward zero. Thus
 %
-\begin{equation} \label{eq:idb_factorization_bwd}
-    P(c, b|L) = \Prod{P(c_{L - \ell_t + 1}|b_{>t}, c_{>L - \ell_t + 1})^{b_t}
-        P(b_t|L - r_{T - t + 1})}{t,1,T}
-\end{equation}
-%
-where we use the mapping $t_j = T - j + 1$. We define the backward IDB
-reinforce gradient analogously. To perform the backward gradient updates, we
-need merely to reverse the Bernoulli sequence of weights $w_t \mapsto w_{T - t
-+ 1}$ and classes $c_\ell \mapsto c_{L - \ell + 1}$ and perform the forward
-update. We have switched the direction of the dependency on labels from
-$c_{<\ell}$ to $c_{>L - \ell_t + 1}$, likewise for $b_{<t}$ and $b_{>t}$. While
-optimizing only one direction allows for sequential architectures of
-$P(c_t|\ldots)$, such as auto-regressive decoders, optimizing both directions
-either requires distributions which ignore history, e.g. pointwise
-$P(c_{\ell_t}|b_{<t},c_{<\ell_t}) = P_t(c_{\ell_t})$.
-
-We hypothesize that, though the forward and backward objectives tend to emit at
-the beginning and end of the utterance, respectively, alternating between them
-will cancel out the tendencies. By alternating directions, on average, every
-weight $w_t$ should receive a signal from $L / 2$ nonzero rewards $R_t$.
-
-While alternating between
-\cref{eq:idb_factorization_fwd,eq:idb_factorization_bwd} should mitigate or
-solve the problem of emitting too early or late, doing so precludes defining
-sequential $P(c_{\ell_t}|\ldots)$. The IDB REINFORCE objective samples
-$T$ random variables despite having a nonzero reward for only $L$ of them.
-Since the probability of the $t$-th Bernoulli trial being high is dependent
-on all previous Bernoulli samples, the reward associated with sample $t$ is
-confounded with the results of all prior trials and thus ends up assigned to
-every one of them.
-Because the : it cannot distinguish between the high Bernoulli trial that
-``caused'' the reward expectation for class label at time $t$ requires
-conditioning on all Bernoulli samples $b_{\leq t}$ so that $\ell_t$ may be
-determined. In order to get there,
-of which exact Bernoulli trials were high up to time $t$ is superfluous: all we
-need to know to determine a distribution over the $\ell$-th class label is the
-time $t$ at which the $\ell$-th high Bernoulli (ordered by time $t$) occurred.
-This is the $t_\ell$ term in \cref{eq:cb_factorization}. Decomposing $P(b|L)$
-in \cref{eq:cb_factorization} in terms of $t_\ell$, we get
-%
-\begin{equation} \label{eq:bb_factorization}
+\begin{equation} \label{eq:idb_reinforce_alt}
 \begin{split}
-    P(c, b|L)
-        &= \Prod{
-            P(c_\ell|t_{\leq \ell},c_{<\ell})P(t_\ell|t_{<\ell}, L)}{\ell,1,L} \\
-        &= \Prod{
-            P(c_\ell|t_{\leq \ell},c_{<\ell})P(t_\ell|t_{\ell - 1}, L - \ell)}
-            {\ell,1,L}
+    \pderiv{R}{\theta}
+        &=  \pderiv{\log P(L)}{\theta} +
+            \pderiv{}{\theta} \mathbb{E}_{b|L}\left[\log P(y|b)\right] \\
+        &=  \pderiv{\log P(L)}{\theta} +
+            \Sum{\mathbb{E}_{b_{\leq t}|L}\left[
+                \pderiv{R_t}{\theta} +
+                R_t \pderiv{}{\theta} \log P(b_{\leq t}|L - t_\ell)
+            \right]}{t,1,T} \\
+        &=  \pderiv{\log P(L)}{\theta} +
+            \Sum{\mathbb{E}_{b_{\leq t_\ell}|L}\left[
+                \pderiv{R_{t_\ell}}{\theta} +
+                R_{t_\ell} \pderiv{}{\theta} \log P(b_{\leq t_\ell}|L - \ell)
+            \right]}{\ell,1,L} \\
+        &=  \pderiv{\log P(L)}{\theta} +
+            \Sum{\mathbb{E}_{t_{\leq \ell}|L}\left[
+                \pderiv{R_{t_\ell}}{\theta} +
+                R_{t_\ell} \pderiv{}{\theta} \log P(t_{\leq \ell}|L - \ell)
+            \right]}{\ell,1,L} \\
+        &=  \pderiv{\log P(L)}{\theta} +
+            \mathbb{E}_{b|L}\left[
+            \Sum{\left(
+                \pderiv{R_{t_\ell}}{\theta} +
+                \left(\sum_{\ell' \geq \ell}R_{t_{\ell'}}\right)
+                    \pderiv{}{\theta} \log P(t_\ell|t_{\ell - 1}, L - \ell)
+            \right)}{\ell,1,L}
+            \right]
 \end{split}
 \end{equation}
 %
-The first line is a simple application of the chain rule of probabilities.
-$t_\ell \perp\!\!\!\perp t_{\ell - 2} | t_{\ell - 1}$ follows from the fact
-that $t_{\ell} > t_{\ell - 1} > t_{\ell - 2}$, so $t_{\ell - 1} + 1$ will be
-the minimum value that $t_{\ell}$ can take.
+where $R_{t_\ell} = \log P(y_\ell|t_{\leq \ell}, y_{<\ell})$. The
+$P(t_\ell|\ldots)$ term is recognized as the BB step function of
+\cref{eq:bounded_draft}. \Cref{eq:idb_reinforce_alt} yields identical sample
+estimates as \cref{eq:idb_reinforce}, but requires calculation of far fewer
+terms.
 
-The $P(t_\ell|t_{\ell -1}, L - \ell)$ term is identical in definition to the
-step function of the BB from \cref{eq:bounded_draft}: $t_\ell$ must be drafted
-from $t \in [t_{\ell - 1} + 1, T]$ subject to the condition that $T - \ell - 1$
-more samples must be drafted after $t_\ell$. The joint probability of $t_{\leq
-\ell}$ is the BB, matching the CB when $\ell = L$.
+\Cref{eq:idb_reinforce,eq:idb_reinforce_alt} allow $R_t$ to condition on the
+history of Bernoulli trials $b_{< t}$ sampled. For example, $\log
+P(y_\ell|t_{\leq \ell}, y_{<\ell})$ can be parameterized by a decoder neural
+network which concatenates together a hidden state from an encoder network from
+time $t_\ell$ and an embedding of the previous class label $y_{\ell - 1}$ as
+input to the RNN. Unfortunately, the dependence on $t_{\leq \ell}$ means that
+$t_{\ell'}$ is not only responsible for reward $R_{t_{\ell'}}$, but also for
+all rewards succeeding it $R_{t_{\ell' + 1}}, R_{t_{\ell' + 2}}, \ldots$.
+For this reason, $\pderiv{}{\theta} \log P(t_\ell|t_{\ell - 1}, L - \ell)$
+will tend to receive higher magnitude updates than $t_{\ell + 1}$, which we
+expect to increase the variance of the estimator.
 
-Deriving the BB REINFORCE gradient is similar to before. Letting $R_\ell = \log
-P(c_\ell|t_{\leq \ell},c_{<\ell})$,
+We can make the estimator more ``local'' if we make a conditional independence
+assumption $P(y_\ell|t_{\leq \ell}, y_{<\ell}) = P(y_\ell|t_\ell, y_{< \ell})$.
+This costs us, for example, the ability to feed an encoder hidden state as part
+of the input to a decoder RNN since that produces an implicit dependence on all
+$t_{\leq \ell}$. Our example decoder may still, however, condition its output
+on a hidden state at time $t_{\ell}$ and previous class labels $y_{<\ell}$,
+similar to \cite{wuHardNonmonotonicAttention2018}.
+
+Deriving the new estimator is similar to before. Letting $R_{t_\ell} = \log
+P(y_\ell|t_\ell,y_{<\ell})$,
 %
-\begin{equation} \label{eq:bb_reinforce}
+\begin{equation} \label{eq:bbm_reinforce}
 \begin{split}
 \pderiv{R}{\theta}
     &= \pderiv{\log P(L)}{\theta} +
-       \Sum{\pderiv{}{\theta} \mathbb{E}_b[R_\ell]}{\ell,1,L} \\
+       \Sum{\pderiv{}{\theta} \mathbb{E}_{b|L}[R_{t_\ell}]}{\ell,1,L} \\
     &= \pderiv{\log P(L)}{\theta} +
        \Sum{\pderiv{}{\theta}
-            \mathbb{E}_{\{t_1, t_2, \ldots t_\ell\}|L - \ell}[R_\ell]}{\ell,1,L} \\
-    &\ldots \\
-    &= \pderiv{\log P(L)}{\theta} + \mathbb{E}_{b|L}\left[
-        \Sum{\left(\pderiv{R_\ell}{\theta} +
-        \left(\Sum{R_{\ell'}}{\ell' \geq \ell}\right)
-            \pderiv{}{\theta}\log P(t_{\ell}|t_{\ell - 1}, L - \ell)
-        \right)}{\ell,1,L}\right]
+            \mathbb{E}_{t_\ell|L - \ell}[R_{t_\ell}]}{\ell,1,L} \\
+    &=  \pderiv{\log P(L)}{\theta} +
+        \mathbb{E}_{b|L}\left[
+            \Sum{\left(
+                \pderiv{R_{t_\ell}}{\theta} +
+                    R_{t_\ell} \pderiv{}{\theta} \log P(t_\ell|L - \ell)
+            \right)}{\ell,1,L}
+        \right]
 \end{split}
 \end{equation}
+%
+where $P(t_\ell|L - \ell)$ is the marginal probability of the $t$ being the
+$\ell$-th BB-drafted sample, i.e. \cref{eq:bb_margin}. We call this estimator
+the Marginal Bounded Bernoulli (MBB) REINFORCE estimator. \Cref{eq:bb_margin}
+is similar to \cref{eq:idb_reinforce_alt} but only multiplies the
+log-probability of the $t_\ell$-th draft (not all $t_{\leq \ell}$ drafts)
+with its local reward $R_{t_\ell}$. This should make the magnitude of the
+update more uniform with respect to the timestep. When we make the
+conditional independence assumption above, we can prove (see \cref{sec:proofs})
+that the MBB estimator has variance no greater than that of the IDB estimator.
 
-\Cref{eq:bb_reinforce}, like \cref{eq:luo_reinforce,eq:idb_reinforce}, must
-accumulate future rewards due to $t_\ell$'s dependency on past drafted samples
-$t_{<\ell}$. A critical difference of \cref{eq:bb_reinforce}, however, is that
-it does not assign a reward to a non-event - a low Bernoulli trial - directly.
-This will avoid the tendency to emit early in order to maximize future
-non-events. The $P(L)$ term manages the parameters that would otherwise not
-receive an error signal.
-
-The sum of future rewards reflects the uncertainty of the impact of the current
-decision on future ones. We expect earlier $t_\ell$ to receive a higher
-variance, higher magnitude signal than later ones because of this sum. We can
-spread out this variance in the BB REINFORCE objective by alternating between
-forward and backward decompositions of $P(c,b|L)$, just like we did for the
-IDB REINFORCE objective.
+Once we have made the conditional independence assumption required for the MBB,
+however, we can efficiently calculate the exact expectation using dynamic
+programming. We will discuss how in \cref{sec:exact}. The MBB may still be
+preferred over the exact form if the cost to compute $R_\ell$ is prohibitively
+expensive.
 
 \subsection{Continuous relaxations} \label{sec:relaxations}
 
@@ -796,7 +800,7 @@ When $N = 2$, $P(B = n)$ is Bernoulli, the Concrete variable is defined as
     Z = \frac{1}{1 + \Exp{-(\log w + D)/\lambda}}, D = \log U - \log (1 - U)
 \end{equation}
 %
-and the deterministic mapping $B = H(Z) = 1_{Z > 0.5}$.
+and the deterministic mapping $B = H(Z) = I[Z > 0.5]$.
 
 Using the mapping $\Prod{w_a}{a \in A} = w'$, the CB can be considered a
 categorical distribution and suitable for a Concrete relaxation. Unfortunately,
@@ -808,34 +812,21 @@ $G_n$, which would now represent the combination of noise of the $W_a$ terms,
 would no longer be independent of $G_{n'}, n' \neq n$. Thus, the CB is not
 directly suited to continuous relaxation.
 
-However, reframing the CB in terms of intermediate variables defined in the DB
-and IDB recursive definitions will allow us a tractable number of independent,
-non-identical random variables to relax. Specifically, we will relax the
-recursive step distributions in \cref{eq:draft,eq:id_step}. The drafting
-procedure in \cref{eq:draft} can be reframed as a categorical distribution over
-$T - j$, where $P(i \in A_j|\ldots) \mapsto w'_i$. We can use the Concrete
-distribution to relax the draft and repeat the relaxation $L$ times, with a
-combined representation of size $\Sum{T - \ell + 1}{\ell,1,L}$ values.
-Similarly, the choice of including $t_j$ in the sample $A_{r_j, j}$ from
-\cref{eq:id_step} is a binary decision and can be reframed as a Bernoulli
-distribution where $P(t_j \in A_{r_j, j}|\ldots) \mapsto p_{t_j}$. Again, the
-Concrete distribution can be used to relax each of the $T$ decisions, with a
-combined representation of size $T$. The BB relaxation is similar to the draft
-relaxation, but involves $\Sum{T - t_{\ell - 1}}{\ell,1,L} \leq \Sum{T - \ell +
-1}{\ell,1,L}$ values.
-
-While the DB, IDB, and BB relaxations are continuous within a single step,
-discontinuities will arise between steps. This is because the probabilities of
-the next step are conditioned on a discrete decision $H(Z)$ made in the
-previous step. Better continuous relaxations that smooth the decision function
-across steps may exist, and are left for future work.
+We can, however, relax the CB indirectly by relaxing the intermediate variables
+defined in \cref{sec:cb_defns}. The IDB can be relaxed as a sequence of
+Bernoulli relaxations of \cref{eq:concrete_bernoulli} according to the
+recursive step \cref{eq:id_step}. The BB can be relaxed
+into a sequence of categorical relaxations of \cref{eq:concrete} according to
+the draft \cref{eq:bounded_draft}. Finally, the marginal probability of
+$t_\ell$ under the BB (\cref{eq:bb_margin}) is just one categorical relaxation
+per label $\ell$.
 
 When the objective can be reframed in terms of the relaxation $Z$, a network
 can start by optimizing a high temperature $\lambda$, then slowly lower it over
 the course of training so that $Z$ approaches the discrete distribution. At
 test time, the deterministic mapping $H(Z)$ can be used. For our objective, a
 relaxed emission does not make sense. We need to come up with $L$
-distinct distributions for each of the class labels $c_\ell$.
+distinct distributions for each of the class labels $y_\ell$.
 
 We focus on two uses of continuous relaxations with a discrete objective. The
 first is to use a RELAX-based gradient estimator
@@ -848,17 +839,25 @@ a continuous relaxation $Z$, the gradient of the expected value of some $f$
 \begin{equation} \label{eq:relax}
     \pderiv{\mathbb{E}_b[f(b)]}{\theta} =
     \mathbb{E}_b\left[
-        \left(f(b) - \mathbb{E}_{z|b}[c(z)]\right)\pderiv{\log P(b)}{\theta}
-        - \pderiv{\mathbb{E}_{z|b}[c(z)]}{\theta}
-    \right] + \pderiv{\mathbb{E}_z[c(z)]}{\theta}
+        \left(f(b) - \mathbb{E}_{z|b}[\gamma(z)]\right)\pderiv{\log P(b)}{\theta}
+        - \pderiv{\mathbb{E}_{z|b}[\gamma(z)]}{\theta}
+    \right] + \pderiv{\mathbb{E}_z[\gamma(z)]}{\theta}
 \end{equation}
 %
-Where $c(z)$ is a control variate, e.g. a neural network trained on the values
-of the relaxation to minimize the difference between the objective $f(b)$ and
-itself. $P(z|b)$ is the truncated distribution over $Z$ such that the value of
-$Z$ obeys the relationship $H(Z) = b$. If $c(z)$ is the concrete distribution
-parameterized by a learnable $\lambda$, \cref{eq:relax} is the REBAR gradient
-\cite{tuckerREBARLowvarianceUnbiased2017}.
+Where $\gamma(z)$ is a control variate, e.g. a neural network trained on the
+values of the relaxation to minimize the difference between the objective
+$f(b)$ and itself. $P(z|b)$ is the truncated distribution over $Z$ such that
+the value of $Z$ obeys the relationship $H(Z) = b$. If $\gamma(z)$ is the
+concrete distribution parameterized by a learnable $\lambda$, \cref{eq:relax}
+is the REBAR gradient \cite{tuckerREBARLowvarianceUnbiased2017}.
+
+RELAX-style estimators can be paired with
+\cref{eq:idb_reinforce,eq:bbm_reinforce}. \Cref{eq:idb_reinforce} is preferred
+over \cref{eq:idb_reinforce_alt} as the latter would involve infinite values
+in the relaxed categorical draft for $t \leq t_{\ell - 1}$. Each Bernoulli in
+the IDB format has a real relaxation except when $T - t = L - \ell_t$, at which
+point $\log P(b_{\leq t}|\ldots) = 0$ and hence does not need a baseline.
+\Cref{eq:bbm_reinforce} is always real.
 
 The second is the so-called Straight-Through (ST) estimator
 \cite{bengioEstimatingPropagatingGradients2013,jangCategoricalReparameterizationGumbelSoftmax2017}.
@@ -879,92 +878,88 @@ likelihood of the data using the conditional distribution derived from
 \cref{eq:luo_factorization}:
 %
 \begin{equation} \label{eq:st_lik}
-    P(c|b, L) = \Prod{P(c_{\ell_t}|h_t, b_{\leq t})^{b_t}}{t,1,T}
+    P(y|b, L) = \Prod{P(y_{\ell_t}|h_t, b_{\leq t})^{b_t}}{t,1,T}
 \end{equation}
 %
 where $h_t$ is a hidden state of the network at timestep $t$. Conditioning on
-$b_{\leq t}$ is implicit in the definition of $c_{\ell_t}$, though this
+$b_{\leq t}$ is implicit in the definition of $y_{\ell_t}$, though this
 conditioning is ignored by the ST estimator.
-
-By taking the log-probability, only the timesteps where $B_t = 1$ will have
-nonzero loss. Were the relaxation a series of independent Bernoulli trials,
-only the odds $w_t$ of those trials would be updated in backpropagation. Since
-\cref{eq:draft,eq:id_step,eq:bounded_draft} involve all ``future'' odds, the
-CB-based ST estimators will update more weights with the likelihood of the
-data. The DB has a clear advantage in this regard: drafting involves $T - j +
-1$ odds for the $j$-th draft, whereas the BB involves $T - t_j$, and the IDB
-involves only $T - t + 1$ odds. Since the ST estimators already ignore
-conditioning on past labels, we can ensure that, on average, the each weight
-receives $L / 2$ updates from the data by shuffling the order in which
-timesteps are processed $t_j$. In any case, optimizing the PB term
-$\pderiv{P(L)}{\theta}$ will give a blanket update to all weights.
 
 \subsection{Exact expectations} \label{sec:exact}
 
-Sample estimates of the expectations in \cref{sec:reinforce} should only be
-used when the value in the expectation is not differentiable or it is
-infeasible to marginalize out the sample variable. In the case of the model
-proposed by \cite{luoLearningOnlineAlignments2017}, the distribution $\log
-P(c_t|\ldots)$ is calculated by a simple linear transformation of the RNN
-hidden state $h_t$ followed by a softmax. These calculations can be
-parallelized across $t$. Further, they are fully differentiable. Therefore
-if the latent variable $B$ can be efficiently marginalized and that process is
-differentiable, we can use $P(c)$ to directly maximize the data log likelihood.
-To show this is possible, we will use the BB distribution:
+At the end of \cref{sec:reinforce}, we mentioned that we can marginalize out
+the Bernoulli latent variables efficiently, assuming $P(y_\ell|t_{\leq \ell},
+y_{< \ell}) = P(y_\ell|t_\ell, y_{< \ell})$. Further, it must be feasible to
+calculate that probability for all permutations of $t$ and $\ell$. In the case
+of the model proposed by \cite{luoLearningOnlineAlignments2017}, the
+distribution $\log P(y_t|t)$ is calculated by a simple linear transformation of
+the RNN hidden state $h_t$ followed by a softmax. These calculations can be
+parallelized across $t$ and are fully differentiable. The decoder structure of
+\cite{wuHardNonmonotonicAttention2018} is also a candidate as the distribution
+$P(y_\ell|t_\ell, y_{<\ell})$ is a simple two-layer feed-forward neural network
+on the combination of an encoder and a decoder hidden state.
+
+Starting from \cref{eq:breakdown_condition} and making the conditional
+independence assumption between $t_\ell$ and $t_{\ell - 1}$, we manipulate
+$P(y)$ into a form suitable for dynamic programming.
 %
 \begin{equation} \label{eq:marginalization}
 \begin{split}
-    P(c) &= P(L)\Sum{P(b|L)P(c|b)}{b} \\
-         &= P(L)\Sum{P(b|L)}{b}\Prod{P(c_\ell|b, c_{<\ell})}{\ell,1,L} \\
+    P(y) &= P(L)\Sum{P(b|L)P(y|b)}{b} \\
+         &= P(L)\Sum{P(b|L)}{b}\Prod{P(y_\ell|b, y_{<\ell})}{\ell,1,L} \\
          &= P(L)\sum_{\{t_1, t_2, \ldots, t_\ell\}}
                 P(t_1, t_2, \ldots, t_\ell|L)
-                \Prod{P(c_\ell|t_\ell, c_{<\ell})}{\ell,1,L} \\
+                \Prod{P(y_\ell|t_\ell, y_{<\ell})}{\ell,1,L} \\
          &= P(L)\Sum{
                 \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)
-                     P(c_\ell|t_\ell, c_{<\ell})}
+                     P(y_\ell|t_\ell, y_{<\ell})}
                     {t_\ell,t_{\ell - 1} + 1,T - L + \ell}
             }{\ell,1,L} \\
          &= P(L)\Sum{
-            \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)P(c_\ell|t_\ell, c_{<\ell})}
+            \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)P(y_\ell|t_\ell, y_{<\ell})}
                 {t_\ell,1,T}
             }{\ell,1,L}
 \end{split}
 \end{equation}
 %
-where the last line follows assuming $P(t_\ell|t_{\ell - 1}, L - \ell) = 0$
-when $t_\ell \leq t_{\ell - 1}$.
+where the last line follows as $P(t_\ell|t_{\ell - 1}, L - \ell) = 0$ when
+$t_\ell \leq t_{\ell - 1}$.
 
 Treating $P(t_\ell|t_{\ell - 1}, L)$ as the transition probability between
-states $t \in [1, T]$ and $P(c_\ell|t_\ell, c_{<\ell})$ as the emission
+states $t \in [1, T]$ and $P(y_\ell|t_\ell, y_{<\ell})$ as the emission
 probability, \cref{eq:marginalization} can be considered a Hidden Markov Model.
-Thus, $P(c)$ can be efficiently calculated using the forward algorithm.
+Thus, $P(y)$ can be efficiently calculated using the forward algorithm.
 
-\cite{luoLearningOnlineAlignments2017} conditioned the current Bernoulli
-distribution on prior Bernoulli samples and prior class labels. We disallowed
-conditioning on prior Bernoulli samples when employing the CB, but allow
-conditioning on prior labels in viz. $P(c_\ell|t_\ell, c_{<\ell})$. If
-the distribution is derived directly from $h_t$ then, under the CB,
-$P(c_\ell|t_\ell, c_{<\ell}) = P(c_\ell|t_\ell) = P_t(c_\ell; h_t)$. The
+\Cref{eq:marginalization} is a first-order Markov model with respect to the
+``states'' $[1, T]$. We can easily adapt the equation for higher-order models
+so that $P(y_\ell|\ldots)$ can depend on some arbitrary fixed-length history of
+emission points $t_\ell,\ldots,t_{\ell - W + 1}$, but the number of states will
+grow exponentially with the size of the history $T^W$. For large $T$,
+higher-order models become increasingly infeasible.
 
-Alternatively, recalling that $P(L)P(b|L) = P(b)$, the independent Bernoulli
-probabilities, then define a new distribution over augmented class label set
-$c_t' = c_t \cup \{\_\}$ as
+There exists a relationship between \cref{eq:marginalization} and the CTC
+objective \cite{gravesConnectionistTemporalClassification2006} when the history
+of class labels $y_{< \ell}$ is conditionally independent of the current class
+label $P(y_\ell|t_\ell, y_{< \ell}) = P(y_\ell|t_\ell)$. Recalling that
+$P(L)P(b|L) = P(b)$, the independent Bernoulli probabilities, then define a new
+distribution over an augmented class label set $\{y_t'\} = \{y_t\} \cup \{\_\}$
+as
 %
 \begin{equation} \label{eq:augmented_class}
-    P(c'_t) = \begin{cases}
-        P(B_t = 0) & c'_t = \_ \\
-        P(B_t = 1)P(c_t) & \text{otherwise}
+    P(y'_t) = \begin{cases}
+        P(B_t = 0) & y'_t = \_ \\
+        P(B_t = 1)P(y_t|t) & \text{otherwise}
     \end{cases}
 \end{equation}
 %
 where the label ``\_'' acts as a stand-in for choosing not to emit at a given
-time step. Letting $\beta(c')$ remove all the ``\_'' labels from the augmented
+time step. Letting $\beta(y')$ remove all the ``\_'' labels from the augmented
 label set,
 %
 \begin{equation} \label{eq:ctc_obj}
     \begin{split}
-        P(c) &= \Sum{\Sum{P(b_t)P(c_{\ell_t})^{b_t}}{t,1,T}}{b} \\
-             &= \sum_{\{c': |c| = T \land \beta(c') = c\}}\Sum{P(c'_t)}{t,1,T}
+        P(y) &= \Sum{\Sum{P(b_t)P(y_{\ell_t}|t)^{b_t}}{t,1,T}}{b} \\
+             &= \sum_{\{c': |c| = T \land \beta(y') = c\}}\Sum{P(y'_t|t))}{t,1,T}
     \end{split}
 \end{equation}
 
@@ -973,8 +968,8 @@ This expression of the data likelihood is almost identical to that of CTC
 First, it assumes the distribution over labels factors as described in
 \cref{eq:augmented_class}. In general, \cref{eq:augmented_class} will lead
 to different gradient updates than directly parameterizing the augmented
-vocabulary $P(c'_t)$ since the blank label has its own parameterization.
-Second, $\beta(c')$ in \cref{eq:ctc_obj} does not reduce repeated labels in
+vocabulary $P(y'_t)$ since the blank label has its own parameterization.
+Second, $\beta(y')$ in \cref{eq:ctc_obj} does not reduce repeated labels in
 $c'$\footnote{
 %
     To the best of our knowledge, there has been no attempt to explore whether
@@ -987,12 +982,18 @@ $c'$\footnote{
 likelihood marginalized over latent Bernoulli sequences can be trivially
 implemented using an existing CTC loss function.
 
-\subsection{Inference} \label{sec:inference}
+The additional dependency on $y_{< \ell}$ is not part of the traditional
+definition of the CTC loss function. Thus, \cref{eq:marginalization} can be
+considered a generalization of CTC. The factorization of
+\cref{eq:augmented_class} provides an intuition for the role of the blank label
+(in the context of the CB) that has heretofore been missing. Finally, the
+estimators from \cref{sec:cb} can also be used as single- or multi-sample
+approximations for CTC.
 
 \subsection{Fake it until you make it} \label{sec:fake_it}
 
 In \cref{sec:reinforce}, we discussed how it is infeasible to sample $B$ in an
-iterative, auto-regressive fashion, i.e. sample $B_t$ conditioned on $B_{<t}$
+iterative, auto-regressive fashion, i.e. sample $B_t$ conditioned on $b_{<t}$
 given length restriction $L$. While this is still true, it is often the case
 that, at test time, ``samples'' are the result of some deterministic process.
 For example, the decision to emit at time step $t$ occurs whenever $w_t > 1$.
@@ -1005,8 +1006,8 @@ the beginning of training, $\Sum{\tilde{B}_t}{t} \approx T/2 \gg \Sum{B_t}{t}$,
 meaning the model will (hopefully) learn to ignore $\tilde{B}$ early on. As the
 model converges and the distribution over $B$ becomes more sparse, $\tilde{B}
 \to B$ and the model can start to rely on $\tilde{B}$. We can also imitate
-conditioning $B_t$ on $c_{<\ell_t}$ by constructing $\tilde{\ell}_t$ from
-$\tilde{B}_{\leq t}$ and filling $c_{\tilde{\ell}_t}$ for $\tilde{\ell}_t > L$
+conditioning $B_t$ on $y_{<\ell_t}$ by constructing $\tilde{\ell}_t$ from
+$\tilde{B}_{\leq t}$ and filling $y_{\tilde{\ell}_t}$ for $\tilde{\ell}_t > L$
 arbitrarily\footnote{
 %
     Factoring $P(L)$ out of the expectation is critical here to ensure the
@@ -1020,21 +1021,21 @@ arbitrarily\footnote{
 
 Check convergence and variance of different estimators.
 
-Choose a fixed-size sequence $T$ and vocabulary size $C$. Define the population
+Choose a fixed-size sequence $T$ and vocabulary size. Define the population
 distribution via $T$ binary random variables $\widehat{B}_t \sim
-P_t(\widehat{b}_t)$ and $T$ categorical random variables $C_t \sim
-P_t(c_t|c_j)$. Draw a sequence of categorical random variables $C$ by first
-sampling $\widehat{B}$ and then adding $C_t \sim P(c_t|c_{\ell_t - 1})$ to the
-sequence whenever $\widehat{B}_t = 1$. The resulting sequences $c$ of size $L$
+P_t(\widehat{b}_t)$ and $T$ categorical random variables $Y_t \sim
+P_t(y_t|y_j)$. Draw a sequence of categorical random variables $Y_t$ by first
+sampling $\widehat{B}$ and then adding $Y_t \sim P(y_t|y_{\ell_t - 1})$ to the
+sequence whenever $\widehat{B}_t = 1$. The resulting sequences $y$ of size $L$
 and $b$ of size $T$ was sampled with probability
 %
 \begin{equation*}
-    P(c, \widehat{b}) =
-        \Prod{P_t(c_{\ell_t}|c_{\ell_t - 1})^{\widehat{b}_t}P_t(\widehat{b}_t)}{t,1,T}
+    P(y, \widehat{b}) =
+        \Prod{P_t(y_{\ell_t}|y_{\ell_t - 1})^{\widehat{b}_t}P_t(\widehat{b}_t)}{t,1,T}
 \end{equation*}
 %
-The goal is to make $Q_t(b_t) \to P_t(b_t)$ and $Q_t(c_t|c_j) \to P_t(c_t|c_j)$
-for all $t \in [1, T]$ using $c$ and one of the estimators in
+The goal is to make $Q_t(b_t) \to P_t(b_t)$ and $Q_t(y_t|c_j) \to P_t(y_t|c_j)$
+for all $t \in [1, T]$ using $y$ and one of the estimators in
 \cref{sec:reinforce} or the exact expectation from \cref{sec:exact}. Letting
 $Q_t$ and $P_t$ belong to the same parameterized family of statistical models
 (i.e. Bernoulli or categorical), we can determine the distance between the
@@ -1045,8 +1046,8 @@ Hyperparameters:
 \begin{enumerate}
     \item Estimators
     \item $T$
-    \item $N$ (batch size, i.e. number of sequences $c$)
-    \item $M$ (Monte-Carlo sample, i.e. number of samples $B$ per $c$)
+    \item $N$ (batch size, i.e. number of sequences $y$)
+    \item $M$ (Monte-Carlo sample, i.e. number of samples $B$ per $y$)
     \item $\sigma$ (standard deviation of population parameters)
 \end{enumerate}
 %
@@ -1086,6 +1087,178 @@ Decoder structures:
 \bibliographystyle{plainnat}
 \bibliography{conditional-bernoulli}
 
+\appendix
 
+\section{Additional proofs} \label{sec:proofs}
+
+\emph{Alternate proof of the equivalence of the expectations of
+\cref{eq:cb_reinforce,eq:idb_reinforce}}. Representing the expectation in
+\cref{eq:idb_reinforce} as $\mathbb{E}_{b|L}[Y]$ and that in \cref{eq:cb_reinforce} as
+$\mathbb{E}_{b|L}[Z]$,
+%
+\begin{equation} \label{eq:cb_idb_equiv}
+\begin{split}
+    \mathbb{E}_{b|L}[Z]
+        &=  \mathbb{E}_{b|L}\left[
+                \pderiv{\Sum{R_t}{t,1,T}}{\theta} +
+                \left(\Sum{R_{t'}}{t',1,T}\right)
+                \left(\Sum{\pderiv{}{\theta}\log P(b_t|b_{<t}, L)}{t,1,T}\right)
+            \right] \\
+        &= \mathbb{E}_{b|L}\left[\Sum{\left(
+                \pderiv{R_t}{\theta} +
+                \left(\Sum{R_{t'}}{t',1,T}\right)
+                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
+            \right)}{t,1,T}
+            \right] \\
+        &= \mathbb{E}_{b|L}\Bigg[\Sum{\left(
+                \pderiv{R_t}{\theta} +
+                \left(\Sum{R_{t'}}{t',t,T}\right)
+                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
+            \right)}{t,1,T} + \\
+        &\qquad\qquad
+            \Sum{\left(
+                \left(\Sum{R_{t'}}{t',1,t-1}\right)
+                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
+            \right)}{t,1,T}
+            \Bigg] \\
+        &= \mathbb{E}_{b|L}[Y + X] \\
+        &= \mathbb{E}_{b|L}[Y] + \mathbb{E}_{b|L}[X]
+\end{split}
+\end{equation}
+%
+We can see that $Z = X + Y$. The equivalence of the expectations comes from
+showing $\mathbb{E}_{b|L}[X] = 0$:
+%
+\begin{equation} \label{eq:zero_expect_cb}
+\begin{split}
+    \mathbb{E}_{b|L}[X] &=
+    \mathbb{E}_{b|L}\left[
+    \Sum{R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]}{t,1,T}\\
+    &=  \Sum{\mathbb{E}_{b|L}\left[R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]}{t,1,T} \\
+    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[
+            \mathbb{E}_{b_t|b_{<t},L}\left[R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]
+        \right]}{t,1,T} \\
+    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[R_{< t}
+            \mathbb{E}_{b_t|b_{<t},L}\left[\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]
+        \right]}{t,1,T} \\
+    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[R_{< t}
+            \pderiv{}{\theta}\mathbb{E}_{b_t|b_{<t},L}[1]
+        \right]}{t,1,T} \\
+    &= 0
+\end{split}
+\end{equation}
+
+\emph{The variance of \cref{eq:idb_reinforce} is less than or equal to the
+variance of \cref{eq:cb_reinforce}}. Representing the expectation in
+\cref{eq:cb_reinforce} as a function of random variables $X$ and $Y$ (as
+above):
+%
+\begin{equation} \label{eq:z_decomposition}
+    \mathbb{E}_{b|L}[Z] = \mathbb{E}_z[Z] = \mathbb{E}_{x,y}[J(X, Y)]
+\end{equation}
+%
+where $J(X, Y) = X + Y$. Then
+%
+\begin{equation} \label{eq:marginal_expectation}
+    \widehat{J}(Y) = \mathbb{E}_x[J(X, Y)|Y] = Y + \mathbb{E}_x[X] = Y
+\end{equation}
+%
+which follows from \cref{eq:zero_expect_cb}. By \cref{eq:cb_idb_equiv},
+$\mathbb{E}_y[\widehat{J}(Y)] = \mathbb{E}_y[Y]$ is expectation in the IDB
+estimator of \cref{eq:idb_reinforce}. The remainder of the proof is merely an
+application of the Rao-Blackwell-Kolmogorov theorem:
+%
+\begin{equation} \label{eq:rbk}
+\begin{split}
+    Var(J(X, Y))
+        &= \mathbb{E}_{x,y}[J(X, Y)^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &= \mathbb{E}_y[\mathbb{E}_x[J(X, Y)^2|Y]] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &\geq \mathbb{E}_y[\mathbb{E}_x[J(X, Y)|Y]^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &= \mathbb{E}_y[\widehat{J}(Y)^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &= \mathbb{E}_y[\widehat{J}(Y)^2] - \mathbb{E}_y[\widehat{J}(Y)]^2 \text{ from \cref{eq:cb_idb_equiv}} \\
+        &= Var(\widehat{J}(Y))
+\end{split}
+\end{equation}
+%
+where the third line follows from the convexity of $(\cdot)^2$ and Jensen's
+Inequality.
+
+\emph{Alternate proof of the equivalence of the expectations of
+\cref{eq:idb_reinforce_alt,eq:bbm_reinforce} when $R_\ell \ind t_{< \ell} |
+t_\ell$} (i.e. $R_\ell$ is memoryless). The proof is similar in fashion to
+\cref{eq:cb_idb_equiv}. The BB-form IDB REINFORCE expectation in
+\cref{eq:idb_reinforce_alt} using random variable $Z$ and the expectation in
+\cref{eq:bbm_reinforce} using random variable $Y$.
+%
+\begin{equation} \label{eq:idb_bbm_equiv}
+\begin{split}
+    \mathbb{E}_{b|L}[Z]
+        &= \mathbb{E}_{b|L}\left[
+           \Sum{\left(
+                \pderiv{R_{t_\ell}}{\theta} +
+                R_{t_\ell} \pderiv{}{\theta} \log P(t_{\leq \ell}|L - \ell)
+           \right)}{\ell,1,L}\right] \\
+        &= \mathbb{E}_{b|L}\Bigg[
+                \Sum{\left(
+                    \pderiv{R_{t_\ell}}{\theta} +
+                    R_{t_\ell} \pderiv{}{\theta} \log P(t_\ell|L)
+                \right)}{\ell,1,L} + \\
+        &\qquad\qquad
+                \Sum{\left(
+                    R_{t_\ell} \pderiv{}{\theta}
+                    \log P(t_{<\ell}|t_\ell,L - \ell)
+                \right)}{\ell,1,L}
+            \Bigg] \\
+        &= \mathbb{E}_{b|L}[Y + X] \\
+        &= \mathbb{E}_{b|L}[Y] + \mathbb{E}_{b|L}[X]
+\end{split}
+\end{equation}
+%
+We are left to prove, once again, that $\mathbb{E}_{b|L}[X] = 0$.
+%
+\begin{equation} \label{eq:zero_exp_idb}
+\begin{split}
+    \mathbb{E}_{b|L}[X]
+        &= \mathbb{E}_{b|L}\left[
+                \Sum{\left(
+                    R_{t_\ell} \pderiv{}{\theta}
+                    \log P(t_{<\ell}|t_\ell,L - \ell)
+                \right)}{\ell,1,L}
+            \right] \\
+        &= \Sum{
+            \mathbb{E}_{t_{\leq \ell}|L}\left[
+                R_{t_\ell} \pderiv{}{\theta}
+                \log P(t_{<\ell}|t_\ell,L - \ell)
+            \right]}{\ell,1,L} \\
+        &=  \Sum{
+            \mathbb{E}_{t_\ell|L}\left[
+                \mathbb{E}_{t_{<\ell}|t_\ell, L - \ell}\left[
+                    R_{t_\ell} \pderiv{}{\theta}
+                    \log P(t_{<\ell}|t_\ell,L - \ell)
+                \right]
+            \right]}{\ell,1,L} \\
+        &= \Sum{
+            \mathbb{E}_{t_\ell|L}\left[
+                R_{t_\ell} \pderiv{}{\theta}
+                \mathbb{E}_{t_{<\ell}|t_\ell, L - \ell}[1]
+            \right]}{\ell,1,L} \\
+        &= 0
+\end{split}
+\end{equation}
+
+\emph{The variance of \cref{eq:bbm_reinforce} is less than or equal to the
+variance of \cref{eq:idb_reinforce_alt} when $R_\ell \ind t_{< \ell} |
+t_\ell$}. The proof is identical to that showing \cref{eq:idb_reinforce}
+has variance no worse than \cref{eq:cb_reinforce} using
+\cref{eq:z_decomposition,eq:marginal_expectation,eq:rbk}, except $X$, $Y$, and
+$Z$ are defined according to \cref{eq:idb_bbm_equiv}. We emphasize that this
+only holds when $R_\ell$ is memoryless. If $R_\ell$ is not memoryless,
+\cref{eq:bbm_reinforce} is not an unbiased estimator of the total reward.
+
+\section{To prove}
+
+\emph{More general bounds on the distribution over trials of the
+\citeauthor{luoLearningOnlineAlignments2017} when $P(b_t) = 0.5$}. A bit
+stronger than merely explaining the bias and giving an example when $T = 3$.
 
 \end{document}
