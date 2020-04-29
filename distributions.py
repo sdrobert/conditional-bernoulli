@@ -1,7 +1,7 @@
 import torch
 
 
-def generalized_binomial(logits, k_max, intermediate=None):
+def generalized_binomial_coefficient(logits, k_max, intermediate=None):
     r'''Calculate the generalized binomial coefficient for log-odds
 
     For a set of odds :math:`w_t \in [0, 1]` and :math:`t \in [1, T]`, the
@@ -101,3 +101,37 @@ def generalized_binomial(logits, k_max, intermediate=None):
     if flatten:
         Cl = Cl.squeeze(-1)
     return Cl
+
+
+def poisson_binomial(probs):
+    r'''Sample a Poisson Binomial
+
+    The Poisson Binomial is a generalization of the Binomial where the
+    individual Bernoulli trials need not have equal probability.
+
+    Parameters
+    ----------
+    probs : torch.tensor
+        A float tensor containing the probability of each Bernoulli trial.
+        Either of shape ``(T, N)`` or ``(T,)``, where ``T`` is the trial
+        dimension (is accumulated) and ``N`` is the optional batch dimension.
+
+    Returns
+    -------
+    b : torch.tensor
+        A float tensor of shape ``(1,)`` or ``(N,)`` containing the sum of
+        the high Bernoulli trials (between :math:`[0, T]` inclusive).
+
+    See Also
+    --------
+    PoissonBinomial
+    '''
+    with torch.no_grad():
+        if probs.dim() == 1:
+            probs = probs.unsqueeze(1)
+        if probs.dim() != 2:
+            raise RuntimeError('probs must be one or two dimensional')
+        b = torch.bernoulli(probs.T)
+        b = b.sum(1)
+
+    return b

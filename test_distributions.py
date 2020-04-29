@@ -137,18 +137,18 @@ def test_C_properties():
 
 @pytest.mark.parametrize('intermediate', [None, "forward", "reverse"])
 @pytest.mark.parametrize('T,k_max', [[1, 1], [0, 1], [1, 0], [30, 12]])
-def test_generalized_binomial(T, k_max, intermediate):
+def test_generalized_binomial_coefficient(T, k_max, intermediate):
     torch.manual_seed(198236)
     N = 200
     logits = torch.randn(T, N)
     w = logits.exp()
     C_exp = direct_C(w, k_max, intermediate, intermediate == 'reverse')
-    C_act = distributions.generalized_binomial(
+    C_act = distributions.generalized_binomial_coefficient(
         logits, k_max, intermediate).exp()
     assert torch.allclose(C_exp, C_act)
 
 
-def test_generalized_binomial_inf_logits():
+def test_generalized_binomial_coefficient_inf_logits():
     torch.manual_seed(3291)
     T, N, k_max = 53, 5, 3
     logits_lens = torch.randint(k_max, T + 1, (N,))
@@ -159,7 +159,7 @@ def test_generalized_binomial_inf_logits():
         logits_n = torch.randn(logits_len)
         logits_n[0] = -float('inf')
         logits_n.requires_grad_(True)
-        C_n = distributions.generalized_binomial(logits_n, k_max)
+        C_n = distributions.generalized_binomial_coefficient(logits_n, k_max)
         g_n, = torch.autograd.grad(C_n, logits_n, torch.ones_like(C_n))
         C_exp.append(C_n)
         g_exp.append(g_n)
@@ -168,7 +168,7 @@ def test_generalized_binomial_inf_logits():
         logits, padding_value=-float('inf'))
     C_exp = torch.stack(C_exp, dim=-1)
     logits.requires_grad_(True)
-    C_act = distributions.generalized_binomial(logits, k_max)
+    C_act = distributions.generalized_binomial_coefficient(logits, k_max)
     assert torch.allclose(C_exp, C_act)
     g_act, = torch.autograd.grad(C_act, logits, torch.ones_like(C_act))
     for logits_len, g_exp_n, g_act_n in zip(logits_lens, g_exp, g_act.T):
@@ -177,3 +177,19 @@ def test_generalized_binomial_inf_logits():
         # the gradient isn't really defined for -inf in the log-space, but it
         # works out to be the non-threatening zero here
         assert torch.all(g_act_n[logits_len:] == 0.)
+
+
+def test_poisson_binomial():
+    # special case when all odds are equal: PB equals B
+    torch.manual_seed(5216)
+    M, N, T = 1000000, 10, 5
+    p = torch.rand(N,).repeat(M)  # (N * M,)
+
+    b_b = torch.distributions.Binomial(T, probs=p).sample().view(N, M)
+    mean_b = b_b.mean(1)  # (N,)
+
+    p = p.unsqueeze(0).expand(T, N * M)
+    b_pb = distributions.poisson_binomial(p).view(N, M)
+    mean_pb = b_pb.float().mean(1)  # (N,)
+
+    assert torch.allclose(mean_b, mean_pb, atol=1e-2)
