@@ -135,6 +135,7 @@ def test_C_properties():
     C_k_act = (C_left * C_right.flip(0)).sum(0)
     assert torch.allclose(C_k_act, C_k_exp)
 
+
 @pytest.mark.parametrize('intermediate', [None, "forward", "reverse"])
 @pytest.mark.parametrize('T,k_max', [[1, 1], [0, 1], [1, 0], [30, 12]])
 def test_generalized_binomial_coefficient(T, k_max, intermediate):
@@ -198,7 +199,7 @@ def test_poisson_binomial():
 def test_poisson_binomial_distribution():
     torch.manual_seed(310392)
     M, N, T = 1000000, 20, 10
-    logits = torch.randn(N, T) * 2
+    logits = torch.randn(N, T, requires_grad=True) * 2
     total_count = torch.randint(0, T + 1, (N,))
 
     dist = distributions.PoissonBinomial(
@@ -216,3 +217,8 @@ def test_poisson_binomial_distribution():
     assert dist_lprobs.shape == torch.Size((T + 1, N))
 
     assert torch.allclose(sample_probs, dist_lprobs.exp(), atol=1e-3)
+
+    g, = torch.autograd.grad(dist_lprobs, logits, torch.ones_like(dist_lprobs))
+    padding_mask = total_count.unsqueeze(-1) <= counts[:-1]
+    assert torch.all(g.masked_select(padding_mask).eq(0.))
+    assert not torch.any(g.masked_select(~padding_mask).eq(0.))
