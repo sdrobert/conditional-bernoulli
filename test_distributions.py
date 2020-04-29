@@ -188,8 +188,31 @@ def test_poisson_binomial():
     b_b = torch.distributions.Binomial(T, probs=p).sample().view(N, M)
     mean_b = b_b.mean(1)  # (N,)
 
-    p = p.unsqueeze(0).expand(T, N * M)
-    b_pb = distributions.poisson_binomial(p).view(N, M)
+    p = p.expand(T, N * M)
+    b_pb = distributions.poisson_binomial(p.T).view(N, M)
     mean_pb = b_pb.float().mean(1)  # (N,)
 
     assert torch.allclose(mean_b, mean_pb, atol=1e-2)
+
+
+def test_poisson_binomial_distribution():
+    torch.manual_seed(310392)
+    M, N, T = 1000000, 20, 10
+    logits = torch.randn(N, T) * 2
+    total_count = torch.randint(0, T + 1, (N,))
+
+    dist = distributions.PoissonBinomial(
+        total_count, logits=logits, validate_args=True)
+    b = dist.sample((M,))
+    assert b.shape == torch.Size((M, N))
+    assert (b <= total_count.unsqueeze(0)).all()
+
+    counts = torch.arange(T + 1)
+    sample_probs = (counts.view(T + 1, 1, 1) == b).float().mean(1)
+    assert sample_probs.shape == torch.Size((T + 1, N))
+
+    dist._validate_args = False
+    dist_lprobs = dist.log_prob(counts.unsqueeze(-1).float())
+    assert dist_lprobs.shape == torch.Size((T + 1, N))
+
+    assert torch.allclose(sample_probs, dist_lprobs.exp(), atol=1e-3)
