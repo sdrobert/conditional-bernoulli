@@ -259,11 +259,11 @@ class PoissonBinomial(torch.distributions.Binomial):
 
     @property
     def mean(self):
-        return self.probs.sum(0)
+        return self.probs.sum(-1)
 
     @property
     def variance(self):
-        return (self.probs * (1 - self.probs)).sum(0)
+        return (self.probs * (1 - self.probs)).sum(-1)
 
     @torch.distributions.utils.lazy_property
     def log_pmf(self):
