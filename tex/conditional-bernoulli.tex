@@ -1255,10 +1255,105 @@ $Z$ are defined according to \cref{eq:idb_bbm_equiv}. We emphasize that this
 only holds when $R_\ell$ is memoryless. If $R_\ell$ is not memoryless,
 \cref{eq:bbm_reinforce} is not an unbiased estimator of the total reward.
 
-\section{To prove}
+\section{TODO}
+
+\emph{Talk to David Duvenaud about his opinion on what ML folk believe
+auto-regression to be.} Is \cref{sec:fake_it} necessary?
 
 \emph{More general bounds on the distribution over trials of the
 \citeauthor{luoLearningOnlineAlignments2017} when $P(b_t) = 0.5$}. A bit
 stronger than merely explaining the bias and giving an example when $T = 3$.
+
+\emph{Push the proofs from the appendix into the text itself, and remove
+the ``alternate proof'' part (go straight to variance).}
+
+\emph{Motivations is not working as an intro}
+
+\emph{Hierarchical learning.} Either through the estimators from
+\cref{sec:reinforce} or the exact form derived in \cref{sec:exact}, the CB can
+be used to transduce a sequence of length $T$ into one of length $L$. The
+advantage that the CB has over CTC is its ability to incorporate and
+simultaneously learn the dynamics of the $L$ sequence while learning those of
+the $T$ sequence. This does not prevent us from stacking a third sequence
+$M \ll L$ on top of the $L$ sequence, or even deeper. For example, we could
+choose $T$ to be acoustic frames, $L$ to be sub-word units, and $M$ to be full
+words. We could even recreate something akin to the FST composition used in
+hybrid speech recognition.
+
+\emph{Prove/disprove that no distribution satisfies the following three
+requirements.}
+Work in progress.
+
+Let $B_t \in \{0,1\}$ be a binary random variable. There are $T$ such $B_t$
+and, if we condition on $L$, there must be $L \ll T$ (and only $L$) ``high''
+$B_t$, i.e. $\sum_t B_t = L$.
+%
+\begin{enumerate}
+    \item \emph{Conditional:} $P(b_t|b_{<t}, L, T)$ is well-defined and
+          tractable. We can sample an event at time $t$ under the constraint
+          that some number of remaining high events $L - \sum_{<t} H(b_t)$ will
+          occur over the suffix of $T - t$ random variables.
+    \item \emph{Marginal:} $P(b_t|b_{<t}, T) = P(b_t|b_{<t})$. That is, we can
+          marginalize out the total number of ``high'' events $L$ in the
+          sequence in a way agnostic to the remaining number of total variables
+          $T - t$.
+    \item \emph{Prefix-dependent:} Let $p_t = P(B_t = 1|b_{<t}, [L, T])$
+          (with or without conditioning on $L$ and $T$). Then
+          %
+          \begin{equation*}
+            \exists b_{<t}, b'_{<t} \quad
+                \sum_t b_{<t} = \sum_t b'_{<t} \land p_t \neq p'_t
+          \end{equation*}
+          %
+          In other words, we can modify the distribution over $B_t$ in a manner
+          dependent on the sequence of $B_{<t}$, not just the number of highs
+          in the sequence.
+\end{enumerate}
+%
+The BB and other CB variants satisfy the conditional and marginal requirements,
+but not the prefix-dependent one. The models of e.g.
+\citet{luoLearningOnlineAlignments2017,raffelOnlineLineartimeAttention2017}
+satisfy the marginal and prefix-dependent requirements, but not the
+conditional.
+
+Though I have yet to find a model in the literature that satisfies the
+conditional and prefix-dependent conditions simultaneously, I can provide a
+pathological distribution that does satisfy both: have some auto-regressive RNN
+parameterize each Bernoulli trial as a function of the previous trials ($b_t
+\sim w_t = \text{RNN}(b_{<t})$) up to and including event $L$, then make the
+suffix $b_{>L}$ a deterministic function of the remaining high events necessary
+such that $\sum_t b_t = L$. Since each suffix has probability 1, and $P(\sum_t
+b_{\leq L} \leq L) = 1$, the first $L$ events can act as if there is no fixed
+number of trials. The model is free to adjust the probabilities of those trials
+in a prefix-dependent way.
+
+A few thoughts so far:
+
+``Tractable'' needs to be defined. Specifically, we want to avoid iterating
+over all $B_{>t}$ s.t. $\sum_t B_t = L$ and setting $P(b_t|\ldots)$ to the
+truncated distribution. I think this will be difficult. If we can formulate
+this, we'll be a good chunk of the way done.
+
+Being auto-regressive (i.e. parameterizing $b_t$ as a function of $b_{<t}$) is
+certainly sufficient with respect to the prefix-dependent property. I believe
+they might be identical criteria.
+
+The processes of \citet{raffelOnlineLineartimeAttention2017} (and, by
+extension, \citet{chiuMonotonicChunkwiseAttention2018}) reduce to an
+auto-regressive sequence of Bernoulli trials at test time, just like
+\citeauthor{luoLearningOnlineAlignments2017}. The so-called ``expectation''
+calculated by the authors during training ignores conditioning on $L$, just
+like \citeauthor{luoLearningOnlineAlignments2017}, and is subject to the same
+sort of bias exemplified in \cref{fig:bias}.
+
+Some things to follow up on towards a proof:
+
+\emph{Duration-based HMM sampling} might give some ideas on how to proceed.
+Likewise with the \emph{Cover \& Thomas proof}.
+
+\emph{Prove equivalence up to a negligible quality}. If a distribution
+satisfies requirements 1 \& 2, is it reducible to the CB distribution up to
+some irrelevant (e.g. linear) transformation? Likewise, if a distribution
+satisfies 1 \& 3, does it reduce to a sequence of dependent binary trials?
 
 \end{document}
