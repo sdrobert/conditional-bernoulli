@@ -222,3 +222,27 @@ def test_poisson_binomial_distribution():
     padding_mask = total_count.unsqueeze(-1) <= counts[:-1]
     assert torch.all(g.masked_select(padding_mask).eq(0.))
     assert not torch.any(g.masked_select(~padding_mask).eq(0.))
+
+
+def test_conditional_bernoulli_mean():
+    torch.manual_seed(347200)
+    M, N, T = 100000, 10, 20
+    assert N > 2
+    logits = torch.randn(N, T, requires_grad=True) * 5
+    total_count = torch.randint(1, T + 1, (N,))
+    condition_count = torch.min(torch.randint(1, T + 1, (N,)), total_count)
+
+    dist = distributions.ConditionalBernoulli(
+        condition_count, total_count, logits=logits)
+    print(
+        total_count[7], condition_count[7], dist.logits[7].exp(),
+        dist.lC_reverse[7, :, :3].T.exp())
+    mu_pop = dist.mean
+    assert torch.allclose(mu_pop.sum(1), dist.condition_count)
+
+    b = dist.sample((M,))
+    assert b.shape == torch.Size((M, N, T))
+    assert (b.sum(-1) == condition_count.unsqueeze(0)).all()
+
+    mu_act = b.mean(0)
+    assert torch.allclose(mu_pop, mu_act, atol=1e-2)

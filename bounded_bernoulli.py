@@ -75,11 +75,12 @@ def lsample(logits, counts):
     t = torch.arange(T, dtype=torch.long, device=logits.device)
     # Rhist[c, :, t] = R(c, A^c_{t + 1})
 
-    # P(t = t_l|L - l, t_{l-1}) = w_t R(L - l, A^c_t)
-    #                             / R(L - l + 1, A^c_t_{l-1})
-    #                           = logits[:, t - 1] Rhist[L - l, :, t - 1] /
-    #                             Rhist[L - l + 1, :, b[-1]]
-    #                           = p[:, t - 1]
+    # log P(t = t_l|L - l, t_{l-1}) = logits_t + R(L - l, A^c_t)
+    #                                 - R(L - l + 1, A^c_t_{l-1})
+    #                               = logits[:, t - 1]
+    #                                 + Rhist[L - l, :, t - 1] /
+    #                                 - Rhist[L - l + 1, :, b[-1]]
+    #                               = lp[:, t - 1]
     for l in range(1, max_count + 1):
         Lml = counts - l
         R_Lml = Rhist.gather(
