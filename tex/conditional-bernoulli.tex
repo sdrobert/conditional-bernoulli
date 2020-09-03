@@ -34,7 +34,7 @@ by injecting blank tokens until the transcription matches length $T$ in all
 possible configurations $(i)$ during training; and removes all blank labels
 during testing. Seq2seq architectures first encode the speech frames $x_t$ into
 some encoding $h$, then some separate recurrent neural network conditions on
-$h$ to generate the token sequence $y_t$.
+$h$ to generate the token sequence $y_\ell$.
 
 In 2017, \citeauthor{luoLearningOnlineAlignments2017} developed a novel
 end-to-end speech recognizer. Given a prefix of acoustic feature frames
@@ -183,8 +183,9 @@ variable for use in Straight-Through estimators
 \cite{bengioEstimatingPropagatingGradients2013,jangCategoricalReparameterizationGumbelSoftmax2017}
 or RELAX-like estimators
 \cite{maddisonConcreteDistributionContinuous2017,grathwohlBackpropagationVoidOptimizing2018}.
-Finally, we outline under which conditions the likelihood of $y$ can be
-exactly and efficiently calculated under the assumptions of the CB.
+Finally, we outline under which conditions the likelihood of $y$ can be exactly
+and efficiently calculated under the assumptions of the CB, and how it relates
+to CTC and RNN Transducers \cite{gravesSequenceTransductionRecurrent2012}.
 
 \section{The Conditional Bernoulli} \label{sec:cb}
 \subsection{Definitions} \label{sec:cb_defns}
@@ -362,7 +363,7 @@ ID-Checking and Drafting methods so that the draft at a given step must come
 from a bounded suffix of weights. Define $A_{r, j_r} \subseteq A_{j_r} = (t_1,
 t_2, \ldots t_{j_r})$ to be the $C$ samples of $A_{j_r}$ that have been added
 to $A$. Define the probability that the next sample $t_j \in A_{t_{j_{r - 1}}}$
-is the $C$-th drafted sample to be
+is the $r$-th drafted sample to be
 %
 \begin{equation} \label{eq:bounded_draft}
     P(j = j_r|k - r, j_{r-1}; w) =
@@ -372,7 +373,7 @@ is the $C$-th drafted sample to be
 
 The draft is bound to the suffix $A_{t_{j_{r-1}}}^c = (t_{j_{r-1} + 1},
 t_{j_{r-1} + 2}, \ldots, t_{j_T})$. Further, the draft requires that if $t_j$
-is the $C$-th draft, the remaining drafts must come from indexed values
+is the $r$-th draft, the remaining drafts must come from indexed values
 $t_{>j}$. To balance the restriction, earlier $t_j$ will be more probable than
 later $t_j$ to be drafted earlier. Using the fact that $C(k - r + 1, A_{t_j}^c;
 w) = w_{t_j + 1} C(k - r, A_{t_j + 1}^c; w) + C(k - r + 1, A_{t_j + 1}^c; w)$,
@@ -659,8 +660,91 @@ where $R_t = b_t \log P(y_{\ell_t}|b_{\leq t}, y_{< \ell_t})$.
 unbiased. In the example given in \cref{fig:bias}, the IDB estimate will
 treat each valid sequence of Bernoulli trials as equally likely. The sum of
 rewards over future trials is a function of the dependence of $R_t$ on past
-trials $b_{< t}$. In \cref{sec:proofs}, we prove that the local IDB REINFORCE
-estimator has variance no worse than that of the global CB REINFORCE estimator.
+trials $b_{< t}$.
+
+We can prove that the variance of \cref{eq:idb_reinforce} is no greater than
+that of \cref{eq:cb_reinforce}. Representing the expectation in
+\cref{eq:idb_reinforce} as $\mathbb{E}_{b|L}[Y]$ and that in
+\cref{eq:cb_reinforce} as $\mathbb{E}_{b|L}[Z]$,
+%
+\begin{equation} \label{eq:cb_idb_equiv}
+\begin{split}
+    \mathbb{E}_{b|L}[Z]
+        &=  \mathbb{E}_{b|L}\left[
+                \pderiv{\Sum{R_t}{t,1,T}}{\theta} +
+                \left(\Sum{R_{t'}}{t',1,T}\right)
+                \left(\Sum{\pderiv{}{\theta}\log P(b_t|b_{<t}, L)}{t,1,T}\right)
+            \right] \\
+        &= \mathbb{E}_{b|L}\left[\Sum{\left(
+                \pderiv{R_t}{\theta} +
+                \left(\Sum{R_{t'}}{t',1,T}\right)
+                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
+            \right)}{t,1,T}
+            \right] \\
+        &= \mathbb{E}_{b|L}\Bigg[\Sum{\left(
+                \pderiv{R_t}{\theta} +
+                \left(\Sum{R_{t'}}{t',t,T}\right)
+                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
+            \right)}{t,1,T} + \\
+        &\qquad\qquad
+            \Sum{\left(
+                \left(\Sum{R_{t'}}{t',1,t-1}\right)
+                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
+            \right)}{t,1,T}
+            \Bigg] \\
+        &= \mathbb{E}_{b|L}[Y + X] \\
+        &= \mathbb{E}_{b|L}[Y] + \mathbb{E}_{b|L}[X]
+\end{split}
+\end{equation}
+%
+We can see that $Z = X + Y$. We first prove that the expectation of the
+two estimators are equivalent by showing $\mathbb{E}_{b|L}[X] = 0$:
+%
+\begin{equation} \label{eq:zero_expect_cb}
+\begin{split}
+    \mathbb{E}_{b|L}[X] &=
+    \mathbb{E}_{b|L}\left[
+    \Sum{R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]}{t,1,T}\\
+    &=  \Sum{\mathbb{E}_{b|L}\left[R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]}{t,1,T} \\
+    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[
+            \mathbb{E}_{b_t|b_{<t},L}\left[R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]
+        \right]}{t,1,T} \\
+    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[R_{< t}
+            \mathbb{E}_{b_t|b_{<t},L}\left[\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]
+        \right]}{t,1,T} \\
+    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[R_{< t}
+            \pderiv{}{\theta}\mathbb{E}_{b_t|b_{<t},L}[1]
+        \right]}{t,1,T} \\
+    &= 0
+\end{split}
+\end{equation}
+%
+Now we can treat the random variable $Z$ as a function of $X$ and $Y$,
+$Z = X + Y = J(X, Y)$ and calculate the marginal expectation of $Y$:
+%
+\begin{equation} \label{eq:marginal_expectation}
+    \widehat{J}(Y) = \mathbb{E}_x[J(X, Y)|Y] = Y + \mathbb{E}_x[X] = Y
+\end{equation}
+%
+which follows from \cref{eq:zero_expect_cb}. By \cref{eq:cb_idb_equiv},
+$\mathbb{E}_y[\widehat{J}(Y)] = \mathbb{E}_y[Y]$ is expectation in the IDB
+estimator of \cref{eq:idb_reinforce}. The remainder of the proof is merely an
+application of the Rao-Blackwell-Kolmogorov theorem:
+%
+\begin{equation} \label{eq:rbk}
+\begin{split}
+    Var(J(X, Y))
+        &= \mathbb{E}_{x,y}[J(X, Y)^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &= \mathbb{E}_y[\mathbb{E}_x[J(X, Y)^2|Y]] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &\geq \mathbb{E}_y[\mathbb{E}_x[J(X, Y)|Y]^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &= \mathbb{E}_y[\widehat{J}(Y)^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
+        &= \mathbb{E}_y[\widehat{J}(Y)^2] - \mathbb{E}_y[\widehat{J}(Y)]^2 \text{ from \cref{eq:cb_idb_equiv}} \\
+        &= Var(\widehat{J}(Y))
+\end{split}
+\end{equation}
+%
+where the third line follows from the convexity of $(\cdot)^2$ and Jensen's
+Inequality.
 
 The IDB REINFORCE gradient can be more efficiently calculated using the BB
 step function. Letting $R_{t_\ell}$ denote the reward for timestep $t_\ell$
@@ -748,11 +832,78 @@ where $P(t_\ell|L - \ell)$ is the marginal probability of the $t$ being the
 $\ell$-th BB-drafted sample, i.e. \cref{eq:bb_margin}. We call this estimator
 the Marginal Bounded Bernoulli (MBB) REINFORCE estimator. \Cref{eq:bb_margin}
 is similar to \cref{eq:idb_reinforce_alt} but only multiplies the
-log-probability of the $t_\ell$-th draft (not all $t_{\leq \ell}$ drafts)
-with its local reward $R_{t_\ell}$. This should make the magnitude of the
-update more uniform with respect to the timestep. When we make the
-conditional independence assumption above, we can prove (see \cref{sec:proofs})
-that the MBB estimator has variance no greater than that of the IDB estimator.
+log-probability of the $t_\ell$-th draft (not all $t_{\leq \ell}$ drafts) with
+its local reward $R_{t_\ell}$. This should make the magnitude of the update
+more uniform with respect to the timestep.
+
+When we make the conditional independence assumption above, we can prove that
+the MBB estimator has variance no greater than that of the IDB estimator.
+The proof is similar to that showing the IDB estimator has no greater variance
+than that of the CB estimator. First, we split the expectation of the IDB
+estimator into two random variables $Z = X + Y$:
+%
+\begin{equation} \label{eq:idb_bbm_equiv}
+\begin{split}
+    \mathbb{E}_{b|L}[Z]
+        &= \mathbb{E}_{b|L}\left[
+           \Sum{\left(
+                \pderiv{R_{t_\ell}}{\theta} +
+                R_{t_\ell} \pderiv{}{\theta} \log P(t_{\leq \ell}|L - \ell)
+           \right)}{\ell,1,L}\right] \\
+        &= \mathbb{E}_{b|L}\Bigg[
+                \Sum{\left(
+                    \pderiv{R_{t_\ell}}{\theta} +
+                    R_{t_\ell} \pderiv{}{\theta} \log P(t_\ell|L)
+                \right)}{\ell,1,L} + \\
+        &\qquad\qquad
+                \Sum{\left(
+                    R_{t_\ell} \pderiv{}{\theta}
+                    \log P(t_{<\ell}|t_\ell,L - \ell)
+                \right)}{\ell,1,L}
+            \Bigg] \\
+        &= \mathbb{E}_{b|L}[Y + X] \\
+        &= \mathbb{E}_{b|L}[Y] + \mathbb{E}_{b|L}[X]
+\end{split}
+\end{equation}
+%
+Where we note that the expectation over $Y$ is that of \cref{eq:bbm_reinforce}.
+We are left to prove, once again, that $\mathbb{E}_{b|L}[X] = 0$.
+%
+\begin{equation} \label{eq:zero_exp_idb}
+\begin{split}
+    \mathbb{E}_{b|L}[X]
+        &= \mathbb{E}_{b|L}\left[
+                \Sum{\left(
+                    R_{t_\ell} \pderiv{}{\theta}
+                    \log P(t_{<\ell}|t_\ell,L - \ell)
+                \right)}{\ell,1,L}
+            \right] \\
+        &= \Sum{
+            \mathbb{E}_{t_{\leq \ell}|L}\left[
+                R_{t_\ell} \pderiv{}{\theta}
+                \log P(t_{<\ell}|t_\ell,L - \ell)
+            \right]}{\ell,1,L} \\
+        &=  \Sum{
+            \mathbb{E}_{t_\ell|L}\left[
+                \mathbb{E}_{t_{<\ell}|t_\ell, L - \ell}\left[
+                    R_{t_\ell} \pderiv{}{\theta}
+                    \log P(t_{<\ell}|t_\ell,L - \ell)
+                \right]
+            \right]}{\ell,1,L} \\
+        &= \Sum{
+            \mathbb{E}_{t_\ell|L}\left[
+                R_{t_\ell} \pderiv{}{\theta}
+                \mathbb{E}_{t_{<\ell}|t_\ell, L - \ell}[1]
+            \right]}{\ell,1,L} \\
+        &= 0
+\end{split}
+\end{equation}
+%
+The remainder of the proof identically follows from
+\cref{eq:marginal_expectation,eq:rbk}. We emphasize that this only holds when
+$R_\ell$ is memoryless ($R_\ell \ind t_{< \ell} | t_\ell$),. If $R_\ell$ is not
+memoryless \cref{eq:bbm_reinforce} is not an unbiased estimator of the total
+reward.
 
 Once we have made the conditional independence assumption required for the MBB,
 however, we can efficiently calculate the exact expectation using dynamic
@@ -959,10 +1110,10 @@ label set,
 \begin{equation} \label{eq:ctc_obj}
     \begin{split}
         P(y) &= \Sum{\Sum{P(b_t)P(y_{\ell_t}|t)^{b_t}}{t,1,T}}{b} \\
-             &= \sum_{\{c': |c| = T \land \beta(y') = c\}}\Sum{P(y'_t|t))}{t,1,T}
+             &= \sum_{\{c': |c| = T \land \beta(y') = c\}}\Sum{P(y'_t|t)}{t,1,T}
     \end{split}
 \end{equation}
-
+%
 This expression of the data likelihood is almost identical to that of CTC
 \cite{gravesConnectionistTemporalClassification2006}, with two restrictions.
 First, it assumes the distribution over labels factors as described in
@@ -980,13 +1131,24 @@ $c'$\footnote{
 %
 }. Assuming it allows for the non-standard adjustment to $\beta$, the data
 likelihood marginalized over latent Bernoulli sequences can be trivially
-implemented using an existing CTC loss function.
+implemented using an existing CTC loss function. The additional dependency on
+$y_{< \ell}$ can be considered a generalization of the CTC loss function. In
+fact, \cref{eq:marginalization} is nearly identical to the RNN Transducer
+generalization of CTC whereby an additional decoder-style structure is
+responsible for modelling the sequence $y$ in an auto-regressive fashion.
+The only meaningful difference between an RNN-T loss and the maximum
+likelihood loss implicit in \cref{eq:marginalization} is that the latter
+explicitly factors the ``blank'' label into the decision to emit or not to
+emit.\footnote{
+%
+    Look more into this. Double-check that the loss is indeed identical.
+    I believe it is more efficient to use \cref{eq:marginalization} than
+    the form used in RNN-T. It also has a more efficient best-path form.
+%
+}
 
-The additional dependency on $y_{< \ell}$ is not part of the traditional
-definition of the CTC loss function. Thus, \cref{eq:marginalization} can be
-considered a generalization of CTC. The factorization of
-\cref{eq:augmented_class} provides an intuition for the role of the blank label
-(in the context of the CB) that has heretofore been missing. Finally, the
+Thus, \cref{eq:marginalization} can be
+considered a generalization of CTC.  Finally, the
 estimators from \cref{sec:cb} can also be used as single- or multi-sample
 approximations for CTC.
 
@@ -1078,7 +1240,7 @@ Decoder structures:
           (former similar to \citet{chiuMonotonicChunkwiseAttention2018})
     \item Autoregressive decoder with attention, but context vector is only
           used to produce emission distribution, similar to
-          \citet{wuHardNonmonotonicAttention10,wuExactHardMonotonic2019}.
+          \citet{wuHardNonmonotonicAttention2018,wuExactHardMonotonic2019}.
 \end{enumerate}
 %
 
@@ -1088,172 +1250,6 @@ Decoder structures:
 \bibliography{conditional-bernoulli}
 
 \appendix
-
-\section{Additional proofs} \label{sec:proofs}
-
-\emph{Alternate proof of the equivalence of the expectations of
-\cref{eq:cb_reinforce,eq:idb_reinforce}}. Representing the expectation in
-\cref{eq:idb_reinforce} as $\mathbb{E}_{b|L}[Y]$ and that in \cref{eq:cb_reinforce} as
-$\mathbb{E}_{b|L}[Z]$,
-%
-\begin{equation} \label{eq:cb_idb_equiv}
-\begin{split}
-    \mathbb{E}_{b|L}[Z]
-        &=  \mathbb{E}_{b|L}\left[
-                \pderiv{\Sum{R_t}{t,1,T}}{\theta} +
-                \left(\Sum{R_{t'}}{t',1,T}\right)
-                \left(\Sum{\pderiv{}{\theta}\log P(b_t|b_{<t}, L)}{t,1,T}\right)
-            \right] \\
-        &= \mathbb{E}_{b|L}\left[\Sum{\left(
-                \pderiv{R_t}{\theta} +
-                \left(\Sum{R_{t'}}{t',1,T}\right)
-                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
-            \right)}{t,1,T}
-            \right] \\
-        &= \mathbb{E}_{b|L}\Bigg[\Sum{\left(
-                \pderiv{R_t}{\theta} +
-                \left(\Sum{R_{t'}}{t',t,T}\right)
-                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
-            \right)}{t,1,T} + \\
-        &\qquad\qquad
-            \Sum{\left(
-                \left(\Sum{R_{t'}}{t',1,t-1}\right)
-                \pderiv{}{\theta}\log P(b_t|b_{<t}, L)
-            \right)}{t,1,T}
-            \Bigg] \\
-        &= \mathbb{E}_{b|L}[Y + X] \\
-        &= \mathbb{E}_{b|L}[Y] + \mathbb{E}_{b|L}[X]
-\end{split}
-\end{equation}
-%
-We can see that $Z = X + Y$. The equivalence of the expectations comes from
-showing $\mathbb{E}_{b|L}[X] = 0$:
-%
-\begin{equation} \label{eq:zero_expect_cb}
-\begin{split}
-    \mathbb{E}_{b|L}[X] &=
-    \mathbb{E}_{b|L}\left[
-    \Sum{R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]}{t,1,T}\\
-    &=  \Sum{\mathbb{E}_{b|L}\left[R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]}{t,1,T} \\
-    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[
-            \mathbb{E}_{b_t|b_{<t},L}\left[R_{< t}\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]
-        \right]}{t,1,T} \\
-    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[R_{< t}
-            \mathbb{E}_{b_t|b_{<t},L}\left[\pderiv{}{\theta}\log P(b_t|b_{<t}, L - \ell_t)\right]
-        \right]}{t,1,T} \\
-    &=  \Sum{\mathbb{E}_{b_{<t}|L}\left[R_{< t}
-            \pderiv{}{\theta}\mathbb{E}_{b_t|b_{<t},L}[1]
-        \right]}{t,1,T} \\
-    &= 0
-\end{split}
-\end{equation}
-
-\emph{The variance of \cref{eq:idb_reinforce} is less than or equal to the
-variance of \cref{eq:cb_reinforce}}. Representing the expectation in
-\cref{eq:cb_reinforce} as a function of random variables $X$ and $Y$ (as
-above):
-%
-\begin{equation} \label{eq:z_decomposition}
-    \mathbb{E}_{b|L}[Z] = \mathbb{E}_z[Z] = \mathbb{E}_{x,y}[J(X, Y)]
-\end{equation}
-%
-where $J(X, Y) = X + Y$. Then
-%
-\begin{equation} \label{eq:marginal_expectation}
-    \widehat{J}(Y) = \mathbb{E}_x[J(X, Y)|Y] = Y + \mathbb{E}_x[X] = Y
-\end{equation}
-%
-which follows from \cref{eq:zero_expect_cb}. By \cref{eq:cb_idb_equiv},
-$\mathbb{E}_y[\widehat{J}(Y)] = \mathbb{E}_y[Y]$ is expectation in the IDB
-estimator of \cref{eq:idb_reinforce}. The remainder of the proof is merely an
-application of the Rao-Blackwell-Kolmogorov theorem:
-%
-\begin{equation} \label{eq:rbk}
-\begin{split}
-    Var(J(X, Y))
-        &= \mathbb{E}_{x,y}[J(X, Y)^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
-        &= \mathbb{E}_y[\mathbb{E}_x[J(X, Y)^2|Y]] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
-        &\geq \mathbb{E}_y[\mathbb{E}_x[J(X, Y)|Y]^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
-        &= \mathbb{E}_y[\widehat{J}(Y)^2] - \mathbb{E}_{x,y}[J(X, Y)]^2 \\
-        &= \mathbb{E}_y[\widehat{J}(Y)^2] - \mathbb{E}_y[\widehat{J}(Y)]^2 \text{ from \cref{eq:cb_idb_equiv}} \\
-        &= Var(\widehat{J}(Y))
-\end{split}
-\end{equation}
-%
-where the third line follows from the convexity of $(\cdot)^2$ and Jensen's
-Inequality.
-
-\emph{Alternate proof of the equivalence of the expectations of
-\cref{eq:idb_reinforce_alt,eq:bbm_reinforce} when $R_\ell \ind t_{< \ell} |
-t_\ell$} (i.e. $R_\ell$ is memoryless). The proof is similar in fashion to
-\cref{eq:cb_idb_equiv}. The BB-form IDB REINFORCE expectation in
-\cref{eq:idb_reinforce_alt} using random variable $Z$ and the expectation in
-\cref{eq:bbm_reinforce} using random variable $Y$.
-%
-\begin{equation} \label{eq:idb_bbm_equiv}
-\begin{split}
-    \mathbb{E}_{b|L}[Z]
-        &= \mathbb{E}_{b|L}\left[
-           \Sum{\left(
-                \pderiv{R_{t_\ell}}{\theta} +
-                R_{t_\ell} \pderiv{}{\theta} \log P(t_{\leq \ell}|L - \ell)
-           \right)}{\ell,1,L}\right] \\
-        &= \mathbb{E}_{b|L}\Bigg[
-                \Sum{\left(
-                    \pderiv{R_{t_\ell}}{\theta} +
-                    R_{t_\ell} \pderiv{}{\theta} \log P(t_\ell|L)
-                \right)}{\ell,1,L} + \\
-        &\qquad\qquad
-                \Sum{\left(
-                    R_{t_\ell} \pderiv{}{\theta}
-                    \log P(t_{<\ell}|t_\ell,L - \ell)
-                \right)}{\ell,1,L}
-            \Bigg] \\
-        &= \mathbb{E}_{b|L}[Y + X] \\
-        &= \mathbb{E}_{b|L}[Y] + \mathbb{E}_{b|L}[X]
-\end{split}
-\end{equation}
-%
-We are left to prove, once again, that $\mathbb{E}_{b|L}[X] = 0$.
-%
-\begin{equation} \label{eq:zero_exp_idb}
-\begin{split}
-    \mathbb{E}_{b|L}[X]
-        &= \mathbb{E}_{b|L}\left[
-                \Sum{\left(
-                    R_{t_\ell} \pderiv{}{\theta}
-                    \log P(t_{<\ell}|t_\ell,L - \ell)
-                \right)}{\ell,1,L}
-            \right] \\
-        &= \Sum{
-            \mathbb{E}_{t_{\leq \ell}|L}\left[
-                R_{t_\ell} \pderiv{}{\theta}
-                \log P(t_{<\ell}|t_\ell,L - \ell)
-            \right]}{\ell,1,L} \\
-        &=  \Sum{
-            \mathbb{E}_{t_\ell|L}\left[
-                \mathbb{E}_{t_{<\ell}|t_\ell, L - \ell}\left[
-                    R_{t_\ell} \pderiv{}{\theta}
-                    \log P(t_{<\ell}|t_\ell,L - \ell)
-                \right]
-            \right]}{\ell,1,L} \\
-        &= \Sum{
-            \mathbb{E}_{t_\ell|L}\left[
-                R_{t_\ell} \pderiv{}{\theta}
-                \mathbb{E}_{t_{<\ell}|t_\ell, L - \ell}[1]
-            \right]}{\ell,1,L} \\
-        &= 0
-\end{split}
-\end{equation}
-
-\emph{The variance of \cref{eq:bbm_reinforce} is less than or equal to the
-variance of \cref{eq:idb_reinforce_alt} when $R_\ell \ind t_{< \ell} |
-t_\ell$}. The proof is identical to that showing \cref{eq:idb_reinforce}
-has variance no worse than \cref{eq:cb_reinforce} using
-\cref{eq:z_decomposition,eq:marginal_expectation,eq:rbk}, except $X$, $Y$, and
-$Z$ are defined according to \cref{eq:idb_bbm_equiv}. We emphasize that this
-only holds when $R_\ell$ is memoryless. If $R_\ell$ is not memoryless,
-\cref{eq:bbm_reinforce} is not an unbiased estimator of the total reward.
 
 \section{TODO}
 
