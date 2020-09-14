@@ -314,13 +314,12 @@ The ID-Checking Sampling procedure
 \cite{chenStatisticalApplicationsPoissonBinomial1997} is another useful
 treatment of the CB. This procedure builds $A$ by iterating over Bernoulli
 trials and making binary decisions whether to include the trial in $A$. First,
-choose and fix an order $j$ in which samples $I$ will potentially be
-added to $A$. Let $A_{r_j,j} \subseteq A_j = (t_1, t_2, \ldots, t_j)$ be the
-subset of $r_j$ samples ($|A_{r_j, j}| = r_j$) that have been added to $A$. At
-every step $j$, we choose to either add $t_j$ to $A_{r_{j-1},j-1}$ and
-recurse on $A_{r_j,j} = A_{r_{j-1},j-1} \cup \{t_j\}$ or exclude $t_j$
-and recurse on $A_{r_j, j} = A_{r_{j-1},j-1}$. The
-probability of including $t_j$ is
+choose and fix an order $j$ in which samples $I$ will potentially be added to
+$A$. Let $A_{r_j,j} \subseteq A_j = (t_1, t_2, \ldots, t_j)$ be the subset of
+$r_j$ samples ($|A_{r_j, j}| = r_j$) that have been added to $A$. At every step
+$j$, we choose to either add $t_j$ to $A_{r_{j-1},j-1}$ and recurse on
+$A_{r_j,j} = A_{r_{j-1},j-1} \cup \{t_j\}$ or exclude $t_j$ and recurse on
+$A_{r_j, j} = A_{r_{j-1},j-1}$. The probability of including $t_j$ is
 %
 \begin{equation} \label{eq:id_step}
     P(t_j \in A_{r_j,j}|A_{r_{j-1}, j-1}, k; w) =
@@ -486,7 +485,7 @@ acoustic data $\{x_t\}_{t \in [1, T]}$ and model parameters.
     P(y)    &= P(y, L) \\
             &= \Sum{P(y, b, L)}{b} \\
             &= \Sum{P(b, L)P(y|b)}{b} \\
-            &= \Sum{P(b|L)P(y|b)}{b|L} \\
+            &= P(L)\Sum{P(b|L)P(y|b)}{b|L} \\
             &= P(L)\mathbb{E}_{b|L}\left[P(y|b)\right]
 \end{split}
 \end{equation}
@@ -498,8 +497,8 @@ Taking the log, we get
 %
 \begin{equation*}
 \begin{split}
-    \log P(y) &= \log P(y) + \log \mathbb{E}_{b| L}\left[P(y|b)\right] \\
-              &\geq \log P(y) + \mathbb{E}_{b| L}\left[\log P(y|b)\right]
+    \log P(y) &= \log P(L) + \log \mathbb{E}_{b| L}\left[P(y|b)\right] \\
+              &\geq \log P(L) + \mathbb{E}_{b| L}\left[\log P(y|b)\right]
 \end{split}
 \end{equation*}
 %
@@ -508,7 +507,7 @@ bound $R$ and differentiating with respect to some parameter $\theta$, we get
 %
 \begin{equation} \label{eq:lower_bound}
 \begin{split}
-    \pderiv{R}{\theta}  &= \pderiv{P(L)}{\theta} + \pderiv{}{\theta}
+    \pderiv{R}{\theta}  &= \pderiv{\log P(L)}{\theta} + \pderiv{}{\theta}
                            \mathbb{E}_{b| L}\left[\log P(y|b)\right]
 \end{split}
 \end{equation}
@@ -591,7 +590,7 @@ over Bernoulli trials and treat them as independent: $P(b) =
 objective can be defined as
 %
 \begin{equation} \label{eq:cb_reinforce}
-    \pderiv{R}{\theta} = \pderiv{P(L)}{\theta} + \mathbb{E}_{b|L}
+    \pderiv{R}{\theta} = \pderiv{\log P(L)}{\theta} + \mathbb{E}_{b|L}
         \left[
             \pderiv{\Sum{R_t}{t,1,T}}{\theta} +
             \left(\Sum{R_t}{t,1,T}\right)\pderiv{}{\theta}
@@ -1177,6 +1176,61 @@ arbitrarily\footnote{
 %
 }. Doing so will not bias the expectation over $B$.
 
+\section{Generalizations and approximations} \label{sec:general}
+
+The CB conditional and PB abandon the auto-regressive property of the
+distribution over Bernoulli trials. This implies each trial is independent
+though not necessarily identically distributed.
+
+Suppose we really wish to maintain the auto-regressive property of the trials.
+In this case, we require $P(b_t|b_{<t})$ to be well-defined and easily
+calculable, such as the output of a recurrent neural network. The general
+probability over the number of emissions, $P(L)$, resembles the CB with
+additional conditional dependence requirements:
+%
+\begin{equation} \label{eq:general_pL}
+    P(L|b_{<t}) = \sum_{b : \sum_t b_{t'} = L}
+             \left( \Prod{P(b_{t'}|b_{<t'})}{t',t,T} \right)
+\end{equation}
+%
+where we have allowed conditioning on an arbitrary prefix of Bernoulli trials
+$b_{<t}$ that do not contribute to the count but can change the conditional
+probabilities per trial. Making the independence assumption over trials
+$P(b_t|b_{<t}) = P(b_t) = \frac{w_t}{1 + w_t}$ recovers \cref{eq:cb}.
+
+We can also express the conditional probability mass function of the next
+Bernoulli trial given the remaining number of highs in terms of the
+unconditioned probabilities and the distribution over the number of highs:
+%
+\begin{equation} \label{eq:general_pBgL}
+\begin{split}
+    P(b_t|b_{<t}, L)
+        &= \frac{P(b_t, L|b_{<t})}{P(L|b_{<t})} \\
+        &= \frac{P(b_t|b_{<t})P(L - \Sum{b_{t'}}{t',1,t}|b_{\leq t})}
+                {P(L - \Sum{b_{t'}}{t',1,t-1}|b_{<t})}
+\end{split}
+\end{equation}
+
+If we consider $P(\ell|\ldots)$ a normalized, conditional version of the count
+function $C(\ell, \ldots)$, we can see how an independence assumption would
+make \cref{eq:general_pBgL} equivalent to the step distribution of the IDB
+\cref{eq:id_step}.
+
+If $P(b_t|b_{<t})$ is unique for the given prefix $b_{<t}$, direct calculations
+of \cref{eq:general_pL,eq:general_pBgL} are infeasible given the sheer number
+of paths yielding $L$ emissions ($T$ choose $L$). To work around this, we have
+to simplify or approximate either $P(b_t|b_{<t})$ or $P(\ell|\ldots)$. The
+independence assumption applied is an example of simplifying $P(b_t|b_{<t})$.
+
+Assuming we are willing to incur the bias to our estimators by approximating
+distributions, adapting the estimators from \cref{sec:reinforce} to the
+approximations is trivial: specifically, replace $P(L)$ and $P(b_t|b_{<t},L)$
+in the estimator with their approximations.
+
+To begin, we start with approximating $P(b_t|b_{<t}, L)$. Because we must
+sample $B_t \sim P(b_t|b_{<t}, L)$ before we can determine the weights
+$w_{t+1}$. This precludes directly
+
 \section{Experiments} \label{sec:experiments}
 
 \subsection{Toy problem}
@@ -1251,10 +1305,322 @@ Decoder structures:
 
 \appendix
 
+\section{Determining the bias of forced emissions for i.i.d. Bernoulli}
+
+From \cref{sec:motivations}, we assume $R_t = R$ if $B_t = 1$ else $R_t = 0$.
+If $B_t \sim P(b_t)$ are drawn i.i.d., then let $P(b_t) = p$. We also assume $0
+< T \geq L \geq 0$. We ignore $T = 0$. The expected reward for timestep $t$
+given that there are $L$ labels is
+%
+\begin{equation} \label{eq:iid_unbiased}
+\begin{split}
+    \mathbb{E}_{b|L}[R_t]
+        &= P(B_t=1|L)R \\
+        &= P(B_t=1, L) R / P(L) \\
+        &= \frac{R\binom{T - 1}{L - 1} p^L (1 - p)^{T - L}}
+                {\binom{T}{L}p^L (1 - p)^{T - L}} \\
+        &= RL / T
+\end{split}
+\end{equation}
+
+Determining the expectation of the instantaneous reward $R_t$ when the suffix
+of the sample is manipulated to be exclusively high or low is considerably
+more difficult. We will use $P^*$ to denote the distributions over $T$ samples
+forced to have $L$ highs.
+
+We begin by defining the two ``force-points'' in the Bernoulli process where it
+stops sampling like a simple Bernoulli process and forces the suffix to be made
+of exclusively zeros or ones. Define $t_0$ as the zero-force point, i.e. the
+minimal value in $[0, T - 1]$ such that all $B_t = 0$ for $t_0 < t < T$.
+Likewise, define $t_1 \in [0, T - 1]$ to be the one-force point where $B_t = 1$
+for $t_1 < t < T$. Note that $B_T = 0$ implies $t_0$ exists and $B_T = 1$
+implies $t_1$ exists. Thus $t_0$ and $t_1$ are mutually exclusive events where
+one or the other must occur for a given sample. The exception is when $T = 0$,
+at which point both vacuously exist at $t_0 = t_1 = 0$, but we ignore this
+exception sine we've specified $T > 0$.
+
+We can rephrase the ``minimal'' requirement of the force points to make it
+easier to define their distributions. If $t_0$ being the minimal non-negative
+integer such that $\forall t \in (t_0, T] \> B_t = 0$, either $t_0 = 0$ or
+$B_{t_0} = 1$ (if $B_{t_0} = 0$, then $t'_0 = t_0 - 1$ satisfies $\forall t \in
+(t'_0, T] \> B_t = 0$, a contradiction). Likewise, either $t_1 = 1$ or $B_{t_1}
+= 0$.
+
+By introducing the variables $\ell_t = \sum_{t',1,t} b_t$ as the number of high
+emissions up to $t$, we can refine our definition of $t_0$ and $t_1$ to refer
+to the points when the suffix must all be zeros or ones explicitly. More
+formally, for some fixed-value sample $b \sim P^*(b)$:
+%
+\begin{equation} \label{eq:iid_t0}
+    \exists t_0 \in [0, T - 1] \implies \ell_{t_0} = L \land
+                                        \left(t_0 = 0 \lor b_{t_0} = 1\right)
+\end{equation}
+%
+\begin{equation} \label{eq:iid_t1}
+    \exists t_1 \in [0, T - 1] \implies \ell_{t_1} = L - T + t_1 \land
+                                        \left(t_1 = 0 \lor b_{t_1} = 0\right)
+\end{equation}
+%
+the conditions on $\ell_t$ reflect the number of high $b_{t'}$ remaining ($t' >
+t$). For $t_0$, no high Bernoulli values can follow, which means we must have
+previously sampled all $L$. For $t_1$, the number of remaining Bernoulli values
+must equal the number of remaining labels ($L - \ell_{t_0} = T - t_0$).
+
+Letting $P^*(t_0)$ be the probability over samples $b$ that $t_0$ exists and is
+equal to the value $t_0$:
+%
+\begin{equation} \label{eq:iid_pt0}
+    P^*(t_0) = \begin{cases}
+        \binom{t_0 - 1}{L - 1} p^L (1 - p)^{t_0 - L}    & t_0 > 0 \\
+        I[L = 0]                                        & t_0 = 0
+    \end{cases}
+\end{equation}
+%
+Likewise
+%
+\begin{equation} \label{eq:iid_pt1}
+    P^*(t_1) = \begin{cases}
+        \binom{t_1 - 1}{T - L - 1}
+            p^{t_1 - T + L} (1 - p)^{T - L}             & t_1 > 0 \\
+        I[T = L]                                        & t_1 = 0
+    \end{cases}
+\end{equation}
+%
+If $t_0$ exists, all highs must occur before or at $t_0$. The first equation
+can be interpreted as the probability of $L - 1$ high Bernoulli values before
+$t_0$, then multiplying that with the probability that $B_{t_0} = 1$ ($p$). If
+$t_1$ exists, all \emph{lows} must occur before or at $t_1$. The second can be
+interpreted as the probability of choosing $T - L - 1$ low Bernoulli values
+before $t_1$, then multiplying that with the probability that $B_{t_1} = 0$.
+
+Because $t_0$ and $t_1$ are mutually exclusive when $T > 0$ and one must always
+occur at a given time, $\Sum{P^*(t_0=t) + P^*(t_1=t)}{t,0,T-1} = 1$, giving us
+a distribution over the forced suffixes.
+
+Consider the conditional probability of $B_t = 1$ relative to the position of
+the forced points:
+%
+\begin{itemize}
+    \item $P^*(B_t = 1|t < t_0) = (L - 1) / (t_0 - 1)$ since $L - 1$ of the
+          $t_0 - 1$ random variables are high \emph{before} $t_0$ and each
+          such r.v. has an equal chance of being chosen.
+    \item $P^*(B_t = 1|t = t_0) = 1$ since $t_0$ is high. Note that this is
+          only possible when $t \neq T$ since $t_0 < T$.
+    \item $P^*(B_t = 1|t > t_0) = 0$ since all $B_t$ following $t_0$ are low.
+    \item $P^*(B_t = 1|t < t_1) = (t_1 - T + L) / (t_1 - 1)$ since $T - L - 1$
+          of the $t_1 - 1$ random variables are low (and thus $t_1 - T - L$
+          high) \emph{before} $t_1$.
+    \item $P^*(B_t = 1|t = t_1) = 0$ since $t_1$ is low.
+    \item $P^*(B_t = 1|t > t_1) = 1$ since all $B_t$ following $t_1$ are high.
+\end{itemize}
+
+Therefore the probability that $B_t = 1$ under the forced suffix distribution
+is:
+%
+\begin{equation*}
+\begin{split}
+    P^*(B_t = 1)
+        =&  \Sum{P^*(t_0)P^*(B_t = 1|t < t_0)}{t_0,t + 1,T-1} +
+            P^*(t_0=t)P^*(B_t = 1|t=t_0) + \\
+        &   \Sum{P^*(t_1)P^*(B_t = 1|t < t_1)}{t_1,t + 1,T-1} +
+            \Sum{P^*(t_1)P^*(B_t = 1|t > t_1)}{t_1,0,t - 1} \\
+        =&  \Sum{
+                \frac{L - 1}{t_0 - 1}
+                \binom{t_0 - 1}{L - 1}p^L (1 - p)^{t_0 - L}
+            }{t_0,t + 1,T-1} + \\
+        &   I[t \neq T] \binom{t - 1}{L - 1} p^L (1 - p)^{t - L} + \\
+        &   \Sum{
+                \frac{t_1 - T + L}{t_1 - 1}
+                \binom{t_1 - 1}{T - L - 1} p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,t + 1,T-1} + \\
+        &   \Sum{
+                \binom{t_1 - 1}{T - L - 1} p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,1,t-1} + I[T = L] \\
+        =&  \Sum{
+                \binom{t_0 - 2}{L - 2}p^L (1 - p)^{t_0 - L}
+            }{t_0,t + 1,T-1} + \\
+        &   I[t \neq T] \binom{t - 1}{L - 1} p^L (1 - p)^{t - L} + \\
+        &   \Sum{
+                \binom{t_1 - 2}{T - L - 1} p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,t + 1,T-1} + \\
+        &   \Sum{
+                \binom{t_1 - 1}{T - L - 1} p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,T-L,t-1} + I[T = L]
+\end{split}
+\end{equation*}
+
+The contributing summands differ according to $t$. Assume the usual case that
+$L < T - L < T$. If $0 < t < L$ then
+%
+\begin{equation*}
+\begin{split}
+    P^*(B_t=1|0 < t < L)
+        =&  \Sum{
+                \binom{t_0 - 2}{L - 2}p^L (1 - p)^{t_0 - L}
+            }{t_0,L,T-1} + \\
+        &   \Sum{
+                \binom{t_1 - 2}{T - L - 2}p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,T-L,T-1}
+\end{split}
+\end{equation*}
+
+% Assuming $p = 0.5$ as in our example in \cref{sec:motivations},
+% %
+% \begin{equation*}
+% \begin{split}
+%     P^*(B_t=1)
+%         =&  \Sum{\binom{t_0 - 2}{L - 2}p^{t_0}}{t_0,t + 1,T-1} +
+%             I[t \neq T] \binom{t - 1}{L - 1} p^t + \\
+%         &   \Sum{\binom{t_1 - 2}{T - L - 1} p^{t_1}}{t_1,t + 1,T-1} +
+%             \Sum{\binom{t_1 - 1}{T - L - 1} p^{t_1}}{t_1,T-L,t-1} + I[T = L]
+% \end{split}
+% \end{equation*}
+
+\section{The ideal approximation}
+
+Suppose we want to design an ideal approximation for the conditional
+probability $P(B_t=1|b_{<t}, L)$ via function family $f(b_{<t}, p_{\leq t}, T,
+L)$ and one for the prior $P(L)$ via function family $h(p_{\leq t}, T, L)$,
+$p_t = P(B_t=1|b_{<t})$. The family $f$ only has access to the prefix of
+samples $b_{<t}$ and probabilities $p_{\leq t}$, not any future probabilities,
+because $p_t$ may depend on $b_{<t}$ at test time (during which we
+incrementally build the sample sequence $b$).
+
+Critically, we require that $f$ follow the restriction that only $L$ high
+samples may be generated total per sequence. Formally, letting $\ell_{<t} =
+\Sum{b_{t'}}{t',1,t - 1}$, these restrictions can be stated as
+%
+\begin{enumerate}
+    \item $f(b_{<t}, p_{\leq t}, T, L) = 1$ if $T - t + 1 = L - \ell_{<t}$.
+    \item $f(b_{<t}, p_{\leq t}, T, L) = 0$ if $L - \ell_{<t} = 0$.
+\end{enumerate}
+%
+that is, the probability of sampling $B_t = 1$ becomes $1$ when the number of
+remaining random variables equals the remaining number of highs and becomes
+$0$ when all $L$ highs have already occurred.
+
+These restrictions gloss over the possibility that some $p_{\geq t}$ may be
+zero. Indeed, our discussion assumes that $\forall t \in [1, T] : p_t \in (0,
+1)$, making all $b \in \{0,1\}^T$ valid samples when $L$ is free. Were we to
+allow for $p_t = 0$, the only $f$ capable of producing valid samples would be
+%
+\begin{equation*}
+    P(b_{<t}, p_{\leq t}, T, L) = I[p_t > 0]I[\ell_{<t} < L]
+\end{equation*}
+%
+that is, emit all high samples as quickly as possible and stop when none
+remain. If $f$ were not identically $1$ for nonzero $p_t$, one could take $B_t
+= 0$ for one of those $p_t < 0$ and choose $p_{\geq t}$ such that only $L -
+\ell_t - 1$ remaining probabilities are nonzero. Suffice to say the above
+approximation is far from ideal. Restricting $p_t > 0$ is fair considering
+$p_t$ is likely a function of some exponentiated real value from a neural
+neural network and cannot even take the value $0$.
+
+The other component of an ideal approximator is that, were we to multiply
+$P(b|L)$ with its prior $P(L)$, we would recover the sample probability $P(b) =
+P(b_1)P(b_2|b_1) \ldots P(b_T|b_{<T})$. Stated in terms of the approximations:
+%
+\begin{enumerate}
+    \setcounter{enumi}{2}
+    \item $h(p, T, \ell_T) \Prod{f(b_{<t}, p_{\leq t}, T, L)^{b_t} + (1 -
+    f(\ldots))^{1 - b_t}}{t,1,T} = \Prod{p_t^{b_t}(1 - p_t)^{1 - b_t}}{t,1,T}$
+\end{enumerate}
+
+Restrictions 1-3 cannot be met simultaneously. We prove this by counterexample.
+Choose $T = 2$ and $L = 1$. Note that $B_1 = 1 \iff B_2 = 0$. This means
+$f(b_1, p_{\leq 2}, 2, 1) = I[b_1 = 0]$ by restrictions 1-2. Let $f(\emptyset,
+p_1, 2, 1) = \alpha$. $B_1 = 1$ with probability $\alpha$. Plugging in the
+samples $b \in \{0, 1\}^2$ into restriction 3 gives us a system of two
+equations with two unknowns ($\alpha$ and $h(\cdot)$):
+%
+\begin{equation*}
+\begin{split}
+    h(p, 2, 1)\alpha &= p_1 (1 - p_2) \\
+    h(p, 2, 1)(1 - \alpha) &= (1 - p_1) p_2
+\end{split}
+\end{equation*}
+%
+The system has unique solutions
+%
+\begin{equation*}
+\begin{split}
+    \alpha      &= \frac{p_1 - p_1 p_2}{p_1 - 2 p_1 p_2 + p_2} \\
+    h(p, 2, 1)  &= p_1 - 2 p_1 p_2 + p_3
+\end{split}
+\end{equation*}
+%
+which are both valid probabilities. However, the solution to $\alpha$ is a
+function of $p_2$, which is not an input to $f(\emptyset, p_1, 2, 1)$. $\alpha$
+must be constant for $p = (p_1, p_2)$ and $p' = (p_1, p'_2)$, $p_2 \neq p'_2$,
+which means it will not satisfy restriction 3 for all choices of $p$.
+
+This implies there are no $f$ and $h$ that can be decomposed nicely into
+$P(b|L)$ and $P(L)$ respectively. In the above counterexample, $p_2$ and
+$p'_2$ represent the marginal probabilities of the second Bernoulli trial
+across two different distributions $p$ and $p'$; they are not conditioned on
+$b_1$. Thus we cannot make the decomposition even with the independence
+assumption, i.e. $P(b_t|b_{<t}) = P(b_t)$
+
+While no $h$ can act as a proper prior $P(L)$, we can still recover the
+unconditioned probability of a sample $b$ by relaxing the constraints on
+$h$. In particular, if we allow $h$ to depend on the sample $b$, finding $h$
+is trivial:
+%
+\begin{equation*}
+    h(b, p, T) = \frac{\Prod{p_t^{b_t}(1 - p_t)^{1 - b_t}}{t,1,T}}
+                 {\Prod{f(b_{<t}, p_{\leq t}, T, L)^{b_t} + (1 -
+                  f(\ldots))^{1 - b_t}}{t,1,T}}
+\end{equation*}
+%
+In fact, were we to call the numerator $P(b, L) = P(b)$ and call the
+denominator the proposal distribution $\Prod{f(b_{<t}, p_{\leq t}, T, L)^{b_t}
++ (1 - f(\ldots))^{1 - b_t}}{t,1,T} = Q(b, L) = Q(b)$, then maximizing $h$
+jointly with $p(y|b)$ gives us
+%
+\begin{equation}
+    \mathbb{E}_{b \sim Q} \left[P(y|b)h(b)\right] =
+    \mathbb{E}_{b \sim Q} \left[P(y|b)\frac{P(b)}{Q(b)}\right] = P(y)
+\end{equation}
+%
+and applying Jensen's inequality gives us the a lower bound from Variational
+Inference (VI):
+%
+\begin{equation} \label{eq:vi_lower_bound}
+    \log P(y) \geq \mathbb{E}_{b \sim Q} \left[
+        \log P(y|b) + \log \frac{P(b)}{Q(b)}\right]
+\end{equation}
+%
+Since both $P(b)$ and $Q(b)$ factor over time, a similar REINFORCE objective to
+those in \citet{lawsonLearningHardAlignments2018}, but with the additional
+restrictions 1-2 on $Q(b)$.
+
+If we consider the right-hand side of \cref{eq:vi_lower_bound} an estimator
+for the left-hand side $\log P(y)$, we can see that the estimator is biased
+unless both sides are equal. This can only occur when $P(b) = Q(b)$
+\cite{kingmaAutoencodingVariationalBayes2014}. From the above proof involving
+$h$ and $f$ we know that $P(b) \neq Q(b)$ in general. Thus, for general
+$P$, variational lower bounds such as those in \cref{eq:vi_lower_bound}
+\emph{will always be biased}.
+
+We can mitigate the bias in \cref{eq:vi_lower_bound} by taking the mean ratio
+over many samples inside the log
+\cite{burdaImportanceWeightedAutoencoders2016}:
+%
+\begin{equation} \label{eq:iwae_lower_bound}
+    \log P(y) \geq \mathbb{E}_{b \sim Q} \left[
+        \log \frac{1}{K} \frac{P(y, b)}{Q(b)} \right]
+        \geq \mathbb{E}_{b \sim Q} \left[
+             \log P(y|b) + \log \frac{P(b)}{Q(b)}\right]
+\end{equation}
+%
+A sum within the log term precludes factorizing $P(b)$ and $Q(b)$ over time.
+Thus, the decrease in bias of \cref{eq:iwae_lower_bound} is at the cost of
+the higher variance of a global reward function.
+
 \section{TODO}
 
-\emph{Talk to David Duvenaud about his opinion on what ML folk believe
-auto-regression to be.} Is \cref{sec:fake_it} necessary?
+% \emph{Talk to David Duvenaud about his opinion on what ML folk believe
+% auto-regression to be.} Is \cref{sec:fake_it} necessary?
 
 \emph{More general bounds on the distribution over trials of the
 \citeauthor{luoLearningOnlineAlignments2017} when $P(b_t) = 0.5$}. A bit
@@ -1285,10 +1651,8 @@ and, if we condition on $L$, there must be $L \ll T$ (and only $L$) ``high''
 $B_t$, i.e. $\sum_t B_t = L$.
 %
 \begin{enumerate}
-    \item \emph{Conditional:} $P(b_t|b_{<t}, L, T)$ is well-defined and
-          tractable. We can sample an event at time $t$ under the constraint
-          that some number of remaining high events $L - \sum_{<t} H(b_t)$ will
-          occur over the suffix of $T - t$ random variables.
+    \item \emph{Conditional:} $P(b_t|b_{<t},L,T)$ is well-defined and
+          tractable.
     \item \emph{Marginal:} $P(b_t|b_{<t}, T) = P(b_t|b_{<t})$. That is, we can
           marginalize out the total number of ``high'' events $L$ in the
           sequence in a way agnostic to the remaining number of total variables
@@ -1341,6 +1705,31 @@ auto-regressive sequence of Bernoulli trials at test time, just like
 calculated by the authors during training ignores conditioning on $L$, just
 like \citeauthor{luoLearningOnlineAlignments2017}, and is subject to the same
 sort of bias exemplified in \cref{fig:bias}.
+
+I think the difficult part of finding a closed-form distribution that is both
+auto-regressive and does not enumerate the log-odds in the \emph{prior}, not
+the posterior. For example, we can get a closed-form step by treating the
+parameterized probability $p_t$ as a surrogate for all future probabilities and
+using the binomial distribution:
+%
+\begin{equation*}
+\begin{split}
+    P(B_t = 1, \ell_t) &=
+        \binom{T - t}{L - \ell_t - 1} p_t^{L - \ell_t}
+                                      (1 - p_t)^{T - t - L + \ell_t + 1} \\
+    P(\ell_t) &= \binom{T - t + 1}{L - \ell} p_t^{L - \ell_t}
+                                      (1 - p_t)^{T - t - L + \ell_t + 1} \\
+    P(B_t = 1|\ell_t) &= \frac{L - \ell_t}{T - t + 1}
+\end{split}
+\end{equation*}
+%
+where the last equation follows from dividing the first by the second. This
+conditional is trivial to calculate (it doesn't even involve $p_t$), but
+calculating $P(L)$ would still require summing the probability of all sequences
+that have $L$ highs.
+
+Thus, requirement 1 should probably be switched to something like ``the
+prior is well-defined and tractable.''
 
 Some things to follow up on towards a proof:
 
