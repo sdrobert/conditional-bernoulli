@@ -104,7 +104,8 @@ gradient estimate of \cref{eq:luo_reinforce}
 
 We believe that the performance and convergence issues of these models are not
 due, at least in whole, to a high-variance estimate. Instead, we propose that a
-bias in \cref{eq:luo_reward} is responsible for the early training difficulty.
+a bias was introduced into \cref{eq:luo_reinforce} via the mechanism which
+guaranteed a fixed number of Bernoulli highs during training.
 
 In order to ensure the total number of high Bernoulli values matched the total
 number of labels $L$ during training, i.e. $\sum_t b_t = L$, the authors would
@@ -112,63 +113,122 @@ force later samples to some specific value. For example, if at point $t = T - L
 + \ell$ only $\ell$ samples emitted, $B_t = 1$ regardless of $P(b_t)$.
 Likewise, if $L$ samples emitted before $t$, $B_t = 0$.
 
-\begin{figure}
-    \centering
-    \begin{minipage}{.45\textwidth}
-        \begin{tabular}{c c c | c}
-            $b_1$ & $b_2$ & $b_3$ & Bias weight \\
-            \hline
-            0 & 0 & 0 & \\[-1.5ex]
-            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
-            0 & 0 & 1 & $2 \times$ \\
-            0 & 1 & 0 & $2 \times$ \\
-            0 & 1 & 1 & \\[-1.5ex]
-            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
-            1 & 0 & 0 & $4 \times$ \\
-            1 & 0 & 0 & \\[-1.5ex]
-            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
-            1 & 0 & 1 & \\[-1.5ex]
-            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
-            1 & 1 & 1 & \\[-1.5ex]
-            \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
-        \end{tabular}
-    \end{minipage}
-    \begin{minipage}{.45\textwidth}
-        \begin{tabular}{c | c}
-                        & Average $\sum R_t$ \\
-            \hline
-            Unbiased    & $R_1 / 3 + R_2 / 3 + R_3 / 3$ \\
-            Biased      & $R_1 / 2 + R_2 / 4 + R_3 / 4$
-        \end{tabular}
-    \end{minipage}
-    \caption{
-        Example of the effect of sample bias on total reward under a uniform
-        prior.}
-    \label{fig:bias}
-\end{figure}
+% \begin{figure}
+%     \centering
+%     \begin{minipage}{.45\textwidth}
+%         \begin{tabular}{c c c | c}
+%             $b_1$ & $b_2$ & $b_3$ & Bias weight \\
+%             \hline
+%             0 & 0 & 0 & \\[-1.5ex]
+%             \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+%             0 & 0 & 1 & $2 \times$ \\
+%             0 & 1 & 0 & $2 \times$ \\
+%             0 & 1 & 1 & \\[-1.5ex]
+%             \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+%             1 & 0 & 0 & $4 \times$ \\
+%             1 & 0 & 0 & \\[-1.5ex]
+%             \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+%             1 & 0 & 1 & \\[-1.5ex]
+%             \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+%             1 & 1 & 1 & \\[-1.5ex]
+%             \hline\noalign{\vspace{\dimexpr 1.5ex-\doublerulesep}}
+%         \end{tabular}
+%     \end{minipage}
+%     \begin{minipage}{.45\textwidth}
+%         \begin{tabular}{c | c}
+%                         & Average $\sum R_t$ \\
+%             \hline
+%             Unbiased    & $R_1 / 3 + R_2 / 3 + R_3 / 3$ \\
+%             Biased      & $R_1 / 2 + R_2 / 4 + R_3 / 4$
+%         \end{tabular}
+%     \end{minipage}
+%     \caption{
+%         Example of the effect of sample bias on total reward under a uniform
+%         prior.}
+%     \label{fig:bias}
+% \end{figure}
 
 Though this bias appears harmless at first, it has great ramifications for the
-estimator early on during training. In short, the bias leads to earlier samples
-having greater impact on the total reward than later ones. \Cref{fig:bias}
-provides an illustrative example for $T = 3$ and $L = 1$. At the beginning of
-training, $P(b_t|\ldots) \approx 0.5$ and each $b$ is assumed to be equally
-likely. Though there are $2^3 = 8$ such equally-probable $b$, only
-$\binom{T}{L} = 3$ feature only one high Bernoulli value (i.e. $\sum b_t = L$).
-They are still equally probable, so an unbiased estimator should weigh the
-possibilities equally, leading to a total expected reward distributed evenly
-among the pointwise rewards. However, under the biased sampling procedure, the
-sequence $b = (1, 0, 0)$ will appear twice as often as the other two valid
-sequences, meaning $R_1$ has twice the impact on the total reward versus $R_2$
-or $R_3$.
+estimator early on during training. We will provide an illustrative example.
 
-The bias also has a strong impact on the gradient estimates. We can see from
-\cref{eq:luo_reinforce} that $R_{\geq t} = 0$ once $\sum b_{<t} = L$. Thus,
-parameter $\theta$ will receive no update from such $t$. For $T \gg L$, we
-expect a model to be done emitting high Bernoulli trials after about $2L$
-frames, which would mean the tail $T - 2L$ frames would have no impact on the
-gradient. This could explain why, without an additional ``entropy penalty,''
-the model would learn to emit entirely at the beginning of the utterance
-\cite{luoLearningOnlineAlignments2017}.
+Initially, we expect a roughly constant probability of being high $P(B_t=1)
+\approx p$ with $B_t \ind B_{t'}, t \neq t'$, since no meaningful relationships
+between inputs over time have been established. Because the probabilities of
+the roughly i.i.d. Bernoulli variables is roughly constant, the probability of
+being chosen as one of the $L$ high values is equal to $P(B_t=1|L) = L / T$,
+regardless of the constant $p$. However, under the reasonable assumptions $0 <
+L < T - L < T$, the emission probability for some given $t$ induced by the
+forced-suffix mechanism evaluates to
+%
+\begin{equation} \label{eq:iid_suffix_dist}
+\begin{split}
+    P^*(B_t=1|L < T - L < T)
+        =& p - I[t > L]p\bar{B}(p; L, t - L) + \\
+        &  I[t > T - L](1 - p)\bar{B}(1 - p; T - L; t - T + L)
+\end{split}
+\end{equation}
+%
+Where $I[\ldots]$ is the indicator function and $\bar{B}(p; a, b)$ is the
+regularized incomplete Beta function. The derivation of this distribution can
+be found in \cref{sec:suffix}. The first $t \leq L$ Bernoulli variables
+get to ignore the restriction entirely, giving them a probability $p$; the
+samples $t > L$ lose out on some of that probability mass because some paths
+that would have contributed would have more than $L$ samples; and, samples
+$t > L - T$ gain some additional probability mass when they are forced to $1$
+in order to emit $L$ highs by the end of the utterance.
+
+\begin{figure}
+\centering
+\begin{minipage}{0.45\textwidth}
+    \includegraphics[width=\textwidth]{fs_compare_fs.pdf}
+\end{minipage}
+\begin{minipage}{0.45\textwidth}
+    \includegraphics[width=\textwidth]{fs_compare_ps.pdf}
+\end{minipage}
+\caption{
+%
+    The disparity between the expected and actual probabilities of each
+    Bernoulli random variable being high over time due to the forced suffix
+    hack. Horizontal lines indicate the expected probability for the given
+    number of frames and labels. Vertical lines indicate when the frame number
+    matches the label number. \emph{Left}: varying frame rate at $p = 0.5$.
+    \emph{Right}: varying $p$ at frame rate of $0.03s$.
+%
+} \label{fig:bias}
+\end{figure}
+
+\Cref{fig:bias} illustrates the distribution of $P^*(B_t=1|\ldots)$ on an
+average-length utterance of TIMIT (3 seconds) and an average number of labels
+per utterance (38). The blue scatter plot on the left-hand side produces a
+Bernoulli random variable every 30 milliseconds, the same as
+\citet{luoLearningOnlineAlignments2017}, with even odds of each value. The
+forced suffix distribution overestimates the probability of the first two
+thirds of samples being and underestimates the last third, with the last sixth
+rarely if ever being sampled. The disparity becomes more exaggerated when we
+produce a random variable every 10 milliseconds (the orange scatter plot) -
+the usual rate at which speech features are produced - with over half of the
+Bernoulli variables having virtually zero probability of drawing value $1$. The
+right-hand plot illustrates that the bias becomes more or less severe depending
+on how close $P(B_t=1)$ is to the expected probability $L / T$.
+
+While this example makes strong independence assumptions about the
+distributions of the produced random variables, the behaviour predicted by it -
+namely, that the model will tend to emit at the beginning or end of the
+utterance - is borne out by the authors themselves.
+\citet{luoLearningOnlineAlignments2017} observed that their model would tend to
+emit entirely at the poles without an additional entropy penalty, which
+presumably pushed $P(B_t=1) \to L / T$ and mitigated the bias.
+
+% The bias also has a strong impact on the gradient estimates. We can see from
+% \cref{eq:luo_reinforce} that $R_{\geq t} = 0$ once $\sum b_{<t} = L$. Thus,
+% parameter $\theta$ will receive no update from such $t$.
+
+% For $T \gg L$, we
+% expect a model to be done emitting high Bernoulli trials after about $2L$
+% frames, which would mean the tail $T - 2L$ frames would have no impact on the
+% gradient. This could explain why, without an additional ``entropy penalty,''
+% the model would learn to emit entirely at the beginning of the utterance
+% \cite{luoLearningOnlineAlignments2017}.
 
 To solve the problem of bias, we propose replacing the $T$ independent
 Bernoulli random variables $B_t$ sampled during training with a single sample
@@ -1306,6 +1366,7 @@ Decoder structures:
 \appendix
 
 \section{Determining the bias of forced emissions for i.i.d. Bernoulli}
+\label{sec:suffix}
 
 From \cref{sec:motivations}, we assume $R_t = R$ if $B_t = 1$ else $R_t = 0$.
 If $B_t \sim P(b_t)$ are drawn i.i.d., then let $P(b_t) = p$. We also assume $0
@@ -1569,16 +1630,9 @@ $P^*(B_t=1|T - L < t < T)$, meaning we can extend the latter interval to
 include $T$.
 
 Collecting the various conditions on $t$ together into a piecewise function
-for the probability of $B_t = 1$ under the forced-suffix distribution:
-%
-\begin{equation} \label{eq:iid_suffix_dist}
-\begin{split}
-    P^*(B_t=1|L < T - L < T)
-        =& p - I[t > L]p\bar{B}(p; L, t - L) + \\
-        &  I[t > T - L](1 - p)\bar{B}(1 - p; T - L; t - T + L)
-\end{split}
-\end{equation}
-%
+for the probability of $B_t = 1$ under the forced-suffix distribution gives
+us \cref{eq:iid_suffix_dist}.
+
 We can interpret \cref{eq:iid_suffix_dist} as follows. The probability of the
 first $L$ samples will never be tampered with when $L < T - L$ because there
 will always be at least one remaining high sample possible and at least $L$
