@@ -1394,8 +1394,16 @@ interpreted as the probability of choosing $T - L - 1$ low Bernoulli values
 before $t_1$, then multiplying that with the probability that $B_{t_1} = 0$.
 
 Because $t_0$ and $t_1$ are mutually exclusive when $T > 0$ and one must always
-occur at a given time, $\Sum{P^*(t_0=t) + P^*(t_1=t)}{t,0,T-1} = 1$, giving us
-a distribution over the forced suffixes.
+occur at a given time, $\Sum{P^*(t_0=t) + P^*(t_1=t)}{t,0,T-1} = 1$\footnote{
+%
+    This can be verified by observing that \cref{eq:iid_pt0,eq:iid_pt1} are
+    negative binomial distributions: $P^*(t_0)$ with success probability
+    $p'=p$, $r'=L$ successes and $k'=t_0 + L$ failures; and $P^*(t_1)$ with
+    success probability $p'=1 - p$, $r'=T - L$ successes, and $k'=t_1 + T - L$
+    failures. The rest proceeds similarly to our calculations for
+    $P^*(B_t=1|0 < t < L)$.
+%
+}, giving us a distribution over the forced suffixes.
 
 Consider the conditional probability of $B_t = 1$ relative to the position of
 the forced points:
@@ -1436,7 +1444,7 @@ is:
         &   \Sum{
                 \binom{t_1 - 1}{T - L - 1} p^{t_1 - T + L}(1 - p)^{T - L}
             }{t_1,1,t-1} + I[T = L] \\
-        =&  \Sum{
+        =&  I[L > 1] \Sum{
                 \binom{t_0 - 2}{L - 2}p^L (1 - p)^{t_0 - L}
             }{t_0,t + 1,T-1} + \\
         &   I[t \neq T] \binom{t - 1}{L - 1} p^L (1 - p)^{t - L} + \\
@@ -1450,7 +1458,7 @@ is:
 \end{equation*}
 
 The contributing summands differ according to $t$. Assume the usual case that
-$L < T - L < T$. If $0 < t < L$ then
+$L < T - L < T$.
 %
 \begin{equation*}
 \begin{split}
@@ -1459,22 +1467,132 @@ $L < T - L < T$. If $0 < t < L$ then
                 \binom{t_0 - 2}{L - 2}p^L (1 - p)^{t_0 - L}
             }{t_0,L,T-1} + \\
         &   \Sum{
-                \binom{t_1 - 2}{T - L - 2}p^{t_1 - T + L}(1 - p)^{T - L}
-            }{t_1,T-L,T-1}
+                \binom{t_1 - 2}{T - L - 1}p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,T-L+1,T-1} \\
+        =&  p\Sum{
+                \binom{t_0 + L - 2}{t_0}p^{L - 1} (1 - p)^{t_0}
+            }{t_0,0,T-L-1} + \\
+        &   p\Sum{
+                \binom{t_1 + T - L - 1}{t_1}p^{t_1}(1 - p)^{T - L}
+            }{t_1,0,L - 2} \\
+        =&  p\left(
+                \bar{B}(p; L - 1, T - L) + \bar{B}(1 - p; T - L; L - 1)
+                \right) \\
+        =&  p\left(1 - \bar{B}(1 - p; T - L; L - 1)
+                + \bar{B}(1 - p; T - L; L - 1)\right) \\
+        =& p
 \end{split}
 \end{equation*}
+%
+\begin{equation*}
+    P^*(B_t=1|L \leq t \leq T - L, L=1) = p (1 - p)^{t - 1}
+\end{equation*}
+%
+\begin{equation*}
+\begin{split}
+    P^*(B_t=1|1 < L \leq t \leq T - L)
+        =&  \Sum{
+                \binom{t_0 - 2}{L - 2}p^L (1 - p)^{t_0 - L}
+            }{t_0,t+1,T-1} + \\
+        &   \binom{t - 1}{L - 1} p^L (1 - p)^{t - L} + \\
+        &   \Sum{
+                \binom{t_1 - 2}{T - L - 1}p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,T-L+1,T-1} \\
+        =&  p + \binom{t - 1}{L - 1} p^L (1 - p)^{t - L} - \\
+        &   p\bar{B}(p; L - 1, t - L + 1)
+\end{split}
+\end{equation*}
+%
+where $\bar{B}(p; r, k)$ is the regularized incomplete beta function, which is
+also the CDF of the negative binomial distribution with success probability
+$p$, $r$ successes and $k$ failures.
 
-% Assuming $p = 0.5$ as in our example in \cref{sec:motivations},
-% %
-% \begin{equation*}
-% \begin{split}
-%     P^*(B_t=1)
-%         =&  \Sum{\binom{t_0 - 2}{L - 2}p^{t_0}}{t_0,t + 1,T-1} +
-%             I[t \neq T] \binom{t - 1}{L - 1} p^t + \\
-%         &   \Sum{\binom{t_1 - 2}{T - L - 1} p^{t_1}}{t_1,t + 1,T-1} +
-%             \Sum{\binom{t_1 - 1}{T - L - 1} p^{t_1}}{t_1,T-L,t-1} + I[T = L]
-% \end{split}
-% \end{equation*}
+Noting $P^*(B_L=1|L < T - L) = p$ both when $L = 1$ and $L \neq 1$, we can
+extend the first interval to include $L$, that is
+%
+\begin{equation*}
+    P^*(B_t=1|0 < t \leq L) = p
+\end{equation*}
+%
+which allows us to simplify
+%
+\begin{equation*}
+    p^*(B_t=1|L < t \leq T - L) = p\left(1 - \bar{B}(p; L, t - L)\right)
+\end{equation*}
+%
+Where we have dropped the restriction that $L > 1$ since the right-hand
+side evaluates to the same value as the right-hand side for
+$P^*(B_t=1|L \leq t \leq T - L, L=1)$.
+
+\begin{equation*}
+\begin{split}
+    P^*(B_t=1|T - L < t < T)
+        =&  \Sum{
+                \binom{t_0 - 2}{L - 2}p^L (1 - p)^{t_0 - L}
+            }{t_0,t+1,T-1} + \\
+        &   \binom{t - 1}{L - 1} p^L (1 - p)^{t - L} + \\
+        &   \Sum{
+                \binom{t_1 - 2}{T - L - 1}p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,t+1,T-1} + \\
+        &   \Sum{
+                \binom{t_1 - 1}{T - L - 1}p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,T - L,t-1} \\
+        =&  p\left(1 - \bar{B}(p; L, T - L)\right) - \\
+        &   \Sum{
+                \binom{t_1 + T - L - 1}{t_1}p^{t_1 + 1}(1 - p)^{T - L}
+            }{t_1,0,t- T + L - 1} + \\
+        &   \Sum{
+                \binom{t_1 + T - L - 1}{t_1}p^{t_1}(1 - p)^{T - L}
+            }{t_1,0,t - T + L - 1} \\
+        =&  p\left(1 - \bar{B}(p; L, t - L)\right) + \\
+        &   (1 - p)\bar{B}(1 - p; T - L; t - T + L) \\
+\end{split}
+\end{equation*}
+%
+\begin{equation*}
+\begin{split}
+    P^*(B_T=1)
+        =&  \Sum{
+                \binom{t_1 - 1}{T - L - 1}p^{t_1 - T + L}(1 - p)^{T - L}
+            }{t_1,T - L,T-1} \\
+        =&  \Sum{
+                \binom{t_1 + T - L - 1}{t_1}p^{t_1}(1 - p)^{T - L}
+            }{t_1,0,L-1} \\
+        =&  \bar{B}(1 - p; T - L, L) \\
+        =&  p\left(1 - \bar{B}(p; L, T - L)\right) + \\
+        &   (1 - p)\bar{B}(1 - p; T - L; T - T + L)
+\end{split}
+\end{equation*}
+%
+The right-hand side of $P^*(B_T=1)$ equals the right-hand side of
+$P^*(B_t=1|T - L < t < T)$, meaning we can extend the latter interval to
+include $T$.
+
+Collecting the various conditions on $t$ together into a piecewise function
+for the probability of $B_t = 1$ under the forced-suffix distribution:
+%
+\begin{equation} \label{eq:iid_suffix_dist}
+\begin{split}
+    P^*(B_t=1|L < T - L < T)
+        =& p - I[t > L]p\bar{B}(p; L, t - L) + \\
+        &  I[t > T - L](1 - p)\bar{B}(1 - p; T - L; t - T + L)
+\end{split}
+\end{equation}
+%
+We can interpret \cref{eq:iid_suffix_dist} as follows. The probability of the
+first $L$ samples will never be tampered with when $L < T - L$ because there
+will always be at least one remaining high sample possible and at least $L$
+samples following. Thus the probability for $B_t = 1$ for $t \leq L$ will be
+merely the Bernoulli probability. Once $t > L$, some prefixes $b_{\leq t}$ (and
+all paths extending them) become invalid because they have too many high
+Bernoulli values. The $I[t > L]\ldots$ term sums the probabilities of all paths
+that would have contributed to the probability of $B_t=1$, but have $L + 1$ or
+more high values (including $B_t$). When $t$ approaches the end of the
+sequence, $t > T - L$, the probability of $B_t=1$ claims some additional
+probability mass of invalidated paths which would otherwise set $B_t=0$ but
+are forced to $1$ in order to make the total number of emissions $L$. The
+$I[t > T - L]\ldots$ term sums the probability of those paths, which have
+$T - L + 1$ \emph{low} values (including the $B_t=0$ term).
 
 \section{The ideal approximation}
 
@@ -1566,11 +1684,11 @@ unconditioned probability of a sample $b$ by relaxing the constraints on
 $h$. In particular, if we allow $h$ to depend on the sample $b$, finding $h$
 is trivial:
 %
-\begin{equation*}
+\begin{equation}
     h(b, p, T) = \frac{\Prod{p_t^{b_t}(1 - p_t)^{1 - b_t}}{t,1,T}}
                  {\Prod{f(b_{<t}, p_{\leq t}, T, L)^{b_t} + (1 -
                   f(\ldots))^{1 - b_t}}{t,1,T}}
-\end{equation*}
+\end{equation}
 %
 In fact, were we to call the numerator $P(b, L) = P(b)$ and call the
 denominator the proposal distribution $\Prod{f(b_{<t}, p_{\leq t}, T, L)^{b_t}
@@ -1587,7 +1705,7 @@ Inference (VI):
 %
 \begin{equation} \label{eq:vi_lower_bound}
     \log P(y) \geq \mathbb{E}_{b \sim Q} \left[
-        \log P(y|b) + \log \frac{P(b)}{Q(b)}\right]
+        \log \frac{P(y, b)}{Q(b)}\right]
 \end{equation}
 %
 Since both $P(b)$ and $Q(b)$ factor over time, a similar REINFORCE objective to
@@ -1609,13 +1727,16 @@ over many samples inside the log
 \begin{equation} \label{eq:iwae_lower_bound}
     \log P(y) \geq \mathbb{E}_{b \sim Q} \left[
         \log \frac{1}{K} \frac{P(y, b)}{Q(b)} \right]
-        \geq \mathbb{E}_{b \sim Q} \left[
-             \log P(y|b) + \log \frac{P(b)}{Q(b)}\right]
+        \geq \mathbb{E}_{b \sim Q} \left[\log \frac{P(y, b)}{Q(b)}\right]
 \end{equation}
 %
 A sum within the log term precludes factorizing $P(b)$ and $Q(b)$ over time.
 Thus, the decrease in bias of \cref{eq:iwae_lower_bound} is at the cost of
 the higher variance of a global reward function.
+
+Finally, we note that dropping the logs and maximizing the expectation of
+$P(y)$ directly will allow for an unbiased estimator, but such an estimator
+would be susceptible to underflow.
 
 \section{TODO}
 
