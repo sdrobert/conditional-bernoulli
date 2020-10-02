@@ -342,13 +342,13 @@ The total probability of a drafted sample is
 %
 \begin{equation} \label{eq:db}
     \begin{split}
-        P(A_k|k; w) &= \Prod{P(t_j \in A_j|A_{j-1}, k; w)}{j,1,k} \\
+        P(A_k|k; w) &= \Prod{P(t_j \in A_j|A_{j-1}; w)}{j,1,k} \\
         &= \Prod{\frac{
-        w_{t_j} C(k - j, A^c_j, k)}{
-        (k - j + 1)C(k - j + 1, A^c_{j - 1})}
+        w_{t_j} C(k - j, A^c_j; w)}{
+        (k - j + 1)C(k - j + 1, A^c_{j - 1}; w)}
         }{j,1,k} \\
         &= \left(\Prod{w_{t_j}}{j,1,k}\right)
-        \frac{C(0,A^c_k)}{\Factorial{k} C(k, I)} \\
+        \frac{C(0,A^c_k; w)}{\Factorial{k} C(k, I; w)} \\
         &= \frac{1}{\Factorial{k}} P(A|k, w)
     \end{split}
 \end{equation}
@@ -1342,7 +1342,7 @@ where the behaviour of $P(B_t)$ is undefined.
 While it is necessary to sample from $P(b|L)$ in order to sample $b$ with
 exclusively $L$ highs, we ultimately only care about matching $P(b)$ at test
 time. Instead of requiring $P(L) = g(p, T, L)$ and $P(B_t=1|b_{<t}, L) =
-    f(b_{<t}, p_{\leq t}, T, L)$, $g$ and $p$ could be some other prior and
+f(b_{<t}, p_{\leq t}, T, L)$, $g$ and $p$ could be some other prior and
 conditional such that their product is $P(b)$. Formally
 %
 \begin{enumerate}
@@ -1356,15 +1356,16 @@ With restrictions 1-4 we could, for example, derive an unbiased estimator for
 $P(y)$ with samples over $f$ and corrected by $g$ in a form similar to
 \cref{eq:idb_reinforce}.
 
-In the next section, we will provide estimators satisfying restrictions 1-3. If
-we make $f$ only assign one $b$ a nonzero probability and set $g' = P(b)$, we
-can satisfy restrictions 1, 2, and 4. However, restrictions 1-4 cannot be met
-simultaneously. We prove this by counterexample. Choose $T = 2$ and $L = 1$.
-Note that $B_1 = 1 \iff B_2 = 0$. This means $f(b_1, p_{\leq 2}, 2, 1) = I[b_1
-            = 0]$ by restrictions 1-2. Let $f(\emptyset, p_1, 2, 1) = \alpha$. $B_1 = 1$
-with probability $\alpha$. Plugging in the samples $b \in \{0, 1\}^2$ into
-restriction 3 gives us a system of two equations with two unknowns ($\alpha$
-and $h(\cdot)$):
+The distribution over $b$ induced by the forced-suffix mechanism from
+\cref{sec:motivations} is an example of an approximator which satisfies
+restrictions 1-3. If we make $f$ only assign one $b$ a nonzero probability and
+set $g' = P(b)$, we can satisfy restrictions 1, 2, and 4. However, restrictions
+1-4 cannot be met simultaneously. We prove this by counterexample. Choose $T =
+2$ and $L = 1$. Note that $B_1 = 1 \iff B_2 = 0$. This means $f(b_1, p_{\leq
+2}, 2, 1) = I[b_1 = 0]$ by restrictions 1-2. Let $f(\emptyset, p_1, 2, 1) =
+\alpha$. $B_1 = 1$ with probability $\alpha$. Plugging in the samples $b \in
+\{0, 1\}^2$ into restriction 3 gives us a system of two equations with two
+unknowns ($\alpha$ and $h(\cdot)$):
 %
 \begin{equation*}
     \begin{split}
@@ -1388,16 +1389,23 @@ must be constant for $p = (p_1, p_2)$ and $p' = (p_1, p'_2)$, $p_2 \neq p'_2$,
 which means it will not satisfy restriction 4 for all choices of $p$.
 
 This implies there are no $f$ and $g$ that can be decomposed nicely into
-$P(b|L)$ and $P(L)$ respectively. In the above counterexample, $p_2$ and
-$p'_2$ represent the marginal probabilities of the second Bernoulli trial
-across two different distributions $p$ and $p'$; they are not conditioned on
-$b_1$. Thus we cannot make the decomposition even with the independence
-assumption, i.e. $P(b_t|b_{<t}) = P(b_t)$
+$P(b|L)$ and $P(L)$ respectively. In the above counterexample, $p_2$ and $p'_2$
+represent the marginal probabilities of the second Bernoulli trial across two
+different distributions $p$ and $p'$; they are not conditioned on $b_1$. Thus
+we cannot make the decomposition even with the independence assumption, i.e.
+$P(b_t|b_{<t}) = P(b_t)$.
+
+Given that 1-4 cannot be satisfied simultaneously, and 1-2 are necessary, we
+must decide whether to drop restriction 3 or 4. We believe that it is more
+important that the behaviour of our optimized distribution $P(b)$ at test time
+be well-defined (though biased) than it is to be unbiased for some choices of
+$b$ but undefined for others. While we will present a workaround for
+restriction 4, the same trade-off will resurface shortly.
 
 While no $g$ can act as a proper prior $P(L)$, we can still recover the
-unconditioned probability of a sample $b$ by relaxing the constraints on
-$g$. In particular, if we allow $g$ to depend on the sample $b$, finding $g$
-to satisfy 1-4 is trivial:
+unconditioned probability of a sample $b$ by relaxing the constraints on $g$.
+In particular, if we allow $g$ to depend on the sample $b$, finding $g$ to
+satisfy the analogue to restriction 4 is trivial:
 %
 \begin{equation} \label{eq:g}
     g(b, p, T) = P(b) / \Prod{f^{b_t}(b_{<t}, p_{\leq t}, T, L)}{t,1,T}
@@ -1439,32 +1447,46 @@ simultaneously maximizes $P(y|b)$ and forces $Q(b) \to P(b|y)$.
 If we consider the right-hand side of \cref{eq:vi_lower_bound} an estimator for
 $\log P(y)$, we can see that the estimator is biased unless both sides are
 equal. This can only occur when the KL-divergence between $Q(b)$ and $P(b|y)$
-is zero. This optimal state cannot be reached in general, e.g. choose a uniform
-distribution over $y$ so that $P(b|y) = P(b|L)$ and from the above proof there
-is no such estimator. However, the same logic can be applied to
-\cref{eq:breakdown_condition} to show that the REINFORCE estimates are also
-biased, and their optimal states $P(b|y) = P(b|L)$ can also easily be
-unreachable.
+is zero. This optimal state cannot be reached in general. This fact follows
+almost immediately from the above proof. Choose $P(y|b) = I[\sum_t b_t = L]
+P(y)$ which results in $P(b|y) = I[\sum_t b_t = L] P(b)$. Allowing $\sum_t b_t
+= L$ and taking $g \equiv 1$ in the above proof, we have already shown $Q(b)
+\not \equiv P(b)$ if we are simultaneously satisfying restrictions
+1-3\footnote{
+%
+    This proof clearly holds if we also allow $Q$ to depend on $y$, since our
+    choice of $P(y|b)$ precludes any useful information from $y$ except its
+    length.
+%
+}. Thus, once again, we must violate either restriction 3 or 4.
 
 Unlike the REINFORCE lower bounds, the variational lower bound
 \cref{eq:vi_lower_bound} does not have an explicit prior. The prior is implicit
 in the log-probability ratio. By setting $Q(b) = P(b|L)$, The ratio $P(b) /
-Q(b) = P(L)$, and we recover the REINFORCE bound.
+Q(b) = P(L)$, and we recover the REINFORCE bound. This formulation also makes
+clear the bias in our REINFORCE-style estimates: we are approximating $P(b|y)$
+with $P(b|L)$. $y$ is at least as informative as $L$ since $|y| = L$. Thus,
+focusing on $P(b|L)$ rather than $P(b|y)$ is less-than-ideal. However, we argue
+that $L$ is \emph{the most important} information. Some consideration for $L$
+(viz. restrictions 1-2) is necessary to ensure the boundedness of
+\cref{eq:vi_lower_bound} since $\sum_t b_t \neq L \implies P(b|y) = 0$. While
+not strictly necessary, restriction 3 ensures our optimized distribution $P(b)$
+is well-defined over all $b$.
 
 We can mitigate the bias in \cref{eq:vi_lower_bound} by taking the mean ratio
 over many samples inside the log
 \cite{burdaImportanceWeightedAutoencoders2016}:
 %
 \begin{equation} \label{eq:iwae_lower_bound}
-    \log P(y) \geq \mathbb{E}_{b \sim Q} \left[
-        \log \frac{1}{K} \frac{P(y, b)}{Q(b)} \right]
+    \log P(y) \geq \mathbb{E}_{b^{(1)}, b^{(2)}, \ldots, b^{(K)} \sim Q} \left[
+        \log \frac{1}{K} \sum_k \frac{P(y, b^{(k)})}{Q(b^{(k)})} \right]
     \geq \mathbb{E}_{b \sim Q} \left[\log \frac{P(y, b)}{Q(b)}\right]
 \end{equation}
 %
 A sum within the log term precludes factorizing $P(b)$ and $Q(b)$ over time.
 Thus, the decrease in bias of \cref{eq:iwae_lower_bound} is at the cost of
 the higher variance of a global reward function. The same technique can be used
-for REINFORCE estimates.
+for the REINFORCE estimates of \cref{sec:reinforce}.
 
 \subsection{Proposal distributions}
 
@@ -1509,22 +1531,92 @@ The remaining approximators take advantage of the following form of
 where $P(B_t=1|b_{<t}) = w_t / (1 + w_t)$.
 
 This form shows us how to derive an approximation of \cref{eq:general_pBgL}
-using an approximation of \cref{eq:general_pL} instead. There are four
-reasons why we would do so. First, except when $B_t$ is forced to $1$ or
-$0$ based on the remaining number labels, increases in log-odds $w_t$ result
-in increases to $P(b_t|b_{<t}, L)$. Second, $P(L|b_{<t})$ is only dependent
-approximations of the future and are decoupled from $w_{\leq t}$. Third,
-there is an existing body of literature to draw on for approximations to
-$P(L|b_{<t})$. Finally, approximation of $P(L|b_{<t})$ dovetails with the PB
-distribution.
+using an approximation of \cref{eq:general_pL} instead. It also factors out
+the contribution of the log-odds $w_t$ so that the remaining approximations
+can be parameterized independently.
 
 Restated, $P(L|b_{<t})$ is the probability that $T - t + 1$ possibly dependent
-Bernoulli random variables $B_t$ sum to $L$. Approximating this distribution
-via the Poisson distribution lead to the famous Stein-Chen Method
-\cite{chenWeightedFinitePopulation1994}. Unfortunately, the
-Poisson distribution does not parameterize the number of remaining trials;
-plugging a Poisson distribution into \cref{eq:general_pBgL_alt} will not
-satisfy restrictions 1 and 2.
+Bernoulli random variables $B_t$ sum to $L$. A natural choice for an
+approximation to this distribution is to replace it with one where those
+variables are independent. This is simply the PB distribution. Assume that we
+have the log-odds of $T$ independent Bernoulli random variables $w'_1, w'_2,
+\ldots w'_T$. Then we approximate $P(L - \ell_{<t} - v|[b_{<t}, v])$ with the
+probability of $L - \ell_{<t} - v$ highs from the parameters
+$w'_{t + 1}, w'_{t + 2}, \ldots, w'_T$. Plugging this approximation into
+\cref{eq:general_pBgL_alt} gives:
+%
+\begin{equation} \label{eq:id_step_q}
+\begin{split}
+    Q_{IDB}(B_t=1|b_{<t}, L)
+    &= \frac{w_tQ(L - \ell_{<t} - 1; w'_{>t})}
+            {Q(L - \ell_{<t}; w'_{>t}) + w_tQ(L - \ell_{<t} - 1; w'_{>t})} \\
+    &= \frac{w_t C(L - \ell_{<t} - 1, [t + 1, T]; w')/Z}
+            {\begin{array}{l}
+                C(L - \ell_{<t}, [t + 1, T]; w')/Z + \\
+                \qquad w_tC(L - \ell_{<t} - 1; [t + 1, T]; w')/Z
+            \end{array}} \\
+    &= \frac{w_t C(L - \ell_{<t} - 1, [t + 1, T]; w' \cup \{w_t\} \setminus \{w'_t\})}
+            {C(L - \ell_{<t}, [t, T]; w' \cup \{w_t\} \setminus \{w'_t\})}
+\end{split}
+\end{equation}
+%
+where $Z = \Prod{(1 + w'_{t'})}{t',t+1,T} = \Sum{C(\ell, [1,T];
+w')}{\ell,0,T}$. In fact, \cref{eq:id_step_q} is merely the IDB step function
+of \cref{eq:id_step} with the independent log-odds for time step $t$, $w'_t$,
+replaced with that of the dependent log-odds $w_t$. Note that the dependence
+of $Q$ on $w_t$, which can only be derived by sampling from $B_{t-1}$,
+requires the use of an estimator of the form of \cref{eq:idb_reinforce} rather
+than \cref{eq:idb_reinforce_alt} or \cref{eq:bbm_reinforce}.
+
+Intuitively, the closer the individual independent probabilities in the
+approximation are to the true dependent probabilities, the closer
+\cref{eq:id_step_q} will be to \cref{eq:general_pL}. Indeed, this result has
+been previously proven with exact error bounds on the approximation
+\cite{serflingElementaryResultsPoisson1978}. To generate the independent
+probabilities, one could train an auxiliary, non-autoregressive neural network
+on the same data using a CB-based objective from \cref{sec:reinforce} or
+\cref{sec:exact}, but the success of such a network in predicting $P(L|b_{<t})$
+would signal that the main network is not effectively using the auto-regressive
+property. Instead, we propose training this auxiliary non-autoregressive model
+alongside the main network using the gradients from \cref{eq:vi_lower_bound}.
+This approach also allows us to condition our distribution on the target
+output labels $y$ by injecting them into the network as input, for example
+through an attention layer \cite{bahdanauNeuralMachineTranslation2015}. The
+conditioning on $y$ may allow $Q_{IDB}(b_t|b_{<t}, y) \to P(b_t|b_{<t}, y)$.
+
+Training an auxiliary network simultaneously to approximate $Q$ is both
+resource-intensive and strongly biased at the beginning of training. A
+coarse-grained alternative to using the PB is to make even stronger assumptions
+on the distribution $P(L|b_{<t})$ by forcing Bernoulli random variables to be
+identically distributed. That is, use a binomial distribution. The maximum
+likelihood estimate for binomial parameter $p$ is $L / T$. The resulting
+approximation is
+%
+\begin{equation} \label{eq:bin_q}
+\begin{split}
+Q_{Bin}(B_t=1|b_{<t}, L)
+    &= \frac{
+            w_t \binom{T - t}{L - \ell_{<t} - 1} p^{L - \ell_{<t} - 1}
+            (1 - p)^{T - t - L + \ell_{<t} + 1}}
+        {\sum_{v \in \{0,1\}}
+            w_t^v \binom{T - t}{L - \ell_{<t} - v}p^{L - \ell_{<t} - v}
+            (1 - p)^{T - t - L + \ell_{<t} + v}} \\
+    &= \frac{w_t (T - L)(L - \ell_{<t})}
+            {w_t (T - L)(L - \ell_{<t}) + L(T - t - L + \ell_{<t} + 1)}
+\end{split}
+\end{equation}
+
+Substituting $\ell_{<t} = L$ and $L - \ell_{<t} = T - t + 1$ will show that
+\cref{eq:bin_q} satisfies restrictions 1 and 2. While we expect the binomial
+approximation to speed up initial training, $Q_{Bin}$ will will suffer as
+training progresses and the individual $P(b_t|b_{<t}, y)$ move away from $L /
+T$.
+
+% Fortunately, \citet{serflingElementaryResultsPoisson1978} is just one of many
+% results on approximating the sum of dependent Bernoulli trials. Approximating
+% this distribution via the Poisson distribution lead to the famous Stein-Chen
+% Method \cite{chenWeightedFinitePopulation1994}. Unfortunately, Poisson
+% approximations to
 
 \section{Experiments} \label{sec:experiments}
 
@@ -1863,6 +1955,10 @@ forced to $1$ in order to make the total number of emissions $L$. The $I[t > T
 \emph{low} values (including the $B_t=0$ term).
 
 \section{TODO}
+
+\emph{Viterbi best path} can be calculated similarly to forward algorithm from
+\cref{sec:exact}. Application: given chronological list of events, find the
+most likely time they occurred.
 
 \emph{Motivations is not working as an intro}
 
