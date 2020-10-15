@@ -1,0 +1,40 @@
+\begin{tikzpicture}
+	\begin{pgfonlayer}{nodelayer}
+		\node [style=vertex] (0) at (-5.5, 5.5) {};
+		\node [style=vertex] (1) at (-3.5, 5.5) {};
+		\node [style=vertex] (2) at (-1.5, 5.5) {};
+		\node [style=vertex] (3) at (-5.5, 3.5) {};
+		\node [style=vertex] (4) at (-3.5, 3.5) {};
+		\node [style=vertex] (5) at (-1.5, 3.5) {};
+		\node [style=vertex] (6) at (-5.5, 1.5) {};
+		\node [style=vertex] (7) at (-3.5, 1.5) {};
+		\node [style=vertex] (8) at (-1.5, 1.5) {};
+		\node [style=vertex] (9) at (-5.5, 5.5) {};
+		\node [style=none] (10) at (-6.25, 1.5) {$0$};
+		\node [style=none] (11) at (-6.25, 3.5) {$1$};
+		\node [style=none] (12) at (-6.25, 5.5) {$2$};
+		\node [style=none] (13) at (-5.5, 0.75) {$0$};
+		\node [style=none] (14) at (-3.5, 0.75) {$1$};
+		\node [style=none] (15) at (-1.5, 0.75) {$2$};
+		\node [style=none] (16) at (-3.5, 0) {$t$};
+		\node [style=none] (17) at (-7, 3.5) {$\ell$};
+	\end{pgfonlayer}
+	\begin{pgfonlayer}{edgelayer}
+		\draw [style=edge] (6) to (7);
+		\draw [style=edge] (7) to (8);
+		\draw [style=edge] (3) to (4);
+		\draw [style=edge] (4) to (5);
+		\draw [style=edge] (9) to (1);
+		\draw [style=edge] (1) to (2);
+		\draw [style=rnnt-edge] (6) to (3);
+		\draw [style=rnnt-edge] (7) to (4);
+		\draw [style=rnnt-edge] (8) to (5);
+		\draw [style=rnnt-edge] (3) to (9);
+		\draw [style=rnnt-edge] (4) to (1);
+		\draw [style=rnnt-edge] (5) to (2);
+		\draw [style=cb-edge] (3) to (1);
+		\draw [style=cb-edge] (4) to (2);
+		\draw [style=cb-edge] (6) to (4);
+		\draw [style=cb-edge] (7) to (5);
+	\end{pgfonlayer}
+\end{tikzpicture}

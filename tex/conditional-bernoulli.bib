@@ -1,4 +1,17 @@
 
+@inproceedings{bagbyEfficientImplementationRecurrent18,
+  title = {Efficient Implementation of Recurrent Neural Network Transducer in {{Tensorflow}}},
+  booktitle = {{{IEEE Spoken Language Technology Workshop}}},
+  author = {Bagby, T. and Rao, Kanishka and Sim, Khe Chai},
+  year = {18},
+  pages = {506--512},
+  doi = {10.1109/SLT.2018.8639690},
+  abstract = {Recurrent neural network transducer (RNN-T) has been successfully applied to automatic speech recognition to jointly learn the acoustic and language model components. The RNN-T loss and its gradient with respect to the softmax outputs can be computed efficiently using a forward-backward algorithm. In this paper, we present an efficient implementation of the RNN-T forward-backward and Viterbi algorithms using standard matrix operations. This allows us to easily implement the algorithm in TensorFlow by making use of the existing hardware-accelerated implementations of these operations. This work is based on a similar technique used in our previous work for computing the connectionist temporal classification and lattice-free maximum mutual information losses, where the forward and backward recursions are viewed as a bi-directional RNN whose states represent the forward and backward probabilities. Our benchmark results on graphic processing unit (GPU) and tensor processing unit (TPU) show that our implementation can achieve better throughput performance by increasing the batch size to maximize parallel computation. Furthermore, our implementation is about twice as fast on TPU compared to GPU for batch.},
+  series = {{{SLT}} '18}
+}
+% == BibTeX quality report for bagbyEfficientImplementationRecurrent18:
+% ? Unsure about the formatting of the booktitle
+
 @inproceedings{bahdanauNeuralMachineTranslation2015,
   title = {Neural Machine Translation by Jointly Learning to Align and Translate},
   booktitle = {3rd {{International Conference}} on {{Learning Representations}}},
@@ -101,7 +114,7 @@
 }
 
 @inproceedings{chiuMonotonicChunkwiseAttention2018,
-  title = {Monotonic {{Chunkwise Attention}}},
+  title = {Monotonic Chunkwise Attention},
   booktitle = {6th {{International Conference}} on {{Learning Representations}}},
   author = {Chiu, Chung-Cheng and Raffel, Colin},
   year = {2018},
@@ -111,10 +124,9 @@
 }
 % == BibTeX quality report for chiuMonotonicChunkwiseAttention2018:
 % ? Unsure about the formatting of the booktitle
-% ? Title looks like it was stored in title-case in Zotero
 
 @inproceedings{gadetskyLowvarianceBlackboxGradient2020,
-  title = {Low-Variance Black-Box Gradient Estimates for the {{Plackett}}-{{Luce}} Distribution},
+  title = {Low-Variance Black-Box Gradient Estimates for the {{Plackett}}-{{Luce Distribution}}},
   booktitle = {Thirty-{{Fourth AAAI Conference}} on {{Artificial Intelligence}}},
   author = {Gadetsky, Artyom and Struminsky, Kirill and Robinson, Christopher and Quadrianto, Novi and Vetrov, Dmitry},
   year = {2020},
@@ -137,7 +149,7 @@
 % ? Unsure about the formatting of the booktitle
 
 @inproceedings{gravesConnectionistTemporalClassification2006,
-  title = {Connectionist Temporal Classification: Labelling Unsegmented Sequence Data with Recurrent Neural Networks},
+  title = {Connectionist {{Temporal Classification}}: Labelling Unsegmented Sequence Data with Recurrent Neural Networks},
   booktitle = {International {{Conference}} on {{Machine Learning}}},
   author = {Graves, Alex and Fern{\'a}ndez, Santiago and Gomez, Faustino and Schmidhuber, J{\"u}rgen},
   year = {2006},
@@ -174,6 +186,22 @@
   url = {http://arxiv.org/abs/1211.3711},
   journal = {CoRR}
 }
+
+@inproceedings{guNonautoregressiveNeuralMachine2018,
+  title = {Non-Autoregressive Neural Machine Translation},
+  booktitle = {6th {{International Conference}} on {{Learning Representations}}},
+  author = {Gu, Jiatao and Bradbury, James and Xiong, Caiming and Li, Victor O. K. and Socher, Richard},
+  year = {2018},
+  publisher = {{OpenReview.net}},
+  address = {{Vancouver, Canada}},
+  url = {https://openreview.net/forum?id=B1l8BtlCb},
+  bibsource = {dblp computer science bibliography, https://dblp.org},
+  biburl = {https://dblp.org/rec/conf/iclr/Gu0XLS18.bib},
+  series = {{{ICLR}} '18},
+  timestamp = {Thu, 25 Jul 2019 14:25:57 +0200}
+}
+% == BibTeX quality report for guNonautoregressiveNeuralMachine2018:
+% ? Unsure about the formatting of the booktitle
 
 @inproceedings{jangCategoricalReparameterizationGumbelSoftmax2017,
   title = {Categorical Reparameterization with {{Gumbel}}-{{Softmax}}},
@@ -379,6 +407,15 @@
   doi = {10.18653/v1/P19-1148},
   abstract = {Many common character-level, string-to-string transduction tasks, e.g., grapheme-to-phoneme conversion and morphological inflection, consist almost exclusively of monotonic transduction. Neural sequence-to-sequence models with soft attention, non-monotonic models, outperform popular monotonic models. In this work, we ask the following question: Is monotonicity really a helpful inductive bias in these tasks? We develop a hard attention sequence-to-sequence model that enforces strict monotonicity and learns alignment jointly. With the help of dynamic programming, we are able to compute the exact marginalization over all alignments. Our models achieve state-of-the-art performance on morphological inflection. Furthermore, we find strong performance on two other character-level transduction tasks. Code is available at https://github.com/shijie-wu/neural-transducer.},
   series = {{{ACL}} '19}
+}
+
+@article{wuGoogleNeuralMachine2016,
+  title = {Google's Neural Machine Translation System: {{Bridging}} the Gap between Human and Machine Translation},
+  author = {Wu, Yonghui and Schuster, Mike and Chen, Zhifeng and Le, Quoc V. and Norouzi, Mohammad and Macherey, Wolfgang and Krikun, Maxim and Cao, Yuan and Gao, Qin and Macherey, Klaus and Klingner, Jeff and Shah, Apurva and Johnson, Melvin and Liu, Xiaobing and Kaiser, {\L}ukasz and Gouws, Stephan and Kato, Yoshikiyo and Kudo, Taku and Kazawa, Hideto and Stevens, Keith and Kurian, George and Patil, Nishant and Wang, Wei and Young, Cliff and Smith, Jason and Riesa, Jason and Rudnick, Alex and Vinyals, Oriol and Corrado, Greg and Hughes, Macduff and Dean, Jeffrey},
+  year = {2016},
+  volume = {abs/1609.08144},
+  url = {http://arxiv.org/abs/1609.08144},
+  journal = {CoRR}
 }
 
 @inproceedings{wuHardNonmonotonicAttention2018,

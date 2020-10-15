@@ -572,7 +572,7 @@ $P(y, b)$ as \cite{lawsonLearningHardAlignments2018}:
 %
 \begin{equation} \label{eq:luo_factorization}
     P(y,b) = \Prod{P(y_{\ell_t}|b_{\leq t}, y_{<\ell_t})^{b_t}
-    P(b_t|b_{\leq t}, y_{<\ell_t})}{t,1,T}
+    P(b_t|b_{< t}, y_{<\ell_t})}{t,1,T}
 \end{equation}
 %
 where $\ell_t = \Sum{b_t'}{t',1,t}$.
@@ -838,7 +838,7 @@ terms.
 
 \Cref{eq:idb_reinforce,eq:idb_reinforce_alt} allow $R_t$ to condition on the
 history of Bernoulli trials $b_{< t}$ sampled. For example, $\log
-    P(y_\ell|t_{\leq \ell}, y_{<\ell})$ can be parameterized by a decoder neural
+P(y_\ell|t_{\leq \ell}, y_{<\ell})$ can be parameterized by a decoder neural
 network which concatenates together a hidden state from an encoder network from
 time $t_\ell$ and an embedding of the previous class label $y_{\ell - 1}$ as
 input to the RNN. Unfortunately, the dependence on $t_{\leq \ell}$ means that
@@ -857,7 +857,7 @@ on a hidden state at time $t_{\ell}$ and previous class labels $y_{<\ell}$,
 similar to \cite{wuHardNonmonotonicAttention2018}.
 
 Deriving the new estimator is similar to before. Letting $R_{t_\ell} = \log
-    P(y_\ell|t_\ell,y_{<\ell})$,
+P(y_\ell|t_\ell,y_{<\ell})$,
 %
 \begin{equation} \label{eq:bbm_reinforce}
     \begin{split}
@@ -1089,15 +1089,16 @@ conditioning is ignored by the ST estimator.
 
 At the end of \cref{sec:reinforce}, we mentioned that we can marginalize out
 the Bernoulli latent variables efficiently, assuming $P(y_\ell|t_{\leq \ell},
-    y_{< \ell}) = P(y_\ell|t_\ell, y_{< \ell})$. Further, it must be feasible to
+y_{< \ell}) = P(y_\ell|t_\ell, y_{< \ell})$. Further, it must be feasible to
 calculate that probability for all permutations of $t$ and $\ell$. In the case
 of the model proposed by \cite{luoLearningOnlineAlignments2017}, the
-distribution $\log P(y_t|t)$ is calculated by a simple linear transformation of
-the RNN hidden state $h_t$ followed by a SoftMax. These calculations can be
-parallelized across $t$ and are fully differentiable. The decoder structure of
-\cite{wuHardNonmonotonicAttention2018} is also a candidate as the distribution
-$P(y_\ell|t_\ell, y_{<\ell})$ is a simple two-layer feed-forward neural network
-on the combination of an encoder and a decoder hidden state.
+distribution $\log P(y_t|t_\ell)$ is calculated by a simple linear
+transformation of the RNN hidden state $h_t$ followed by a SoftMax. These
+calculations can be parallelized across $t$ and are fully differentiable. The
+decoder structure of \cite{wuHardNonmonotonicAttention2018} is also a candidate
+as the distribution $P(y_\ell|t_\ell, y_{<\ell})$ is a simple two-layer
+feed-forward neural network on the combination of an encoder and a decoder
+hidden state.
 
 Starting from \cref{eq:breakdown_condition} and making the conditional
 independence assumption between $t_\ell$ and $t_{\ell - 1}$, we manipulate
@@ -1128,14 +1129,9 @@ $t_\ell \leq t_{\ell - 1}$.
 Treating $P(t_\ell|t_{\ell - 1}, L)$ as the transition probability between
 states $t \in [1, T]$ and $P(y_\ell|t_\ell, y_{<\ell})$ as the emission
 probability, \cref{eq:marginalization} can be considered a Hidden Markov Model.
-Thus, $P(y)$ can be efficiently calculated using the forward algorithm.
-
-\Cref{eq:marginalization} is a first-order Markov model with respect to the
-``states'' $[1, T]$. We can easily adapt the equation for higher-order models
-so that $P(y_\ell|\ldots)$ can depend on some arbitrary fixed-length history of
-emission points $t_\ell,\ldots,t_{\ell - W + 1}$, but the number of states will
-grow exponentially with the size of the history $T^W$. For large $T$,
-higher-order models become increasingly infeasible.
+Thus, $P(y)$ can be efficiently calculated using the forward algorithm. The
+backward step is implicit in the calculation of $P(t_\ell|\ldots)$, which
+effectively marginalizes over all suffixes.
 
 There exists a relationship between \cref{eq:marginalization} and the CTC
 objective \cite{gravesConnectionistTemporalClassification2006} when the history
@@ -1181,62 +1177,135 @@ $c'$\footnote{
 }. Assuming it allows for the non-standard adjustment to $\beta$, the data
 likelihood marginalized over latent Bernoulli sequences can be trivially
 implemented using an existing CTC loss function. The additional dependency on
-$y_{< \ell}$ can be considered a generalization of the CTC loss function. In
-fact, \cref{eq:marginalization} is nearly identical to the RNN Transducer
-generalization of CTC whereby an additional decoder-style structure is
-responsible for modelling the sequence $y$ in an auto-regressive fashion.
-The only meaningful difference between an RNN-T loss and the maximum
-likelihood loss implicit in \cref{eq:marginalization} is that the latter
-explicitly factors the ``blank'' label into the decision to emit or not to
-emit.\footnote{
-    %
-    Look more into this. Double-check that the loss is indeed identical.
-    I believe it is more efficient to use \cref{eq:marginalization} than
-    the form used in RNN-T. It also has a more efficient best-path form.
-    %
-}
+$y_{< \ell}$ can be considered a generalization of the CTC loss function.
 
-Thus, \cref{eq:marginalization} can be
-considered a generalization of CTC.  Finally, the
-estimators from \cref{sec:cb} can also be used as single- or multi-sample
-approximations for CTC.
+\begin{figure}
+    \centering
+    \includegraphics[width=.5\textwidth]{rnnt_vs_cb.pdf}
+    \caption{
+        %
+        A comparison between RNN-T and \cref{eq:marginalization} forward passes
+        over time ($t$) and labels ($\ell$). The RNN-T steps forward in $t$ or
+        $\ell$ independently (black and red lines), while the CB steps forward
+        in either $t$ alone or $t$ and $\ell$ simultaneously (black and blue
+        lines).
+        %
+    } \label{fig:rnnt_vs_cb}
+\end{figure}
 
-% \subsection{Fake it until you make it} \label{sec:fake_it}
+\Cref{eq:marginalization} is similar to the RNN Transducer
+\cite{gravesSequenceTransductionRecurrent2012} with one key difference: the
+RNN-T emits labels and absorbs frames in time separately. \Cref{fig:rnnt_vs_cb}
+illustrates the difference between the two methods' forward calculations. To
+calculate the probability of having emitted the prefix $y_{\leq \ell}$ by time
+$t$, the RNN-T sums contributions from either having seen the entire prefix by
+time $t - 1$ and transitioning to time $t$ via a blank label, or having seen
+$\ell - 1$ labels by time $t$ and then emitting $y_\ell$ (without moving
+forward in time). \Cref{eq:marginalization} maintains the first contribution
+(transitioning from time $t-1$ to $t$ via an implied blank label), but replaces
+the latter with a transition that both absorbs a step in time ($t - 1 \to t$)
+and emits a label ($\ell - 1 \to \ell$).
 
-% In \cref{sec:reinforce}, we discussed how it is infeasible to sample $B$ in an
-% iterative, auto-regressive fashion, i.e. sample $B_t$ conditioned on $b_{<t}$
-% given length restriction $L$. While this is still true, it is often the case
-% that, at test time, ``samples'' are the result of some deterministic process.
-% For example, the decision to emit at time step $t$ occurs whenever $w_t > 1$.
-% If we replace stochastic sample $B_t \sim P(b_t|b_{<t}, x)$ as the input to our
-% neural network with the test-time deterministic function $\tilde{B}_t =
-% f(\tilde{B}_{<t}, x)$ \emph{during} training, then it is still possible to
-% build an auto-regressive model. However, there is no guarantee that the
-% deterministic samples $\tilde{B}$ will be the same as the sampled ones $B$. At
-% the beginning of training, $\Sum{\tilde{B}_t}{t} \approx T/2 \gg \Sum{B_t}{t}$,
-% meaning the model will (hopefully) learn to ignore $\tilde{B}$ early on. As the
-% model converges and the distribution over $B$ becomes more sparse, $\tilde{B}
-% \to B$ and the model can start to rely on $\tilde{B}$. We can also imitate
-% conditioning $B_t$ on $y_{<\ell_t}$ by constructing $\tilde{\ell}_t$ from
-% $\tilde{B}_{\leq t}$ and filling $y_{\tilde{\ell}_t}$ for $\tilde{\ell}_t > L$
-% arbitrarily\footnote{
-% %
-%     Factoring $P(L)$ out of the expectation is critical here to ensure the
-%     model is pushed to emit the correct number of labels.
-% %
-% }. Doing so will not bias the expectation over $B$.
+The choice to absorb time steps and emit labels independently in the RNN-T
+architecture was motivated partly by the desire to allow sequence transduction
+between inputs and outputs of arbitrary length. \Cref{eq:marginalization}
+requires $L \leq T$, making it (in its current form) unsuited to tasks where
+the output is potentially longer than the input, such as machine translation.
+However, this extra flexibility comes at the cost of uncoupling the events from
+time. Conceptually, the RNN-T models label events as instantaneous, making the
+path where all labels are output at time $t=0$ \textit{a priori} equally likely
+to the path where labels are distributed over time. This has a number of
+practical ramifications. First, when the problem can be conceptualized as
+sequential events in time, the RNN-T wastes probability mass on these
+impossible, instantaneous paths. Second, the monotonicity over $t$ makes
+heuristic search strategies for approximating $\arg_y \max P(y)$ more efficient
+and possibly more accurate for \cref{eq:marginalization} than for
+RNN-Ts\footnote{
+%
+    Such searches, most popularly beam search, involve iteratively building
+    prefix paths over time, pruning low-probability paths. The monotonicity
+    w.r.t. $t$ of \cref{eq:marginalization} ensures only $V + 1$ possible
+    extensions of each stored prefix for the next time step, where $V$ is the
+    size of the vocabulary. Because the RNN-T can output as many labels as it
+    wants at a given time, the search space per prefix is technically
+    arbitrarily big, though practically bounded to some constant positive
+    multiple of $V + 1$.
+%
+}. Finally, \cref{eq:marginalization} can be easily parallelized over labels
+$\ell$ resulting in $O(T)$ serial operations, a na\"{i}ve implementation of the
+RNN-T forward pass requires $O(TL)$ serial operations and a vector-skewed
+implementation requires $O(T + L)$ serial operations
+\cite{bagbyEfficientImplementationRecurrent18}.
 
-\section{Approximations} \label{sec:appprox}
+% To prove arbitrarily wide, all you need is T=1. Pick any constant K you'd
+% like, then pick some label set v \in V^K, then make
+% P(blank|v',t=0) = I[v' = v]
 
-The CB conditional and PB abandon the auto-regressive property of the
-distribution over Bernoulli trials. This implies each trial is independent
-though not necessarily identically distributed.
+There are two notable extensions that can be made to \cref{eq:marginalization}
+that derive from it being a first-order Markov model. First, we can perform an
+efficient search for $b* = \arg_b \max P(b|y)$ via the Viterbi algorithm. Such
+a search would be performed after training in order to determine the most
+likely times $t* = \{t: b^*_t = 1\}$ when events $y$ occurred in a given window
+of time. Second, we can easily adapt \cref{eq:marginalization} for higher-order
+models so that $P(y_\ell|\ldots)$ can depend on some arbitrary fixed-length
+history of emission points $t_\ell,\ldots,t_{\ell - W + 1}$. While the number
+of states that must be stored for a given order grows exponentially with that
+order, even second-order models may be sufficient to avoid the pitfalls of
+conditionally independent $B_t$. We discuss this more in \cref{sec:approx}.
 
-Suppose we really wish to maintain the auto-regressive property of the trials.
-In this case, we require $P(b_t|b_{<t})$ to be well-defined and easily
-calculable, such as the output of a recurrent neural network. The general
-probability over the number of emissions, $P(L)$, resembles the CB with
-additional conditional dependence requirements:
+% Thus, \cref{eq:marginalization} can be
+% considered a generalization of CTC.  Finally, the
+% estimators from \cref{sec:cb} can also be used as single- or multi-sample
+% approximations for CTC.
+
+\section{Approximations} \label{sec:approx}
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{pro_ar.pdf}
+\caption{
+%
+An example of the different distributions of Bernoulli r.v.s $B_t$ around some
+event that occurred at approximately time $t_0$, depending on whether
+$P(B_t|\ldots)$ is conditioned on prior $b_{<t}$ (black) or not (grey). $t_h$
+is assumed to be a point where both distributions emit $B_{t_h} = 1$.
+%
+} \label{fig:pro_ar}
+\end{figure}
+
+The CB and PB abandon the auto-regressive property of the distribution over
+Bernoulli trials. This implies each trial is independent though not necessarily
+identically distributed. In this section, we focus on the case of arbitrary
+dependencies on past Bernoulli values.
+
+Before continuing, it is worth considering what the auto-regressive property
+purchases. Auto-regressive models are often employed in contexts where the
+dependent variables are not latent but observable, such as in language
+modelling or machine translation. As such, prior claims of the superior
+performance of data-conditioned models may not translate to latent-conditioned
+models. Also, auto-regressive networks inhibit parallelization during
+inference: computations at time $t$ cannot proceed before those at time $t-1$
+are completely finished. We can, however, imagine situations where the
+additional dependencies would be beneficial. For example, \cref{fig:pro_ar}
+illustrates a situation where we are approximating $P(y) \approx P(b, y)$ with
+some best-path heuristic at test time. Here we assume some event has occurred
+around time $t_0$ but neither a model that parameterizes independent $B_t$
+(grey curve) nor a model with dependent $B_t$ (black curves) can localize it to
+a specific time. However, after the first high emission at around $t_h$, only
+the auto-regressive model can adjust the probability of future $B_t$ to avoid
+repeating emissions for the same event. That said, this specific example can be
+handled without resorting to arbitrary-length dependencies. We may, for
+example, establish a second-order Markov relationship between $y_\ell$ and
+$t_\ell$, i.e. $P(y_\ell|t_{\leq \ell}, y_{<\ell}) = P(y_\ell|t_\ell,
+t_{\ell-1}, y_{<\ell})$, which can easily penalize emissions that are too
+nearby. Qualifiers notwithstanding, we assume for the rest of this section that
+an auto-regressive conditional with arbitrarily long history is indeed
+worthwhile.
+
+We assume $P(b_t|b_{<t})$ to be well-defined and easily calculable, such as the
+output of a recurrent neural network. The general probability over the number
+of emissions, $P(L)$, resembles the CB with additional conditional dependence
+requirements:
 %
 \begin{equation} \label{eq:general_pL}
     P(L|b_{<t}) = \sum_{b : \sum_t b_{t'} = L}
@@ -1307,7 +1376,7 @@ $0$ when all $L$ highs have already occurred.
 In what follows, we discuss an additional restriction that would produce an
 ``ideal'' estimator, then discuss some approximators that we can use instead.
 
-\subsection{The ideal approximation}
+\subsection{The ideal approximation} \label{sec:ideal}
 
 Restrictions 1 and 2 are necessary in order to ensure $f$ produces only
 valid samples under the distribution $P(B_t=1|b_{<t}, L)$. This ensures that
@@ -1465,13 +1534,8 @@ Unlike the REINFORCE lower bounds, the variational lower bound
 in the log-probability ratio. By setting $Q(b) = P(b|L)$, The ratio $P(b) /
 Q(b) = P(L)$, and we recover the REINFORCE bound. This formulation also makes
 clear the bias in our REINFORCE-style estimates: we are approximating $P(b|y)$
-with $P(b|L)$. $y$ is at least as informative as $L$ since $|y| = L$. Thus,
-focusing on $P(b|L)$ rather than $P(b|y)$ is less-than-ideal. However, we argue
-that $L$ is \emph{the most important} information. Some consideration for $L$
-(viz. restrictions 1-2) is necessary to ensure the boundedness of
-\cref{eq:vi_lower_bound} since $\sum_t b_t \neq L \implies P(b|y) = 0$. While
-not strictly necessary, restriction 3 ensures our optimized distribution $P(b)$
-is well-defined over all $b$.
+with $P(b|L)$. In \cref{sec:class_labels}, we show how the generalized CB of
+\cref{eq:general_pBgL} is well-suited to modelling $P(b|y)$ as well.
 
 We can mitigate the bias in \cref{eq:vi_lower_bound} by taking the mean ratio
 over many samples inside the log
@@ -1488,7 +1552,7 @@ Thus, the decrease in bias of \cref{eq:iwae_lower_bound} is at the cost of
 the higher variance of a global reward function. The same technique can be used
 for the REINFORCE estimates of \cref{sec:reinforce}.
 
-\subsection{Proposal distributions}
+\subsection{Proposal distributions} \label{sec:proposal}
 
 Assuming we are optimizing an approximation to \cref{eq:general_pBgL} via
 the variational lower bound \cref{eq:vi_lower_bound}. We now go over some
@@ -1572,17 +1636,23 @@ Intuitively, the closer the individual independent probabilities in the
 approximation are to the true dependent probabilities, the closer
 \cref{eq:id_step_q} will be to \cref{eq:general_pL}. Indeed, this result has
 been previously proven with exact error bounds on the approximation
-\cite{serflingElementaryResultsPoisson1978}. To generate the independent
-probabilities, one could train an auxiliary, non-autoregressive neural network
-on the same data using a CB-based objective from \cref{sec:reinforce} or
-\cref{sec:exact}, but the success of such a network in predicting $P(L|b_{<t})$
-would signal that the main network is not effectively using the auto-regressive
-property. Instead, we propose training this auxiliary non-autoregressive model
-alongside the main network using the gradients from \cref{eq:vi_lower_bound}.
-This approach also allows us to condition our distribution on the target
-output labels $y$ by injecting them into the network as input, for example
-through an attention layer \cite{bahdanauNeuralMachineTranslation2015}. The
-conditioning on $y$ may allow $Q_{IDB}(b_t|b_{<t}, y) \to P(b_t|b_{<t}, y)$.
+\cite{serflingElementaryResultsPoisson1978}.
+
+To generate the independent probabilities, one could train an auxiliary,
+non-autoregressive neural network on the same data using a CB-based objective
+from \cref{sec:reinforce} or \cref{sec:exact}, but the success of such a
+network in predicting $P(L|b_{<t})$ would signal that the main network is not
+effectively using the auto-regressive property. Instead, we propose training
+this auxiliary non-autoregressive model alongside the main network using the
+gradients from \cref{eq:vi_lower_bound}. This approach also allows us to
+condition our distribution on the target output labels $y$ by injecting them
+into the network as input, for example through an attention layer
+\cite{bahdanauNeuralMachineTranslation2015}. The conditioning on $y$ may allow
+$Q_{IDB}(b_t|b_{<t}, y) \to P(b_t|b_{<t}, y)$. Finally, we can have the model
+produce $L$ distinct sets of odds ${w^{(\ell)}_t}_t$ which can be substituted
+into the count functions $C(\cdot)$ of \cref{eq:id_step_q} depending on the
+number of remaining labels. This modification can help deal with situations
+such as that illustrated in \cref{fig:pro_ar}.
 
 Training an auxiliary network simultaneously to approximate $Q$ is both
 resource-intensive and strongly biased at the beginning of training. A
@@ -1612,11 +1682,172 @@ approximation to speed up initial training, $Q_{Bin}$ will will suffer as
 training progresses and the individual $P(b_t|b_{<t}, y)$ move away from $L /
 T$.
 
-% Fortunately, \citet{serflingElementaryResultsPoisson1978} is just one of many
-% results on approximating the sum of dependent Bernoulli trials. Approximating
-% this distribution via the Poisson distribution lead to the famous Stein-Chen
-% Method \cite{chenWeightedFinitePopulation1994}. Unfortunately, Poisson
-% approximations to
+\section{Conditioning on class labels} \label{sec:class_labels}
+
+In \cref{sec:ideal}, we mentioned that estimating $P(b|L)$ instead of $P(b|y)$
+introduces a bias into our estimators, even in the conditionally independent
+case. In this section, we discuss the extent of the mismatch, and what we can
+do about it.
+
+Conditioning on $y$ results in at least as much information gain, likely more,
+on $P(b)$ as $L$ since the value of the random variable $L$ can be determined
+determined by the size of $y$, $L = |y|$, whereas we usually cannot infer $y$
+from $L$. It follows that $P(b|L)$ is only a coarse-grained estimate of
+$P(b|y)$ and, given the option, we would rather an unbiased estimate of
+$P(b|y)$.
+
+One might wonder, then, if our discussion of approximators in \cref{sec:approx}
+is based off a false premise: that is, the focus on $P(b|L)$ makes assumptions
+that are inapplicable or just plain wrong about $P(b|y)$. We can answer
+immediately in the negative with respect to restrictions 1 and 2 as they
+ensure that either approximation, to $P(b|y)$ or to $P(b|L)$, is well-defined.
+The third restriction, namely that if a sample is assigned nonzero $P(L)$ and
+$P(b|L)$, then the approximator should also assign it nonzero $P(b|L)$, does
+not directly follow. There might exist some $y$, $|y| = L$, such that
+$P(L) > 0$ and $P(b|L) > 0$, but $P(y) = 0$ ($P(b|y)$ is undefined).
+Under \cref{eq:luo_factorization}, however, this would require some
+$P(y_{\ell}|b_{\leq t_\ell}, y_{< \ell}) = 0$ for all valid prefixes
+$b_{\leq t_\ell}$, which we do not assume \textit{a priori} and usually cannot
+occur when parameterizing that distribution via neural network. The only
+remaining restriction is the fourth. We have previously addressed its
+(un)satisfiability when extended to $P(b|y)$ in \cref{sec:ideal}.
+
+What is left is to justify why we are choosing to focus on proposal
+distributions modelling \cref{eq:general_pL,eq:general_pBgL} instead of $P(y)$
+and $P(b|y)$. The answer comes from the fact that $P(b|y)$ and $P(y)$ are
+constructed identically (in a combinatorial sense) to $P(b|L)$ and $P(L)$. That
+is, to construct e.g. $P(y)$, we count weights in the exact same way as we
+would $P(L)$ - only the weights themselves have changed. Formally, we prove
+that for any \emph{fixed} $y$ distributed as the sum over the joint $y,b$ under
+\cref{eq:luo_factorization}, there exists some $P^y(b|L)$ distributed under
+\cref{eq:general_pBgL} such that $P(b|y) \equiv P^y(b|L)$.
+
+The proof of this derives from the recursive definitions of $P(y)$, which
+appears very similar to that of $P(L)$. Assuming we have a prefix of Bernoulli
+values $b_{<t}$, the probability of some suffix $y_{>\ell_{t-1}}$ is derived
+from the contributions of two possible conditions for time $t$: either $B_t =
+1$ and $Y_t = y_{\ell_t}$ and the future steps $t' > t$ must account for the
+remainder of the suffix $y_{>\ell_{t - 1} + 1}$; or $B_t = 0$ and the future
+steps must account for all of the suffix $y_{>\ell_{t-1}}$. For brevity of
+expression, define $v' = y_{\ell_{t-1} + 1}$ to be the first element of the
+suffix, $r = y_{>\ell_{t-1} + 1}$ the rest of the suffix, $p = y_{\leq
+\ell_{t-1}}$ the prefix, and function $f : \{0, 1\} \to \mathbb{R}$ as
+%
+\begin{equation} \label{eq:f}
+    f_{b_{<t}}(x) = P(v'|p, b_{<t}, B_t=x)^x P(B_t=x|p, b_{<t})
+\end{equation}
+%
+where we recognize $f_{b_{<t}}(b_t)$ as a multiplicand in
+\cref{eq:luo_factorization}. $f$ is not necessarily a distribution since it is
+missing the probability mass $\sum_{v \neq v} P(v|p, b_{<t}, B_t=1) P(B_t=1|p,
+b_{<t})$. Using $f$, $v'$, $r$, and $p$, we can easily express the recursive
+definition of the probability of $y$:
+%
+\begin{equation} \label{eq:py}
+    P(v', r|b_{<t}, p) = f_{b_{<t}}(1)P(r|b_{<t},B_t=1,p,v') +
+                         f_{b_{<t}}(0)P(v', r|b_{<t},B_t=0,p)
+\end{equation}
+%
+One can verify that \cref{eq:py} matches $\sum_b P(b, y)$ when $[v', r] = y$
+and $b_{<t} = \emptyset$. By comparing \cref{eq:py,eq:general_pL}, we can see
+that our earlier statement that $P(y)$ and $P(L)$ are are constructed in the
+same way is true: the recursive definitions construct a binary trees where at
+each node we decide whether to emit. We exploit this to prove that there exists
+some $P^y(|r|+1|b_{<t})$ proportional to $P(v', r|b_{<t}, p)$. Denoting all the
+proportional distributions with $P^y$ (the superscript $y$ is used because
+proportionality only applies to the given $y$), we prove that $\forall y, P(y)
+: \exists P^y(|y|) : \forall t \in [1, T], b_{<t} : \exists \alpha_{b_{<t}} :
+\forall p, v', r : P(v',r|b_{<t}, p) = \alpha_{b_{<t}} P^y(L - |p||b_{<t})$ via
+induction on decreasing $t$.
+
+In the base case, $t=T$, we consider three distinct cases: the suffix is of
+size $0$, $1$, or greater than $1$. When the suffix is empty, we cannot take
+the first element $v'$ from the suffix, making $P(r|\ldots)$ on the r.h.s. of
+\cref{eq:py} $0$. $P(v', r|\ldots)$ on the r.h.s. equals $1$ because there are
+no more paths to recurse on. Thus $P(\emptyset|b_{<T}, y) = f_{b_{<T}}(0)$.
+When the suffix is of size $1$, the reverse is true, making $P(y_L|b_{<T},
+y_{<L}) = f_{b_{<T}}(1)$. Finally, any suffix of size greater than one cannot
+occur because we can only emit at most one more time, making $\forall v',r \neq
+\emptyset: P(v',r|b_{<T}, p) = 0$. Determining our proportional $P^y(L|b_{<T})$
+is straightforward: letting $\alpha_{b_{<T}} = f_{b_{<T}}(0) + f_{b_{<T}}(1)$,
+define $P^y(B_T=x|b_{<T}) = Z_{b_{<T}}^{-1} f_{b_{<T}}(0)$. The induced
+distribution $P^y(L|b_{<T})$ is proportional to $P(v', r'|b_{<T}, p)$ with
+constant $\alpha_{b_{<T}}$.
+
+The inductive case is straightforward:
+%
+\begin{equation} \label{eq:py_pL_induc}
+\begin{split}
+P(v', r|b_{<t}, p)
+    =&  f_{b_{<t}}(1)P(r|b_{<t},B_t=1,p,v') +
+        f_{b_{<t}}(0)P(v', r|b_{<t},B_t=0,p) \\
+    =&  f_{b_{<t}}(1)\alpha_{[b_{<t},B_t=1]}P^y(|r||b_{<t},B_t=1) + \\
+    &   f_{b_{<t}}(0)\alpha_{[b_{<t},B_t=0]}P^y(|r|+1|b_{<t},B_t=0) \ \mathrm{by\>I.H.} \\
+    =&  \alpha_{b_{<t}} P^y(B_t=1|b_{<t})P^y(|r||b_{<t},B_t=1) + \\
+    &   \alpha_{b_{<t}} P^y(B_t=0|b_{<t})P^y(|r|+1|b_{<t},B_t=0) \\
+    =&  \alpha_{b_{<t}} P^y(|r| + 1|b_{<t}) \ \mathrm{by\>\cref{eq:general_pL}}
+\end{split}
+\end{equation}
+%
+where
+%
+\begin{equation} \label{eq:py_b}
+\begin{split}
+P^y(B_t=b_t|b_{<t}) &= \alpha_{b_{<t}}^{-1} f_{b_{<t}}(x)\alpha_{b_{\leq t}} \\
+\alpha_{b_{<t}} &= \Sum{f_{b_{<t}}(b_t)\alpha_{b_{\leq t}}}{b_t,0,1}
+\end{split}
+\end{equation}
+
+While proportionality is not sufficient to prove equivalence between $P(y)$ and
+$P^y(L)$, it is sufficient to ensure $P(b|y)$ is equivalent to $P^y(b|L)$:
+%
+\begin{equation}
+\begin{split}
+P(B_t=1|b_{<t}, p, v', r)
+    =&  \frac{P(B_t=1, v', r|b_{<t}, p)}{P(v', r|b_{<t}, p)} \\
+    =&  \frac{f_{b_{<t}}(1)P(r|b_{<t},B_t=1,p,v')}{P(v', r|b_{<t}, p)} \\
+    =&  \frac{\alpha_{b_{<t}}P^y(B_t=1|b_{<t})P^y(|r||b_{<t},B_t=1)}
+             {\alpha_{b_{<t}}P^y(|r|+1|b_{<t})} \\
+    =&  P^y(B_t=1|b_{<t},|y|) \ \mathrm{by\>\cref{eq:general_pBgL}}
+\end{split}
+\end{equation}
+%
+as required.
+
+Proving $P^y(b|L) \equiv P(b|y)$ allows us to reframe the question of
+approximating $P(b|y)$ to one where we are approximating $P^y(b|L)$, which is
+combinatorically identical to $P(b|L)$. Thus, we may mitigate or even remove
+the bias (under numerous independence constraints) by transforming the odds of
+the distribution $Q(b)$ to match those of $P^y(b|L)$. The transformation of
+$P(B_t=1|b_{<t})$ into $P^y(B_t=1|b_{<t})$ is the same as that in
+\cref{eq:py_b}.
+
+Unfortunately, $\alpha_{b_{<t}}$, in general, is dependent on the distributions
+over all suffixes. Even if $P(b_t|b_{<t}) = P(b_t)$, as in
+\cref{sec:reinforce}, the $P(y_{\ell_t}|b_{<t}, y_{< \ell_t})$ term in
+$f_{b_{<t}}(1)$ will cause $\alpha_{b_{<t}}$ to vary with the suffix. We can
+limit the history of $P(y_{\ell_t}|\ldots)$ to make calculating
+$\alpha_{b_{<t}}$ more tractable. For example, if we assume
+$P(y_{\ell_t}|\ldots) = P(y_{\ell_t}|b_t) = y_t^\ell$, we can easily modify the
+algorithm for computing \cref{eq:C} to count products of $w_t y_t^\ell$ instead
+of just $w_t$, resulting the analogous CB equations from \cref{sec:cb_defns}
+calculating $P(b|y)$ instead of $P(b|L)$. However, such conditions are just as
+stringent and involve as many computations as exact marginalization\footnote{
+%
+    We could use such a scheme for $Q_{IDB}(b)$ from \cref{eq:id_step_q},
+    but it would be easier to simply condition directly on $y$, $Q_{IDB}(b,y)$,
+    in an effort to parameterize $P^y(b|L)$ instead of $P(b|L)$.
+%
+}. Thus, for distributions with complicated posteriors over class labels, we
+are relegated to approximating \label{eq:py_b}.
+
+In summary, the distribution $P(b|y)$ always matches a member of the
+parameterized family of the generalized CB from \cref{eq:general_pBgL},
+$P^y(b|L)$, and thus inherits the concerns and restrictions of estimating
+$P(b|L)$. The additional computations involved in directly computing $P^y(b|L)$
+suffer from a combinatorial explosion due to dependencies between class labels,
+which lends itself to approximation. We leave such approximations to future
+work.
 
 \section{Experiments} \label{sec:experiments}
 
@@ -1956,9 +2187,7 @@ forced to $1$ in order to make the total number of emissions $L$. The $I[t > T
 
 \section{TODO}
 
-\emph{Viterbi best path} can be calculated similarly to forward algorithm from
-\cref{sec:exact}. Application: given chronological list of events, find the
-most likely time they occurred.
+\emph{Remove $P(L)$ from REINFORCE estimators}
 
 \emph{Motivations is not working as an intro}
 
