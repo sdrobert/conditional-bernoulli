@@ -1361,12 +1361,12 @@ Since we plan on using $f$ to sample a value for $B_t$, it is important that
 $f$ only be able to sample values that could be taken by $B_t$ under the
 distribution $P(B_t=1|b_{<t}, L)$. Critically, we require that $f$ follow the
 restriction that only $L$ high samples may be generated total per sequence.
-Formally, letting $\ell_{<t} = \Sum{b_{t'}}{t',1,t - 1}$, these restrictions
+Formally, letting $\ell_{t-1} = \Sum{b_{t'}}{t',1,t - 1}$, these restrictions
 can be stated as
 %
 \begin{enumerate}
-    \item $f(b_{<t}, p_{\leq t}, T, L) = 1$ if $T - t + 1 = L - \ell_{<t}$.
-    \item $f(b_{<t}, p_{\leq t}, T, L) = 0$ if $L - \ell_{<t} = 0$.
+    \item $f(b_{<t}, p_{\leq t}, T, L) = 1$ if $T - t + 1 = L - \ell_{t-1}$.
+    \item $f(b_{<t}, p_{\leq t}, T, L) = 0$ if $L - \ell_{t-1} = 0$.
 \end{enumerate}
 %
 that is, the probability of sampling $B_t = 1$ becomes $1$ when the number of
@@ -1565,8 +1565,8 @@ calculate:
 %
 \begin{equation} \label{eq:q_fs}
     Q_{FS}(B_t=1|b_{<t}, L) = \begin{cases}
-        1 & T - t + 1 = L - \ell_{<t} \\
-        0 & \ell_{<t} = L \\
+        1 & T - t + 1 = L - \ell_{t-1} \\
+        0 & \ell_{t-1} = L \\
         \frac{w_t}{1 + w_t} & \mathrm{otherwise}
     \end{cases}
 \end{equation}
@@ -1584,11 +1584,11 @@ The remaining approximators take advantage of the following form of
 \begin{split}
     P(b_t|b_{<t}, L)
     &=  \frac{P(b_t|b_{<t})P(L - \ell_t|b_{\leq t})}
-        {P(L - \ell_{<t}|b_{<t})} \\
+        {P(L - \ell_{t-1}|b_{<t})} \\
     &= \frac{P(b_t|b_{<t})P(L - \ell_t|b_{\leq t})}
-       {\sum_{v \in \{0,1\}} P(B_t=v|b_{<t})P(L - \ell_{<t} - v|[b_{<t}, v])} \\
+       {\sum_{v \in \{0,1\}} P(B_t=v|b_{<t})P(L - \ell_{t-1} - v|[b_{<t}, v])} \\
     &= \frac{w_t^{b_t}P(L - \ell_t|b_{\leq t})}
-        {P(L - \ell_{<t}|[b_{<t}, 0]) + w_t P(L - \ell_{<t} - 1|[b_{<t}, 1])}
+        {P(L - \ell_{t-1}|[b_{<t}, 0]) + w_t P(L - \ell_{t-1} - 1|[b_{<t}, 1])}
 \end{split}
 \end{equation}
 %
@@ -1604,23 +1604,23 @@ Bernoulli random variables $B_t$ sum to $L$. A natural choice for an
 approximation to this distribution is to replace it with one where those
 variables are independent. This is simply the PB distribution. Assume that we
 have the log-odds of $T$ independent Bernoulli random variables $w'_1, w'_2,
-\ldots w'_T$. Then we approximate $P(L - \ell_{<t} - v|[b_{<t}, v])$ with the
-probability of $L - \ell_{<t} - v$ highs from the parameters
+\ldots w'_T$. Then we approximate $P(L - \ell_{t-1} - v|[b_{<t}, v])$ with the
+probability of $L - \ell_{t-1} - v$ highs from the parameters
 $w'_{t + 1}, w'_{t + 2}, \ldots, w'_T$. Plugging this approximation into
 \cref{eq:general_pBgL_alt} gives:
 %
 \begin{equation} \label{eq:id_step_q}
 \begin{split}
     Q_{IDB}(B_t=1|b_{<t}, L)
-    &= \frac{w_tQ(L - \ell_{<t} - 1; w'_{>t})}
-            {Q(L - \ell_{<t}; w'_{>t}) + w_tQ(L - \ell_{<t} - 1; w'_{>t})} \\
-    &= \frac{w_t C(L - \ell_{<t} - 1, [t + 1, T]; w')/Z}
+    &= \frac{w_tQ(L - \ell_{t-1} - 1; w'_{>t})}
+            {Q(L - \ell_{t-1}; w'_{>t}) + w_tQ(L - \ell_{t-1} - 1; w'_{>t})} \\
+    &= \frac{w_t C(L - \ell_{t-1} - 1, [t + 1, T]; w')/Z}
             {\begin{array}{l}
-                C(L - \ell_{<t}, [t + 1, T]; w')/Z + \\
-                \qquad w_tC(L - \ell_{<t} - 1; [t + 1, T]; w')/Z
+                C(L - \ell_{t-1}, [t + 1, T]; w')/Z + \\
+                \qquad w_tC(L - \ell_{t-1} - 1; [t + 1, T]; w')/Z
             \end{array}} \\
-    &= \frac{w_t C(L - \ell_{<t} - 1, [t + 1, T]; w' \cup \{w_t\} \setminus \{w'_t\})}
-            {C(L - \ell_{<t}, [t, T]; w' \cup \{w_t\} \setminus \{w'_t\})}
+    &= \frac{w_t C(L - \ell_{t-1} - 1, [t + 1, T]; w' \cup \{w_t\} \setminus \{w'_t\})}
+            {C(L - \ell_{t-1}, [t, T]; w' \cup \{w_t\} \setminus \{w'_t\})}
 \end{split}
 \end{equation}
 %
@@ -1666,17 +1666,17 @@ approximation is
 \begin{split}
 Q_{Bin}(B_t=1|b_{<t}, L)
     &= \frac{
-            w_t \binom{T - t}{L - \ell_{<t} - 1} p^{L - \ell_{<t} - 1}
-            (1 - p)^{T - t - L + \ell_{<t} + 1}}
+            w_t \binom{T - t}{L - \ell_{t-1} - 1} p^{L - \ell_{t - 1} - 1}
+            (1 - p)^{T - t - L + \ell_{t-1} + 1}}
         {\sum_{v \in \{0,1\}}
-            w_t^v \binom{T - t}{L - \ell_{<t} - v}p^{L - \ell_{<t} - v}
-            (1 - p)^{T - t - L + \ell_{<t} + v}} \\
-    &= \frac{w_t (T - L)(L - \ell_{<t})}
-            {w_t (T - L)(L - \ell_{<t}) + L(T - t - L + \ell_{<t} + 1)}
+            w_t^v \binom{T - t}{L - \ell_{t-1} - v}p^{L - \ell_{t-1} - v}
+            (1 - p)^{T - t - L + \ell_{t-1} + v}} \\
+    &= \frac{w_t (T - L)(L - \ell_{t-1})}
+            {w_t (T - L)(L - \ell_{t-1}) + L(T - t - L + \ell_{t-1} + 1)}
 \end{split}
 \end{equation}
 
-Substituting $\ell_{<t} = L$ and $L - \ell_{<t} = T - t + 1$ will show that
+Substituting $\ell_{t-1} = L$ and $L - \ell_{t-1} = T - t + 1$ will show that
 \cref{eq:bin_q} satisfies restrictions 1 and 2. While we expect the binomial
 approximation to speed up initial training, $Q_{Bin}$ will will suffer as
 training progresses and the individual $P(b_t|b_{<t}, y)$ move away from $L /
@@ -1839,7 +1839,7 @@ stringent and involve as many computations as exact marginalization\footnote{
     in an effort to parameterize $P^y(b|L)$ instead of $P(b|L)$.
 %
 }. Thus, for distributions with complicated posteriors over class labels, we
-are relegated to approximating \label{eq:py_b}.
+are relegated to approximating \cref{eq:py_b}.
 
 In summary, the distribution $P(b|y)$ always matches a member of the
 parameterized family of the generalized CB from \cref{eq:general_pBgL},
@@ -2185,120 +2185,133 @@ forced to $1$ in order to make the total number of emissions $L$. The $I[t > T
 - L]\ldots$ term sums the probability of those paths, which have $T - L + 1$
 \emph{low} values (including the $B_t=0$ term).
 
-\section{TODO}
+\section{Possible applications (to supplant motivations)}
 
-\emph{Remove $P(L)$ from REINFORCE estimators}
+Anomaly detection \cite{chandolaAnomalyDetectionSurvey2009}.
+\begin{itemize}
+    \item Time series
+    \item genome sequences
+    \item protein sequences
+    \item conditional/contextual anomalies
+\end{itemize}
+Rare event detection: memory consumption during training primary issue: $O(TL)$
+from \cref{eq:C}. Perfect during testing.
 
-\emph{Motivations is not working as an intro}
+\begin{itemize}
+\item   \emph{Network anomaly detection} - threat detection.
+\item   \emph{Market prediction}. Will they go up or down?
+\item   \emph{Unfair advantage/spoofing}. Some bidders will bid and then remove
+        the bid to see how the bid impacts sales.
+\item   \emph{Election forecasting}.
+\item   \emph{Medical event detection}.
+\item   \emph{Graph partitioning}.
+\end{itemize}
 
-\emph{Hierarchical learning.} Either through the estimators from
-\cref{sec:reinforce} or the exact form derived in \cref{sec:exact}, the CB can
-be used to transduce a sequence of length $T$ into one of length $L$. The
-advantage that the CB has over CTC is its ability to incorporate and
-simultaneously learn the dynamics of the $L$ sequence while learning those of
-the $T$ sequence. This does not prevent us from stacking a third sequence
-$M \ll L$ on top of the $L$ sequence, or even deeper. For example, we could
-choose $T$ to be acoustic frames, $L$ to be sub-word units, and $M$ to be full
-words. We could even recreate something akin to the FST composition used in
-hybrid speech recognition.
+\section{Uniqueness of the IDB as a solution to restrictions 1-4 under independence}
 
-% \emph{Prove/disprove that no distribution satisfies the following three
-%     requirements.}
-% Work in progress.
+That the IDB satisfies restrictions 1-4 if $P(b_t|b_{<t}) = P(b_t)$ as $f$
+(with accompanying PB as $g$) is easily verified. What is left is to prove that
+the unique solution to restrictions 1-4 with independent Bernoulli
+distributions is the IDB-PB pair.
 
-% Let $B_t \in \{0,1\}$ be a binary random variable. There are $T$ such $B_t$
-% and, if we condition on $L$, there must be $L \ll T$ (and only $L$) ``high''
-% $B_t$, i.e. $\sum_t B_t = L$.
-% %
-% \begin{enumerate}
-% \item \emph{Conditional:} $P(b_t|b_{<t},L,T)$ is well-defined and
-%     tractable.
-% \item \emph{Marginal:} $P(b_t|b_{<t}, T) = P(b_t|b_{<t})$. That is, we can
-%     marginalize out the total number of ``high'' events $L$ in the
-%     sequence in a way agnostic to the remaining number of total variables
-%     $T - t$.
-% \item \emph{Prefix-dependent:} Let $p_t = P(B_t = 1|b_{<t}, [L, T])$
-%     (with or without conditioning on $L$ and $T$). Then
-%     %
-%     \begin{equation*}
-%         \exists b_{<t}, b'_{<t} \quad
-%         \sum_t b_{<t} = \sum_t b'_{<t} \land p_t \neq p'_t
-%     \end{equation*}
-%     %
-%     In other words, we can modify the distribution over $B_t$ in a manner
-%     dependent on the sequence of $B_{<t}$, not just the number of highs in the
-%     sequence.
-% \end{enumerate}
-% %
-% The BB and other CB variants satisfy the conditional and marginal requirements,
-% but not the prefix-dependent one. The models of e.g.
-% \citet{luoLearningOnlineAlignments2017,raffelOnlineLineartimeAttention2017}
-% satisfy the marginal and prefix-dependent requirements, but not the
-% conditional.
+First, we parameterize the independent Bernoulli trials with odds instead of
+direct probabilities to make computations easier ($P(b_t) = w_t / (1 + w_t)$).
+For brevity, denote $r = L - \ell_t$, $f^{x}(b_{<t},
+w_{\leq t}, T, L) = f^{b_{\leq t}}_r$, and $g(w, T, L) = g$, where we have
+suppressed input that are either fixed ($w$, $T$) or can be inferred ($L$).
 
-% Though I have yet to find a model in the literature that satisfies the
-% conditional and prefix-dependent conditions simultaneously, I can provide a
-% pathological distribution that does satisfy both: have some auto-regressive RNN
-% parameterize each Bernoulli trial as a function of the previous trials ($b_t
-% \sim w_t = \text{RNN}(b_{<t})$) up to and including event $L$, then make the
-% suffix $b_{>L}$ a deterministic function of the remaining high events necessary
-% such that $\sum_t b_t = L$. Since each suffix has probability 1, and $P(\sum_t
-% b_{\leq L} \leq L) = 1$, the first $L$ events can act as if there is no fixed
-% number of trials. The model is free to adjust the probabilities of those trials
-% in a prefix-dependent way.
+We will prove by induction on $T$ that the system of equations induced by
+restrictions 1-4 require $f^{[p, b_t]}_r = P_{IDB}(b_t|b_{<t}, L)$ for an
+arbitrary choice of $w, T, L$.
 
-% A few thoughts so far:
+In the base case, $t=T$. Since there is only one remaining trial, by
+restrictions 1 and 2, $f^{[p, b_T]}_r = I[r = b_T]$. This is equivalent to
+the probability of the IDB of \cref{eq:id_step}.
 
-% ``Tractable'' needs to be defined. Specifically, we want to avoid iterating
-% over all $B_{>t}$ s.t. $\sum_t B_t = L$ and setting $P(b_t|\ldots)$ to the
-% truncated distribution. I think this will be difficult. If we can formulate
-% this, we'll be a good chunk of the way done.
+In the inductive case, for some $t$ we assume by the inductive hypothesis that
+$\forall t' \in (t, T]: f^{b_{\leq t'}}_{r'} = P_{IDB}(b_{t'}|b_{<t'}, L) =
+w_t^{b_t} C(r' - b_t; w_{>t}) / C(r'; w_{\geq t})$. Then, for any choice of
+prefix $b_{<t}$ and suffix $b_{>t}$ s.t. $\sum b_{>t} = r - 1$, choose
+any other suffix $b'_{>t}$ identical to $b_{>t}$ except at index $\tau$ where
+$b_\tau \neq b'_\tau = 1$ (implying $\sum b'_{>t} = r$). Then by restriction 4
+the following two equations must hold
+%
+\begin{align}
+    g   f_L^{b_1} f_{L - b_1}^{[b_1, b_2]} \ldots
+        f_r^{[b_{<t}, 1]}f_{r-1}^{[b_{<t}, 1, b_{t+1}]} \ldots &=
+            \left(\Prod{\frac{w_{t'}^{b_{t'}}}{1 + w_{t'}}}{t',1,t-1}\right)
+            \frac{w_t}{1 + w_t}
+            \left(\Prod{\frac{w_{t'}^{b_{t'}}}{1 + w_{t'}}}{t',t+1,T}\right)
+            \label{eq:uniq_induc_1} \\
+    g   f_L^{b_1} f_{L - b_1}^{[b_1, b_2]} \ldots
+        f_r^{[b_{<t}, 0]}f_{r}^{[b_{<t}, 0, b'_{t+1}]} \ldots &=
+            \left(\Prod{\frac{w_{t'}^{b_{t'}}}{1 + w_{t'}}}{t',1,t-1}\right)
+            \frac{1}{1 + w_t}
+            \left(\Prod{\frac{w_{t'}^{b'_{t'}}}{1 + w_{t'}}}{t',t+1,T}\right)
+            \label{eq:uniq_induc_2}
+\end{align}
+%
+Consider the $f_{r-1}^{[b_{<t}, 1, b_{t+1}]} \ldots$ term in
+\cref{eq:uniq_induc_1}:
+%
+\begin{equation} \label{eq:uniq_induc_1_ldots}
+\begin{split}
+    f_{r-1}^{[b_{<t}, 1, b_{t+1}]} \ldots
+        =& \Prod{
+            \frac{w_{t'}^{b_{t'}}C(r - 1 - \Sum{b_{t''}}{t'',t+1,t'}; w_{>t'})}
+                 {C(r - 1 - \Sum{b_{t''}}{t'',t+1,t'-1}; w_{\geq t'})}}
+            {t',t+1,T} \ \mathrm{by\>I.H.}\\
+        =& \frac{C(r - 1 - \Sum{b_{t''}}{t'',t+1,T}; w_{>T})}
+                {C(r - 1; w_{>t})}
+            \Prod{w_{t'}^{b_{t'}}}{t',t+1,T} \\
+        =& \frac{\Prod{w_{t'}^{b_{t'}}}{t',t+1,T}}{C(r - 1; w_{>t})}
+\end{split}
+\end{equation}
+%
+likewise for \cref{eq:uniq_induc_2}:
+%
+\begin{equation} \label{eq:uniq_induc_2_ldots}
+    f_{r}^{[b_{<t}, 0, b'_{t+1}]} \ldots
+        = \frac{\Prod{w_{t'}^{b'_{t'}}}{t',t+1,T}}{C(r; w_{>t})}
+\end{equation}
+%
+Dividing both sides of \cref{eq:uniq_induc_1} by \cref{eq:uniq_induc_1_ldots}
+and \cref{eq:uniq_induc_2} by \cref{eq:uniq_induc_2_ldots} gives
+%
+\begin{align}
+    g f_L^{b_1} f_{L - b_1}^{[b_1, b_2]} \ldots f_r^{[b_{<t}, 1]}
+        &=  \frac{w_tC(r - 1; w_{>t})}{1 + w_t}
+            \Prod{\frac{w_{t'}^{b_{t'}}}{1 + w_{t'}}}{t',1,t-1}
+        \label{eq:uniq_induc_1_v2} \\
+    g f_L^{b_1} f_{L - b_1}^{[b_1, b_2]} \ldots f_r^{[b_{<t}, 0]}
+        &=  \frac{C(r; w_{>t})}{1 + w_t}
+            \Prod{\frac{w_{t'}^{b_{t'}}}{1 + w_{t'}}}{t',1,t-1}
+        \label{eq:uniq_induc_2_v2}
+\end{align}
+%
+Dividing \cref{eq:uniq_induc_1_v2} by \cref{eq:uniq_induc_2_v2} leaves
+%
+\begin{equation} \label{eq:uniq_induc_conc}
+\begin{split}
+    \frac{f_r^{[b_{<t}, 1]}}{f_r^{[b_{<t}, 0]}}
+        =& \frac{w_tC(r - 1; w_{>t})}{C(r - 1; w_{>t})} \\
+    \frac{f_r^{[b_{<t}, 1]}}{1 - f_r^{[b_{<t}, 1]}}
+        =& \frac{w_tC(r - 1; w_{>t})}{C(r - 1; w_{>t})} \\
+    f_r^{[b_{<t}, 1]} =& \frac{w_tC(r - 1; w_{>t})}
+                         {w_tC(r - 1; w_{>t}) + C(r; w_{>t})} \\
+        =& \frac{w_tC(r - 1; w_{>t})}{C(r; w_{\geq t})} \\
+        =& P_{IDB}(B_t=1|b_{<t}, L)
+\end{split}
+\end{equation}
+%
+where $f_r^{[b_{<t}, 0]} = 1 - f_r^{[b_{<t}, 1]}$ follows from the fact that
+these are the probabilities of the different values in the same Bernoulli
+distribution. $w_tC(r - 1; w_{>t}) + C(r; w_{>t}) = C(r; w_{\geq t})$ since
+the left term is the weighted count of all choices of $r$-length paths
+including $w_t$ and the right term is all the $r$-length paths excluding $w_t$.
 
-% Being auto-regressive (i.e. parameterizing $b_t$ as a function of $b_{<t}$) is
-% certainly sufficient with respect to the prefix-dependent property. I believe
-% they might be identical criteria.
-
-% The processes of \citet{raffelOnlineLineartimeAttention2017} (and, by
-% extension, \citet{chiuMonotonicChunkwiseAttention2018}) reduce to an
-% auto-regressive sequence of Bernoulli trials at test time, just like
-% \citeauthor{luoLearningOnlineAlignments2017}. The so-called ``expectation''
-% calculated by the authors during training ignores conditioning on $L$, just
-% like \citeauthor{luoLearningOnlineAlignments2017}, and is subject to the same
-% sort of bias exemplified in \cref{fig:bias}.
-
-% I think the difficult part of finding a closed-form distribution that is both
-% auto-regressive and does not enumerate the log-odds in the \emph{prior}, not
-% the posterior. For example, we can get a closed-form step by treating the
-% parameterized probability $p_t$ as a surrogate for all future probabilities and
-% using the binomial distribution:
-% %
-% \begin{equation*}
-%     \begin{split}
-%         P(B_t = 1, \ell_t) &=
-%         \binom{T - t}{L - \ell_t - 1} p_t^{L - \ell_t}
-%         (1 - p_t)^{T - t - L + \ell_t + 1} \\
-%         P(\ell_t) &= \binom{T - t + 1}{L - \ell} p_t^{L - \ell_t}
-%         (1 - p_t)^{T - t - L + \ell_t + 1} \\
-%         P(B_t = 1|\ell_t) &= \frac{L - \ell_t}{T - t + 1}
-%     \end{split}
-% \end{equation*}
-% %
-% where the last equation follows from dividing the first by the second. This
-% conditional is trivial to calculate (it doesn't even involve $p_t$), but
-% calculating $P(L)$ would still require summing the probability of all sequences
-% that have $L$ highs.
-
-% Thus, requirement 1 should probably be switched to something like ``the
-% prior is well-defined and tractable.''
-
-% Some things to follow up on towards a proof:
-
-% \emph{Duration-based HMM sampling} might give some ideas on how to proceed.
-% Likewise with the \emph{Cover \& Thomas proof}.
-
-% \emph{Prove equivalence up to a negligible quality}. If a distribution
-% satisfies requirements 1 \& 2, is it reducible to the CB distribution up to
-% some irrelevant (e.g. linear) transformation? Likewise, if a distribution
-% satisfies 1 \& 3, does it reduce to a sequence of dependent binary trials?
+By \cref{eq:uniq_induc_conc}, $f_r^{[b_{\leq t}]}$ is IDB-distributed and
+therefore, by induction, is so for all choices of $t$. Thus the IDB is the
+unique solution satisfying restrictions 1-4 for independent $P(b_t)$.
 
 \end{document}
