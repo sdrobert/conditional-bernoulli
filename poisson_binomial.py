@@ -28,7 +28,8 @@ def lR(logits, k_max, keep_hist=False, reverse=False):
     # out log_R = (k_max + 1, *)
     log_R0 = torch.zeros_like(logits[:1, ...])
     log_Rrest = torch.full(
-        (k_max,) + logits[0].size(), -float('inf'), device=logits.device)
+        (k_max,) + logits[0].size(), -float("inf"), device=logits.device
+    )
     logits = logits.unsqueeze(1)
     if keep_hist:
         hist = [torch.cat([log_R0, log_Rrest])]
@@ -38,10 +39,11 @@ def lR(logits, k_max, keep_hist=False, reverse=False):
             t = T - t - 1
         x = torch.cat([log_R0, log_Rrest[:-1]], 0)
         # if x is infinite or logits is infinite, we don't want a gradient
+        # FIXME(sdrobert): "where" is slow
         x = torch.where(
             torch.isfinite(x + logits[t]),
             x + logits[t],
-            x.detach() + logits[t].detach()
+            x.detach() + logits[t].detach(),
         )
         if k_max:
             log_Rrest = torch.logsumexp(torch.stack([log_Rrest, x], 0), 0)
@@ -65,7 +67,6 @@ def probs(w):
 def lprobs(logits):
     # in logits = (T, *)
     # out log_p = (T, *)
-    return (
-        lR(logits, len(logits)) +
-        torch.nn.functional.logsigmoid(-logits).sum(0, keepdim=True)
+    return lR(logits, len(logits)) + torch.nn.functional.logsigmoid(-logits).sum(
+        0, keepdim=True
     )

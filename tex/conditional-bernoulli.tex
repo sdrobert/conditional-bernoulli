@@ -261,7 +261,7 @@ them are high ($\Sum{b_t}{t} = k$)?'' Letting $K = \Sum{B_t}{t}$, $K$ is a
 random variable that counts the total number of ``highs'' in a series of
 Bernoulli trials. $K$ is distributed according to the Poisson-Binomial (PB)
 distribution, a generalization of the Binomial distribution for when $p_i \neq
-    p_j$. It is defined as
+p_j$. It is defined as
 %
 \begin{equation} \label{eq:pb}
     \begin{split}
@@ -376,7 +376,7 @@ $A_{r_j, j} = A_{r_{j-1},j-1}$. The probability of including $t_j$ is
 \begin{equation} \label{eq:id_step}
     P(t_j \in A_{r_j,j}|A_{r_{j-1}, j-1}, k; w) =
     \frac{w_{t_j} C(k - r_{j-1} - 1, A_j^c; w)}
-    {C(k - r_{j-1}, A_{j-1}u^c; w)}
+    {C(k - r_{j-1}, A_{j-1}^c; w)}
 \end{equation}
 
 From the perspective of Bernoulli trials, $P(t_j \in A_{r_j, j}|\ldots) =

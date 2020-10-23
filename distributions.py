@@ -45,6 +45,8 @@ def generalized_binomial_coefficient(logits, k_max, intermediate=None):
     # Implementation note: this is the "direct" method from
     # Chen and Liu, 1997. "Statistical applications of the Poisson-Binomial and
     # Conditional Bernoulli distributions"
+    # TODO: look at matrix multiplication version from "Improving the
+    # efficiency of the forward-backward algorithm..."
 
     if logits.dim() == 1:
         flatten = True
