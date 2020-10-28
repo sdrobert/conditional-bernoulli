@@ -3,32 +3,44 @@ import torch
 import pytest
 
 
-@pytest.fixture(scope="module", params=["R", "R2", "R3"])
+@pytest.fixture(scope="module", params=["R", "R2", "R3", "R4"])
 def R(request):
     if request.param == "R":
         return poisson_binomial.R
-    elif request.param == "R2":
+    elif request.param in {"R2", "R3", "R4"}:
 
         def _R(w, *args, **kwargs):
             T, star = w.shape[0], w.shape[1:]
             w = w.reshape(T, -1).transpose(0, 1)
-            v = poisson_binomial.R2(w, *args, **kwargs)
+            if request.param == "R2":
+                v = poisson_binomial.R2(w, *args, **kwargs)
+            elif request.param == "R3":
+                v = poisson_binomial.R3(w, *args, **kwargs)
+            elif request.param == "R4":
+                v = poisson_binomial.R4(w, *args, **kwargs)
             v = v.transpose(0, -1)
             v = v.reshape(*(v.shape[:-1] + star))
             return v
 
         return _R
-    elif request.param == "R3":
 
-        def _R(w, *args, **kwargs):
-            T, star = w.shape[0], w.shape[1:]
-            w = w.reshape(T, -1).transpose(0, 1)
-            v = poisson_binomial.R3(w, *args, **kwargs)
+
+@pytest.fixture(scope="module", params=["lR", "lR4"])
+def lR(request):
+    if request.param == "lR":
+        return poisson_binomial.lR
+    elif request.param in {"lR4"}:
+
+        def _lR(logits, *args, **kwargs):
+            T, star = logits.shape[0], logits.shape[1:]
+            logits = logits.reshape(T, -1).transpose(0, 1)
+            if request.param == "lR4":
+                v = poisson_binomial.lR4(logits, *args, **kwargs)
             v = v.transpose(0, -1)
             v = v.reshape(*(v.shape[:-1] + star))
             return v
 
-        return _R
+        return _lR
 
 
 # this isn't numerically stable
@@ -161,7 +173,7 @@ def test_R_properties(R):
 
 
 @pytest.mark.parametrize("reverse", [True, False])
-def test_shift_R_zero_weights(reverse, R):
+def test_R_zero_weights(reverse, R):
     torch.manual_seed(1702)
     T, N, k_max = 30, 10, 4
     w_lens = torch.randint(k_max, T + 1, (N,))
@@ -192,16 +204,22 @@ def test_shift_R_zero_weights(reverse, R):
 
 @pytest.mark.parametrize("keep_hist", [True, False])
 @pytest.mark.parametrize("reverse", [True, False])
-def test_shift_log_R(keep_hist, reverse):
+def test_log_R(keep_hist, reverse, lR):
     torch.manual_seed(198236)
-    w = torch.rand(50, 4, 30, 10)
-    R_exp = poisson_binomial.R(w, 20, keep_hist, reverse)
-    R_act = poisson_binomial.lR(w.log(), 20, keep_hist, reverse).exp()
-    assert torch.allclose(R_exp, R_act)
+    T, L, N1, N2 = 10, 3, 20, 5
+    w = torch.randn(T, N1, N2).exp()
+    w.requires_grad_(True)
+    R_exp = poisson_binomial.R(w, L, keep_hist, reverse)
+    (g_exp,) = torch.autograd.grad(R_exp, w, torch.ones_like(R_exp))
+    w.requires_grad_(True)
+    R_act = lR(w.log(), L, keep_hist, reverse).exp()
+    assert torch.allclose(R_exp, R_act, rtol=1e-4)
+    (g_act,) = torch.autograd.grad(R_act, w, (R_act != 0.0).float())
+    assert torch.allclose(g_exp, g_act, rtol=1e-4)
 
 
 @pytest.mark.parametrize("reverse", [True, False])
-def test_shift_log_R_inf_logits(reverse):
+def test_log_R_inf_logits(reverse, lR):
     torch.manual_seed(3291)
     T, N, k_max = 53, 5, 3
     logits_lens = torch.randint(k_max, T + 1, (N,))
@@ -212,7 +230,7 @@ def test_shift_log_R_inf_logits(reverse):
         logits_n = torch.randn(logits_len)
         logits_n[0] = -float("inf")
         logits_n.requires_grad_(True)
-        R_n = poisson_binomial.lR(logits_n, k_max, reverse=reverse)
+        R_n = lR(logits_n, k_max, reverse=reverse)
         (g_n,) = torch.autograd.grad(R_n, logits_n, torch.ones_like(R_n))
         R_exp.append(R_n)
         g_exp.append(g_n)
@@ -220,7 +238,7 @@ def test_shift_log_R_inf_logits(reverse):
     logits = torch.nn.utils.rnn.pad_sequence(logits, padding_value=-float("inf"))
     R_exp = torch.stack(R_exp, dim=-1)
     logits.requires_grad_(True)
-    R_act = poisson_binomial.lR(logits, k_max, reverse=reverse)
+    R_act = lR(logits, k_max, reverse=reverse)
     assert torch.allclose(R_exp, R_act)
     (g_act,) = torch.autograd.grad(R_act, logits, torch.ones_like(R_act))
     for logits_len, g_exp_n, g_act_n in zip(logits_lens, g_exp, g_act.T):

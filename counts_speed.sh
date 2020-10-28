@@ -1,6 +1,5 @@
 #! /usr/bin/env bash
 
-seed=0
 repeat=100
 trials_low=
 trials_high=6
@@ -13,11 +12,13 @@ method=R
 burnin=100
 hist=false
 reverse=false
+double=false
 
 help_message="
 Usage:
-$0
-   -s <seed>        Seed (default: $seed)
+$0 [opts]
+
+Opts:
    -r <repeat>      Number of repetitions (default: $repeat)
    -T <trials>      Log-number of weights (default: $trials_high)
    -t <min-trials>  Minimum log-number of weights. If set, will repeat the
@@ -37,6 +38,7 @@ $0
                     (default $burnin)
    -H               If set, ops will return history
    -R               If set, ops will reverse weights
+   -D               If set, double precision
    -h               Print help message to stderr and quit
 "
 
@@ -62,17 +64,8 @@ check_bounded_int() {
   fi
 }
 
-while getopts ":s:r:T:t:L:l:N:n:d:m:b:HRh" opt ; do
+while getopts ":r:T:t:L:l:N:n:d:m:b:HRDh" opt ; do
   case $opt in
-    s)
-      check_bounded_int "s" "$OPTARG" 0
-      if [ $? -eq 0 ]; then
-        seed="$OPTARG"
-      else
-        echo -e "$help_message"
-        exit 1
-      fi
-      ;;
     r)
       check_bounded_int "r" "$OPTARG" 1
       if [ $? -eq 0 ]; then
@@ -157,6 +150,9 @@ while getopts ":s:r:T:t:L:l:N:n:d:m:b:HRh" opt ; do
     R)
       reverse=true
       ;;
+    D)
+      double=true
+      ;;
     h)
       echo -e "$help_message"
       exit 0
@@ -196,12 +192,15 @@ elif [ "$batch_low" -gt "$batch_high" ]; then
   exit 1
 fi
 
-fixed_args="--seed=$seed --repeat=$repeat --device=$device --method=$method speed --burn-in=$burnin"
+fixed_args="--repeat=$repeat --device=$device --method=$method speed --burn-in=$burnin"
 if $hist ; then
   fixed_args="$fixed_args --hist"
 fi
 if $reverse ; then
   fixed_args="$fixed_args --reverse"
+fi
+if $double ; then
+  fixed_args="--double $fixed_args"
 fi
 
 n_iter=$(echo "($trials_high - $trials_low + 1) * ($highs_high - $highs_low + 1) * ($batch_high - $batch_low + 1)" | bc)
@@ -222,5 +221,5 @@ seq 1 $n_iter | xargs -I {} bash -c '
   batch_step=$it
   batch=$(( 2 ** ($batch_step + $1)))
   shift 2
-  python poisson_binomial.py --batch=$batch --trial=$trial --highs=$highs $*
+  python poisson_binomial.py --trial=$trial --highs=$highs $* --batch=$batch
 ' -- {} "$trials_low" "$trials_high" "$highs_low" "$highs_high" "$batch_low" "$batch_high" $fixed_args
