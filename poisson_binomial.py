@@ -220,8 +220,8 @@ except AttributeError:
 
 
 def _logsubexp(a, b):
-    # x = (-(b - a).expm1()).log() + a
-    x = (-(b - a).exp()).log1p() + a
+    x = (-(b - a).expm1()).log() + a
+    # x = (-(b - a).exp()).log1p() + a
     # x = (a.exp() - b.exp()).log()
     return x.masked_fill_(b >= a, EPS_INF)
 
@@ -377,7 +377,7 @@ def _parse_args(args):
 
     acc_parser = subparsers.add_parser("acc")
     acc_parser.add_argument("--seed", type=int, default=None)
-    acc_parser.add_argument("--ratio-odds", type=int, default=1)
+    acc_parser.add_argument("--log2-ratio-odds", type=int, default=0)
     acc_parser.add_argument("--log2-expectation", type=int, default=0)
 
     return parser.parse_args(args)
@@ -521,6 +521,8 @@ def _accuracy(opts):
 
     dtype = torch.float64 if opts.double else torch.float32
 
+    ratio_odds = 2 ** opts.log2_ratio_odds
+
     # this method is similar to that of
     # https://doi.org/10.1016/j.csda.2012.10.006
     # but is essentially prop 1.c of 10.2307/2337119, a generalization of Vandermonde's
@@ -537,7 +539,7 @@ def _accuracy(opts):
             torch.manual_seed(opts.seed + repeat_no)
 
         # choose some number of odds t to have value w', the rest
-        # w' / opts.ratio_odds = aw'
+        # w' / ratio_odds = aw'
         t = torch.randint(1, opts.trials, (1,)).item()
 
         # determine the expected value assuming w' == 1
@@ -546,8 +548,7 @@ def _accuracy(opts):
         daw_prime_expected = fractions.Fraction(0)
         for k in range(max(0, t - opts.trials + opts.highs), min(opts.highs, t) + 1):
             contrib_aw = fractions.Fraction(
-                _binom(opts.trials - t, opts.highs - k),
-                opts.ratio_odds ** (opts.highs - k),
+                _binom(opts.trials - t, opts.highs - k), ratio_odds ** (opts.highs - k),
             )
             contrib_w = _binom(t, k)
             expected += contrib_aw * contrib_w
@@ -562,7 +563,7 @@ def _accuracy(opts):
                 daw_prime_expected += (
                     fractions.Fraction(
                         _binom(opts.trials - t - 1, opts.highs - k - 1),
-                        opts.ratio_odds ** (opts.highs - k - 1),
+                        ratio_odds ** (opts.highs - k - 1),
                     )
                     * contrib_w
                 )
@@ -590,7 +591,7 @@ def _accuracy(opts):
         dw_prime_expected *= w_prime ** (opts.highs - 1)
         daw_prime_expected *= w_prime ** (opts.highs - 1)
 
-        aw_prime = w_prime / opts.ratio_odds
+        aw_prime = w_prime / ratio_odds
 
         if not opts.method.startswith("l") and float(expected) > torch.finfo(dtype).max:
             raise ValueError(
@@ -685,13 +686,13 @@ def _accuracy(opts):
             daw_diffs.append(daw_err)
 
     diffs = np.array(diffs)
-    dw_diffs = np.array(dw_diffs if dw_diffs else [0.0])
-    daw_diffs = np.array(daw_diffs if daw_diffs else [0.0])
+    dw_diffs = np.array(dw_diffs if len(dw_diffs) else [0.0])
+    daw_diffs = np.array(daw_diffs if len(daw_diffs) else [0.0])
 
     print(
         "repeat={},trials={},highs={},device={},method={},double={},seed={},"
-        "ratio-odds={},log2-expectation={},MAE={:.6e}({:.6e}),dw-MAE={:.6e}({:.6e}),"
-        "daw-MAE={:.6e}({:.6e})".format(
+        "log2-ratio-odds={},log2-expectation={},MAE={:.2e}({:.2e}),"
+        "dw-MAE={:.2e}({:.2e}),daw-MAE={:.2e}({:.2e})".format(
             opts.repeat,
             opts.trials,
             opts.highs,
@@ -699,7 +700,7 @@ def _accuracy(opts):
             opts.method,
             opts.double,
             opts.seed,
-            opts.ratio_odds,
+            opts.log2_ratio_odds,
             opts.log2_expectation,
             diffs.mean(),
             diffs.std(),
