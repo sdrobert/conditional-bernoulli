@@ -7,7 +7,8 @@ import fractions
 
 # for log count functions, we want -inf to behave the same way as if it were zero in
 # the regular count function. Thus we replace any occurrence with a log value that,
-# when exponentiated, is nonzero, but only just
+# when exponentiated, is nonzero, but only just. The division by two here ensures that
+# we can add two EPS_INF values without the result being zero.
 EPS_INF = math.log(torch.finfo(torch.float32).tiny) / 2
 
 
@@ -146,6 +147,58 @@ def R4(w, k_max, keep_hist=False, reverse=False):
         return torch.stack(hist, -1).view(*(star + (k_max + 1,)))
 
 
+def R5(w, k_max, keep_hist=False, reverse=False):
+    # Chen's 1994 method from Theorem 3
+    # w = (*, n)
+    # out = (*, k_max + 1)
+    star = w.shape[:-1]
+    n = w.shape[-1]  # normally this is T, but Chen uses this as below
+    w = w.view(-1, n)
+
+    # First calculate all the T(i, w) terms.
+    T = [(w ** i).sum(1) for i in range(1, k_max + 1)]
+
+    v = _R5(w, k_max, T)  # (N, k_max + 1)
+
+    if keep_hist:
+        # Chen's method produces R(L, w) for *only* the full set w. If we want more,
+        # we have to re-calculate the recursion. However, as per Chen, we can avoid some
+        # re-computation if we subtract terms from T
+        v = [v]
+        for _ in range(n - 1, -1, -1):
+            if reverse:
+                # cut the first weight when calculating R(L, w \ {w_t})
+                w_t = w[:, 0]
+                w = w[:, 1:]
+            else:
+                # cut the last weight when calculating R(L, w \ {w_t})
+                w_t = w[:, -1]
+                w = w[:, :-1]
+            T = [T[i - 1] - w_t ** i for i in range(1, k_max + 1)]
+            v.insert(0, _R5(w, k_max, T))
+        v = torch.stack(v, -1).view(*(star + (k_max + 1, n + 1)))
+    else:
+        v = v.view(*(star + (k_max + 1,)))
+
+    return v
+
+
+def _R5(w, k_max, T):
+    N = w.shape[0]
+    R = [torch.ones((N,), device=w.device, dtype=w.dtype)]
+    zeros = torch.zeros((N,), device=w.device, dtype=w.dtype)
+    for k_prime in range(1, k_max + 1):
+        Rk_prime = zeros
+        for i in range(1, k_prime + 1):
+            if i % 2:
+                Rk_prime = Rk_prime + T[i - 1] * R[k_prime - i]
+            else:
+                Rk_prime = Rk_prime - T[i - 1] * R[k_prime - i]
+        Rk_prime = Rk_prime / k_prime
+        R.append(Rk_prime)
+    return torch.stack(R, -1)  # (N, k + 1)
+
+
 try:
     _logaddexp = torch.logaddexp
 except AttributeError:
@@ -162,8 +215,15 @@ except AttributeError:
 
     def _logcumsumexp(x, dim):
         max_ = x.max(dim, keepdim=True)[0]
-        diff = -(x - max_).abs()
-        return max_ + diff.exp().cumsum(dim).log()
+        x = -(x - max_).abs()
+        return max_ + x.exp().cumsum(dim).log()
+
+
+def _logsubexp(a, b):
+    # x = (-(b - a).expm1()).log() + a
+    x = (-(b - a).exp()).log1p() + a
+    # x = (a.exp() - b.exp()).log()
+    return x.masked_fill_(b >= a, EPS_INF)
 
 
 def lR(logits, k_max, keep_hist=False, reverse=False):
@@ -213,7 +273,7 @@ def lR4(logits, k_max, keep_hist=False, reverse=False):
         hist = [lRk[:, -1]]  # (N,)
     for _ in range(k_max):
         x = logits + lRk[:, :-1]
-        x = x.masked_fill(torch.isinf(x), -float("inf"))
+        x = x.masked_fill(torch.isinf(x), EPS_INF)
         lRk = torch.cat([ninfs, _logcumsumexp(x, 1)], -1)
         if keep_hist:
             hist.append(lRk)
@@ -223,6 +283,51 @@ def lR4(logits, k_max, keep_hist=False, reverse=False):
         return torch.stack(hist, 1).view(*(star + (k_max + 1, T + 1)))
     else:
         return torch.stack(hist, -1).view(*(star + (k_max + 1,)))
+
+
+def lR5(logits, k_max, keep_hist=False, reverse=False):
+    # in logits = (*, T)
+    # out log_R = (*, k_max + 1)
+    star = logits.shape[:-1]
+    n = logits.shape[-1]
+    logits = logits.view(-1, n).clamp(min=EPS_INF)
+
+    T = [(i * logits).logsumexp(1) for i in range(1, k_max + 1)]
+
+    v = _lR5(k_max, T)
+
+    if keep_hist:
+        v = [v]
+        for _ in range(n - 1, -1, -1):
+            if reverse:
+                logits_t = logits[:, 0]
+                logits = logits[:, 1:]
+            else:
+                logits_t = logits[:, -1]
+                logits = logits[:, :-1]
+            T = [_logsubexp(T[i - 1], i * logits_t) for i in range(1, k_max + 1)]
+            v.insert(0, _lR5(k_max, T))
+        v = torch.stack(v, -1).view(*(star + (k_max + 1, n + 1)))
+    else:
+        v = v.view(*(star + (k_max + 1,)))
+
+    return v
+
+
+def _lR5(k_max, T):
+    N = T[0].shape[0]
+    lR = [torch.zeros((N,), device=T[0].device, dtype=T[0].dtype)]
+    ninfs = torch.full((N,), -float("inf"), device=T[0].device, dtype=T[0].dtype)
+    for k_prime in range(1, k_max + 1):
+        lRk_prime = ninfs
+        for i in range(1, k_prime + 1):
+            if i % 2:
+                lRk_prime = _logaddexp(lRk_prime, T[i - 1] + lR[k_prime - i])
+            else:
+                lRk_prime = _logsubexp(lRk_prime, T[i - 1] + lR[k_prime - i])
+        lRk_prime = lRk_prime - math.log(k_prime)
+        lR.append(lRk_prime)
+    return torch.stack(lR, -1)  # (N, k + 1)
 
 
 def probs(w):
@@ -256,7 +361,9 @@ def _parse_args(args):
     parser.add_argument("--highs", type=int, default=10)
     parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
     parser.add_argument(
-        "--method", choices=("R", "R2", "R3", "R4", "lR", "lR4"), default="R"
+        "--method",
+        choices=("R", "R2", "R3", "R4", "lR", "lR4", "R5", "lR5"),
+        default="R",
     )
     parser.add_argument("--double", action="store_true", default=False)
 
@@ -334,6 +441,10 @@ def _speed(opts):
         _R = R4
     elif opts.method == "lR4":
         _R = lR4
+    elif opts.method == "R5":
+        _R = R5
+    elif opts.method == "lR5":
+        _R = lR5
 
     if opts.device.type == "cuda":
         timeit = _cuda_timer
@@ -343,7 +454,7 @@ def _speed(opts):
     dtype = torch.float64 if opts.double else torch.float32
 
     w = torch.zeros(opts.trials, opts.batch, device=opts.device, dtype=dtype)
-    if opts.method in {"R2", "R3", "R4", "lR4"}:
+    if opts.method in {"R2", "R3", "R4", "lR4", "R5", "lR5"}:
         w = w.transpose(0, 1)
     if opts.method.startswith("l"):
         w = w.log()
@@ -403,6 +514,10 @@ def _accuracy(opts):
         _R = R4
     elif opts.method == "lR4":
         _R = lR4
+    elif opts.method == "R5":
+        _R = R5
+    elif opts.method == "lR5":
+        _R = lR5
 
     dtype = torch.float64 if opts.double else torch.float32
 
