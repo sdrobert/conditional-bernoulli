@@ -156,13 +156,22 @@ def test_count_zero_weights(count, device):
 
 @pytest.mark.parametrize("include_hist", [True, False])
 @pytest.mark.parametrize("direction", ["forward", "backward", "both"])
-def test_log_count_values(log_count, device, include_hist, direction):
+@pytest.mark.parametrize("batch_first", [True, False])
+def test_log_count_values(log_count, device, include_hist, direction, batch_first):
     T, L, N = 10, 3, 30
-    w = torch.randn(N, T).exp()
+    w = torch.randn((N, T) if batch_first else (T, N)).exp()
     w.requires_grad_(True)
-    C_exp = count_function.count(w, L, include_hist=include_hist, direction=direction)
+    C_exp = count_function.count(
+        w, L, include_hist=include_hist, direction=direction, batch_first=batch_first
+    )
     (g_exp,) = torch.autograd.grad(C_exp, w, torch.ones_like(C_exp))
-    C_act = log_count(w.log(), L, include_hist=include_hist, direction=direction).exp()
+    C_act = log_count(
+        w.log(),
+        L,
+        include_hist=include_hist,
+        direction=direction,
+        batch_first=batch_first,
+    ).exp()
     assert torch.allclose(C_exp, C_act, rtol=1e-4)
     (g_act,) = torch.autograd.grad(C_act, w, torch.ones_like(C_act))
     assert torch.allclose(g_exp, g_act, rtol=1e-4)

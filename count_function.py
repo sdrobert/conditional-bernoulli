@@ -334,7 +334,7 @@ def log_count(
             lC = lC.view(*((2, N2 // 2) + lC.shape[1:]))
         else:
             N2 = lC.shape[-1]
-            lC = lC.view(*(lC.shape[:1] + (2, N2 // 2)))
+            lC = lC.view(*(lC.shape[:-1] + (2, N2 // 2)))
     return lC
 
 
