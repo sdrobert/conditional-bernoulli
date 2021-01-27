@@ -548,7 +548,7 @@ def _speed(opts):
     if opts.method.startswith("log"):
         func, batch_first = _LOG_METHODS[opts.method]
     else:
-        func, batch_first = METHODS[opts.method]
+        func, batch_first = _METHODS[opts.method]
     if not batch_first:
         w = w.transpose(0, 1).contiguous()
     if opts.device.type == "cuda":
@@ -604,7 +604,7 @@ def _accuracy(opts):
     if opts.method.startswith("log_"):
         func, batch_first = _LOG_METHODS[opts.method]
     else:
-        func, batch_first = METHODS[opts.method]
+        func, batch_first = _METHODS[opts.method]
 
     # this method is similar to that of https://doi.org/10.1016/j.csda.2012.10.006 but
     # is essentially prop 1.c of 10.2307/2337119, a generalization of Vandermonde's
