@@ -89,9 +89,9 @@ def count(
         raise RuntimeError("Expected w to be two dimensional")
     if L < 0:
         raise RuntimeError("L must be non-negative")
-    if method not in METHODS:
+    if method not in _METHODS:
         raise RuntimeError("Invalid method {}".format(method))
-    func, needs_batch_first = METHODS[method]
+    func, needs_batch_first = _METHODS[method]
     if needs_batch_first != batch_first:
         w = w.transpose(0, 1)
     if direction == "backward":
@@ -267,7 +267,7 @@ def _cumsum(w, L, include_hist):
     return C
 
 
-METHODS = {
+_METHODS = {
     "chen94": (_chen94, True),
     "howard72": (_howard72, False),
     "full_matrix": (_full_matrix, True),
@@ -309,9 +309,9 @@ def log_count(
         raise RuntimeError("Expected lw to be two dimensional")
     if L < 0:
         raise RuntimeError("L must be non-negative")
-    if method not in LOG_METHODS:
+    if method not in _LOG_METHODS:
         raise RuntimeError("Invalid method {}".format(method))
-    func, needs_batch_first = LOG_METHODS[method]
+    func, needs_batch_first = _LOG_METHODS[method]
     if needs_batch_first != batch_first:
         lw = lw.transpose(0, 1)
     if direction == "backward":
@@ -443,7 +443,7 @@ def _log_cumsum(lw, L, include_hist):
     return lC
 
 
-LOG_METHODS = {
+_LOG_METHODS = {
     "log_chen94": (_log_chen94, True),
     "log_howard72": (_log_howard72, False),
     "log_cumsum": (_log_cumsum, True),
@@ -463,7 +463,7 @@ def main(args=None):
 def _parse_args(args):
     parser = argparse.ArgumentParser(description=main.__doc__)
 
-    parser.add_argument("method", choices=sorted(METHODS) + sorted(LOG_METHODS))
+    parser.add_argument("method", choices=sorted(_METHODS) + sorted(_LOG_METHODS))
 
     parser.add_argument("--log2-repeat", type=int, default=10)
     parser.add_argument("--log2-trials", type=int, default=10)
@@ -546,7 +546,7 @@ def _speed(opts):
 
     w = torch.zeros(N, T, device=opts.device, dtype=dtype)
     if opts.method.startswith("log"):
-        func, batch_first = LOG_METHODS[opts.method]
+        func, batch_first = _LOG_METHODS[opts.method]
     else:
         func, batch_first = METHODS[opts.method]
     if not batch_first:
@@ -602,7 +602,7 @@ def _accuracy(opts):
     V = 2 ** opts.log2_expectation
 
     if opts.method.startswith("log_"):
-        func, batch_first = LOG_METHODS[opts.method]
+        func, batch_first = _LOG_METHODS[opts.method]
     else:
         func, batch_first = METHODS[opts.method]
 

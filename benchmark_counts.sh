@@ -24,6 +24,7 @@ batch=( 0 )
 hist=( false )
 ratio=( 0 )
 exp=( 0 )
+seed=( 0 )
 
 avail_methods=( $(python count_function.py -h | \
   grep "chen94" | head -n 1 | \
@@ -184,6 +185,7 @@ echo "com='$com'; repeat='$repeat'; burnin='$burnin'" | \
   cartp "float" "${float[@]}" | \
   cartp "batch" "${batch[@]}" | \
   cartp "hist" "${hist[@]}" | \
+  cartp "seed" "${seed[@]}" | \
   cartp "ratio" "${ratio[@]}" | \
   cartp "exp" "${exp[@]}" | \
   xargs -I{} bash -c '
