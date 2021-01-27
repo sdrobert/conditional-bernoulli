@@ -3,7 +3,7 @@ import torch
 import pytest
 
 
-@pytest.fixture(scope="module", params=sorted(count_function.METHODS))
+@pytest.fixture(scope="module", params=sorted(count_function._METHODS))
 def count(request):
     def _count(*args, **kwargs):
         kwargs["method"] = request.param
@@ -14,7 +14,7 @@ def count(request):
 
 @pytest.fixture(
     params=[pytest.param("log_chen94", marks=pytest.mark.xfail)]
-    + sorted(m for m in count_function.LOG_METHODS if m != "log_chen94")
+    + sorted(m for m in count_function._LOG_METHODS if m != "log_chen94")
 )
 def log_count(request):
     def _log_count(*args, **kwargs):
