@@ -20,6 +20,7 @@ import math
 import argparse
 import numpy as np
 import fractions
+from typing import List
 
 
 def count(
@@ -118,32 +119,9 @@ def count(
     return C
 
 
-def _chen94(w, L, include_hist):
-    # Chen's 1994 method from theorem 3. Note that here S[:, i] == T(i, w)
-    # from the paper
-
-    # pre-compute S values
-    S = [(w ** ell).sum(1) for ell in range(1, L + 1)]
-
-    # do the actual recursion in the helper
-    C = _chen94_helper(L, S)
-
-    if include_hist:
-        # Chen's method produces C(L, w) for *only* the full set w. If we want more,
-        # we have to re-calculate the recursion. However, as per Chen, we can avoid some
-        # re-computation if we subtract terms from S
-        C = [C]
-        for t in range(w.shape[1] - 1, -1, -1):
-            w_t = w[:, t]
-            # remove the last weight, update S, and perform the recursion
-            S = [S[ell - 1] - w_t ** ell for ell in range(1, L + 1)]
-            C.insert(0, _chen94_helper(L, S))
-        C = torch.stack(C, -1)
-
-    return C
-
-
+@torch.jit.script
 def _chen94_helper(L, S):
+    # type: (int, List[torch.Tensor]) -> torch.Tensor
     N = S[0].shape[0]
     C = [torch.ones((N,), device=S[0].device, dtype=S[0].dtype)]
     zeros = torch.zeros((N,), device=S[0].device, dtype=S[0].dtype)
@@ -159,7 +137,37 @@ def _chen94_helper(L, S):
     return torch.stack(C, -1)  # (N, L + 1)
 
 
+@torch.jit.script
+def _chen94(w, L, include_hist):
+    # type: (torch.Tensor, int, bool) -> torch.Tensor
+
+    # Chen's 1994 method from theorem 3. Note that here S[:, i] == T(i, w)
+    # from the paper
+
+    # pre-compute S values
+    S = [(w ** ell).sum(1) for ell in range(1, L + 1)]
+
+    # do the actual recursion in the helper
+    C = _chen94_helper(L, S)
+
+    if include_hist:
+        # Chen's method produces C(L, w) for *only* the full set w. If we want more,
+        # we have to re-calculate the recursion. However, as per Chen, we can avoid some
+        # re-computation if we subtract terms from S
+        C_ = [C]
+        for t in range(w.shape[1] - 1, -1, -1):
+            w_t = w[:, t]
+            # remove the last weight, update S, and perform the recursion
+            S = [S[ell - 1] - w_t ** ell for ell in range(1, L + 1)]
+            C_.insert(0, _chen94_helper(L, S))
+        C = torch.stack(C_, -1)
+
+    return C
+
+
+@torch.jit.script
 def _howard72(w, L, include_hist):
+    # type: (torch.Tensor, int, bool) -> torch.Tensor
     # recursion from Howard's 72 paper.
     # C(L, w) = C(L, w \ {w_t}) + w_t C(L - 1, w \ {w_t})
     # iteratively calculates C(\cdot, w_{\leq t}) using C(\cdot, w_{<t})
@@ -169,6 +177,8 @@ def _howard72(w, L, include_hist):
     C_tm1 = torch.cat([C_t_first, C_t_rest], 0)  # C_0
     if include_hist:
         C = [C_tm1]
+    else:
+        C = []  # for jit script
     for t in range(T):
         C_t_rest = C_t_rest + w[t] * C_tm1[:-1]
         C_tm1 = torch.cat([C_t_first, C_t_rest], 0)
@@ -180,7 +190,9 @@ def _howard72(w, L, include_hist):
         return C_tm1
 
 
+@torch.jit.script
 def _full_matrix(w, L, include_hist):
+    # type: (torch.Tensor, int, bool) -> torch.Tensor
     # uses same recusion as _howard72, but iteratively calculates
     # C(L, w) using C(L - 1, w). Uses a matrix-vector multiplication
     N, T = w.shape
@@ -203,7 +215,9 @@ def _full_matrix(w, L, include_hist):
     return C
 
 
+@torch.jit.script
 def _block_matrix(w, L, include_hist):
+    # type: (torch.Tensor, int, bool) -> torch.Tensor
     # same as _full_matrix, but splits full matrix multiplication into 3 blocks:
     #
     #     d           d
@@ -247,7 +261,9 @@ def _block_matrix(w, L, include_hist):
     return C
 
 
+@torch.jit.script
 def _cumsum(w, L, include_hist):
+    # type: (torch.Tensor, int, bool) -> torch.Tensor
     # similar to _full_matrix and _block_matrix in recursion, but uses cumsum instead of
     # matrix multiplication
     N, T = w.shape
@@ -324,7 +340,7 @@ def log_count(
     elif direction != "forward":
         raise RuntimeError("Invalid direction {}".format(direction))
     lw = lw.contiguous()
-    lC = func(lw, L, include_hist)
+    lC = func(lw, L, include_hist, EPS_INF)
     if needs_batch_first != batch_first:
         lC = lC.transpose(0, -1)
     if direction == "both":
@@ -350,69 +366,84 @@ try:
 except AttributeError:
 
     def _logaddexp(a, b):
+        # type: (torch.Tensor, torch.Tensor) -> torch.Tensor
         max_ = torch.max(a, b)
         diff = -(a - b).abs()
         return max_ + diff.exp().log1p()
+
+    _logaddexp = torch.jit.trace(_logaddexp, [torch.rand(1), torch.rand(1)])
 
 
 try:
     _logcumsumexp = torch.logcumsumexp
 except AttributeError:
 
+    @torch.jit.script
     def _logcumsumexp(x, dim):
+        # type: (torch.Tensor, int) -> torch.Tensor
         max_ = x.max(dim, keepdim=True)[0]
         x = -(x - max_).abs()
         return max_ + x.exp().cumsum(dim).log()
 
 
-def _logsubexp(a, b):
+@torch.jit.script
+def _logsubexp(a, b, eps):
+    # type: (torch.Tensor, torch.Tensor, float) -> torch.Tensor
     x = (-(b - a).expm1()).log() + a
     # x = (-(b - a).exp()).log1p() + a
     # x = (a.exp() - b.exp()).log()
-    return x.masked_fill_(b >= a, EPS_INF)
+    return x.masked_fill_(b >= a, eps)
 
 
-def _log_chen94(lw, L, include_hist):
-
-    lS = [(lw * ell).logsumexp(1) for ell in range(1, L + 1)]
-
-    lC = _log_chen94_helper(L, lS)
-
-    if include_hist:
-        lC = [lC]
-        for t in range(lw.shape[1] - 1, -1, -1):
-            lw_t = lw[:, t]
-            # remove the last weight, update S, and perform the recursion
-            lS = [_logsubexp(lS[ell - 1], lw_t * ell) for ell in range(1, L + 1)]
-            lC.insert(0, _log_chen94_helper(L, lS))
-        lC = torch.stack(lC, -1)
-
-    return lC
-
-
-def _log_chen94_helper(L, lS):
+@torch.jit.script
+def _log_chen94_helper(L, lS, eps):
+    # type: (int, List[torch.Tensor], float) -> torch.Tensor
     N = lS[0].shape[0]
     lC = [torch.zeros((N,), device=lS[0].device, dtype=lS[0].dtype)]
-    ninfs = torch.full((N,), EPS_INF, device=lS[0].device, dtype=lS[0].dtype)
+    ninfs = torch.full((N,), eps, device=lS[0].device, dtype=lS[0].dtype)
     for ell in range(1, L + 1):
         lC_ell = ninfs
         for i in range(1, ell + 1):
             if i % 2:
                 lC_ell = _logaddexp(lC_ell, lS[i - 1] + lC[ell - i])
             else:
-                lC_ell = _logsubexp(lC_ell, lS[i - 1] * lC[ell - i])
+                lC_ell = _logsubexp(lC_ell, lS[i - 1] * lC[ell - i], eps)
         lC_ell = lC_ell - math.log(ell)
         lC.append(lC_ell)
     return torch.stack(lC, -1)  # (N, L + 1)
 
 
-def _log_howard72(lw, L, include_hist):
+@torch.jit.script
+def _log_chen94(lw, L, include_hist, eps):
+    # type: (torch.Tensor, int, bool, float) -> torch.Tensor
+
+    lS = [(lw * ell).logsumexp(1) for ell in range(1, L + 1)]
+
+    lC = _log_chen94_helper(L, lS, eps)
+
+    if include_hist:
+        lC_ = [lC]
+        for t in range(lw.shape[1] - 1, -1, -1):
+            lw_t = lw[:, t]
+            # remove the last weight, update S, and perform the recursion
+            lS = [_logsubexp(lS[ell - 1], lw_t * ell, eps) for ell in range(1, L + 1)]
+            lC_.insert(0, _log_chen94_helper(L, lS, eps))
+        lC = torch.stack(lC_, -1)
+
+    return lC
+
+
+@torch.jit.script
+def _log_howard72(lw, L, include_hist, eps):
+    # type: (torch.Tensor, int, bool, float) -> torch.Tensor
     T, N = lw.shape
     lC_t_first = torch.zeros((1, N), dtype=lw.dtype, device=lw.device)
-    lC_t_rest = torch.full((L, N), EPS_INF, dtype=lw.dtype, device=lw.device)
+    lC_t_rest = torch.full((L, N), eps, dtype=lw.dtype, device=lw.device)
     lC_tm1 = torch.cat([lC_t_first, lC_t_rest], 0)  # lC_0
     if include_hist:
         lC = [lC_tm1]
+    else:
+        lC = []  # jit scripting
     for t in range(T):
         lC_t_rest = _logaddexp(lC_t_rest, lw[t] + lC_tm1[:-1])
         lC_tm1 = torch.cat([lC_t_first, lC_t_rest], 0)
@@ -424,11 +455,13 @@ def _log_howard72(lw, L, include_hist):
         return lC_tm1
 
 
-def _log_cumsum(lw, L, include_hist):
+@torch.jit.script
+def _log_cumsum(lw, L, include_hist, eps):
+    # type: (torch.Tensor, int, bool, float) -> torch.Tensor
     N, T = lw.shape
     lC_ell = torch.zeros((N, T + 1), device=lw.device, dtype=lw.dtype)
-    lw = lw.clamp(min=EPS_INF)
-    ninfs = torch.full((N, 1), EPS_INF, device=lw.device, dtype=lw.dtype)
+    lw = lw.clamp(min=eps)
+    ninfs = torch.full((N, 1), eps, device=lw.device, dtype=lw.dtype)
     if include_hist:
         lC = [lC_ell]
     else:
