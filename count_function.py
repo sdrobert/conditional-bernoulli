@@ -20,12 +20,16 @@ import math
 import argparse
 import numpy as np
 import fractions
-from typing import List
+from typing import List, Optional, Tuple
 
 
 def count(
-    w, L, method="cumsum", include_hist=False, direction="forward", batch_first=True
-):
+    w: torch.Tensor,
+    L: int,
+    method: str = "cumsum",
+    in_shape: str = "NT",
+    out_shape: str = "N",
+) -> torch.Tensor:
     r"""The count function
 
     The count function is defined as
@@ -40,51 +44,57 @@ def count(
     Parameters
     ----------
     w : torch.Tensor
-        A tensor of shape ``(N, T)`` if `batch_first` is :obj:`True`, else ``(T, N)``.
+        A tensor of shape ``(N, T)`` if `in_shape` is :obj:`NT`, else ``(T, N)``,
+        where ``N`` is the batch index
     L : int
         A non-negative integer representing the maximum product to count up to.
     method : str, optional
         The method/algorithm used in computing the count. See below for a list of all
-        available algorithms and their descriptions.
-    include_hist : bool, optional
-        If :obj:`True`, will return intermediate counts from subsets of `w`.
-    direction : {'forward', 'backward', 'both'}, optional
-        Whether to compute counts using subsets of prefixes of weights ``w_1 ... w_t``
-        (when ``'forward'``), suffixes of weights ``w_t ... w_T`` (when ``'backward'``),
-        or do ``'both'``. ``'both'`` will affect the size of the returned tensor, but
-        otherwise this has no impact on the return value when `include_hist` is
-        :obj:`False`.
-    batch_first : bool, optional
-        Whether the 0-index of `w` is the batch index or not
+        available algorithms and their descriptions. The default is fastest.
+    in_shape : {'NT', 'TN'}, optional
+        Controls the order of indices of :obj:`w`.
+    out_shape : {'N', 'NL', 'LN', 'NLT', 'NTL', 'LNT', 'LTN', 'TNL', 'TLN'}, optional
+        Specifies the shape of the return value. See the return value description for
+        more information.
 
     Returns
     -------
     C : torch.Tensor
-        By default, `C` is a tensor of shape ``(N, L + 1)`` where ``C[n, ell] = C(ell;
-        w[n])``. If `include_hist` is :obj:`True`, `C` is of shape ``(N, L
-        + 1, T + 1)`` where ``C[n, ell, t] = C(ell; {w[n, 0] ... w[n, t - 1]})``. If
-        `include_hist` is :obj:`True` and `direction` is ``'backward'``, ``C[n, ell, t]
-        = C(ell; {w[n, T - t] .. w[n, T - 1]})``. If :obj:`True` and ``'both'``, `C` is
-        of shape ``(2, N, L + 1, T + 1)``, where ``C[0]`` stores the forward counts and
-        ``C[1]`` the backward count. If `batch_first` is :obj:`False`, `C` will have
-        shape ``(L + 1, N)`` by default, ``(T + 1, L + 1, N)`` if including history, and
-        ``(T + 1, L + 1, 2, N)`` if including history in both directions.
+        We assume in the below description that the batch index of `w` is first
+        (i.e. `in_shape` is :obj:`'NT'`). If `out_shape` is :obj:`'N'`, `C` is a tensor
+        of shape ``(N,)`` where :math:`C[n] = C(L; w[n])`. If `out_shape` is
+        :obj:`'NL'`, `C` is a tensor of shape ``(N, L + 1)``, where
+        :math:`C[n, \ell] = C(\ell; w[n])`. If `out_shape` is :obj:`'NLT'`, then `C` is
+        a tensor of shape ``(N, L + 1, T + 1)`` where
+        :math:`C[n, \ell, t] = C(\ell; w[n, :t])`. Setting `out_shape` in different
+        permutations of the letters :obj:`{'N', 'L', 'T'}` will yield `C` different
+        dimension orders. For example, :obj:`'LTN'` yields
+        :math:`C[\ell, t, n] = C(\ell; w[n, :t])`.
 
     Notes
     -----
-    The following is a list of available methods
+    The following is a list of available methods. The default, :obj:`'cumsum'` seems
+    fastest. Matching the preferred shapes of each method will yield the fastest
+    results, but in general it will not cost too much extra to have the shape of your
+    choice.
 
     -  'chen94': The recursive method of theorem 3 of Chen, X. et al (1994)
-       "Weighted finite population sampling to maximize entropy."
+       "Weighted finite population sampling to maximize entropy." Prefers when
+       `in_shape` is :obj:`'NT'` and `out_shape` is one of :obj:`{'N', 'NL', 'TNL'}`.
     -  'howard97': The recursive method outlined in Howard, S. (1972) "Discussion
        on professor Cox's paper." Iterates over the ``T`` dimension in `C` and
-       parallelizes over ``L``.
+       parallelizes over ``L``. Prefers when `in_shape` is :obj:`'TN'` and `out_shape`
+       is one of :obj:`{'N', 'LN', 'TLN'}`.
     -  'full_matrix': Based off the recursion of Howard, but iterates over the ``L``
        dimension in `C`, calculating the ``T`` dimension by matrix multiplication.
+       Prefers when `in_shape` is :obj:`'NT'` and `out_shape` is one of
+       :obj:`{'N', 'LN', 'LNT'}`.
     -  'block_matrix': Same as 'full_matrix', except performs block matrix
-       multiplication to use only half the memory.
+       multiplication to use only half the memory. Prefers when `in_shape` is
+       :obj:`'NT'` and `out_shape` is one of :obj:`{'N', 'LN', 'LNT'}`.
     -  'cumsum': Similar to 'full_matrix', but takes advantage of :func:`torch.cumsum`
-       to avoid the matrix multiplication.
+       to avoid the matrix multiplication. Prefers when `in_shape` is
+       :obj:`'NT'` and `out_shape` is one of :obj:`{'N', 'LN', 'LNT'}`.
     """
     if w.dim() != 2:
         raise RuntimeError("Expected w to be two dimensional")
@@ -92,36 +102,115 @@ def count(
         raise RuntimeError("L must be non-negative")
     if method not in _METHODS:
         raise RuntimeError("Invalid method {}".format(method))
-    func, needs_batch_first = _METHODS[method]
-    if needs_batch_first != batch_first:
+    if in_shape not in {"TN", "NT"}:
+        raise RuntimeError("in_shape must be 'TN' or 'NT'")
+    if out_shape not in {"N", "NL", "LN", "NLT", "NTL", "LNT", "LTN", "TNL", "TLN"}:
+        raise RuntimeError(
+            "out_shape must be one of 'N', 'NL', 'LN', 'NLT', 'NTL' 'LNT', 'LTN', "
+            "'TNL', or 'TLN'"
+        )
+    func, expected_in, small_out = _METHODS[method]
+    if expected_in != in_shape:
         w = w.transpose(0, 1)
-    if direction == "backward":
-        w = w.flip(1 if needs_batch_first else 0)
-    elif direction == "both":
-        if needs_batch_first:
-            w = torch.cat([w, w.flip(1)], 0)
-        else:
-            w = torch.cat([w, w.flip(0)], 1)
-    elif direction != "forward":
-        raise RuntimeError("Invalid direction {}".format(direction))
     w = w.contiguous()
-    C = func(w, L, include_hist)
-    if needs_batch_first != batch_first:
-        C = C.transpose(0, -1)
-    if direction == "both":
-        C = C.contiguous()
-        if batch_first:
-            N2 = C.shape[0]
-            C = C.view(*((2, N2 // 2) + C.shape[1:]))
-        else:
-            N2 = C.shape[-1]
-            C = C.view(*(C.shape[:-1] + (2, N2 // 2)))
+    stack_dim, collapse_dim, transpose = _find_stack_collapse_transpose(
+        out_shape, small_out
+    )
+    C = func(w, L, stack_dim)
+    if collapse_dim == 0:
+        C = C[-1]
+    elif collapse_dim == 1:
+        C = C[:, -1]
+    elif collapse_dim == 2:
+        C = C[..., -1]
+    if transpose is not None:
+        C = C.transpose(*transpose)
     return C
 
 
+def _find_stack_collapse_transpose(
+    out_shape: str, small_out: str
+) -> Tuple[Optional[int], Optional[int], Optional[Tuple[int, int]]]:
+    # big ugly conditional to find the optimal way to get the desired output size
+    # small_out represents the shape of the output of the method if it doesn't output
+    # the entire history. We'll end up doing one of these in order: stack history along
+    # some dim, collapse a dimension by taking the last indexed element on that
+    # dimension, then possibly transposing dimensions
+    stack_dim = collapse_dim = transpose = None
+    assert small_out in {"NL", "LN", "NT"}
+    if out_shape == "N":
+        if small_out == "LN":
+            collapse_dim = 0
+        else:
+            collapse_dim = 1
+    elif out_shape == "NL":
+        if small_out == "NT":
+            stack_dim = 1
+            collapse_dim = 2
+        elif small_out == "LN":
+            transpose = (0, 1)
+    elif out_shape == "LN":
+        if small_out == "NT":
+            stack_dim = 0
+            collapse_dim = 2
+        elif small_out == "NL":
+            transpose = (0, 1)
+    elif out_shape == "NLT":
+        if small_out == "NL":
+            stack_dim = 2
+        elif small_out == "LN":
+            stack_dim = 0
+            transpose = (0, 2)
+        else:
+            stack_dim = 1
+    elif out_shape == "NTL":
+        if small_out == "NL":
+            stack_dim = 1
+        elif small_out == "LN":
+            stack_dim = 1
+            transpose = (0, 2)
+        else:
+            stack_dim = 2
+    elif out_shape == "LNT":
+        if small_out == "NL":
+            stack_dim = 0
+            transpose = (0, 2)
+        elif small_out == "LN":
+            stack_dim = 2
+        else:
+            stack_dim = 0
+    elif out_shape == "LTN":
+        if small_out == "NL":
+            stack_dim = 1
+            transpose = (0, 2)
+        elif small_out == "LN":
+            stack_dim = 1
+        else:
+            stack_dim = 0
+            transpose = (1, 2)
+    elif out_shape == "TNL":
+        if small_out == "NL":
+            stack_dim = 0
+        elif small_out == "LN":
+            stack_dim = 0
+            transpose = (1, 2)
+        else:
+            stack_dim = 0
+            transpose = (0, 2)
+    elif out_shape == "TLN":
+        if small_out == "NL":
+            stack_dim = 0
+            transpose = (1, 2)
+        elif small_out == "LN":
+            stack_dim = 0
+        else:
+            stack_dim = 1
+            transpose = (0, 2)
+    return stack_dim, collapse_dim, transpose
+
+
 @torch.jit.script
-def _chen94_helper(L, S):
-    # type: (int, List[torch.Tensor]) -> torch.Tensor
+def _chen94_helper(L: int, S: List[torch.Tensor]) -> torch.Tensor:
     N = S[0].shape[0]
     C = [torch.ones((N,), device=S[0].device, dtype=S[0].dtype)]
     zeros = torch.zeros((N,), device=S[0].device, dtype=S[0].dtype)
@@ -134,13 +223,11 @@ def _chen94_helper(L, S):
                 C_ell = C_ell - S[i - 1] * C[ell - i]
         C_ell = C_ell / ell
         C.append(C_ell)
-    return torch.stack(C, -1)  # (N, L + 1)
+    return torch.stack(C, 0)  # (L + 1, N)
 
 
 @torch.jit.script
-def _chen94(w, L, include_hist):
-    # type: (torch.Tensor, int, bool) -> torch.Tensor
-
+def _chen94(w: torch.Tensor, L: int, stack_dim: Optional[int]) -> torch.Tensor:
     # Chen's 1994 method from theorem 3. Note that here S[:, i] == T(i, w)
     # from the paper
 
@@ -148,9 +235,9 @@ def _chen94(w, L, include_hist):
     S = [(w ** ell).sum(1) for ell in range(1, L + 1)]
 
     # do the actual recursion in the helper
-    C = _chen94_helper(L, S)
+    C = _chen94_helper(L, S)  # (L + 1, N)
 
-    if include_hist:
+    if stack_dim is not None:
         # Chen's method produces C(L, w) for *only* the full set w. If we want more,
         # we have to re-calculate the recursion. However, as per Chen, we can avoid some
         # re-computation if we subtract terms from S
@@ -160,14 +247,13 @@ def _chen94(w, L, include_hist):
             # remove the last weight, update S, and perform the recursion
             S = [S[ell - 1] - w_t ** ell for ell in range(1, L + 1)]
             C_.insert(0, _chen94_helper(L, S))
-        C = torch.stack(C_, -1)
+        C = torch.stack(C_, stack_dim)
 
     return C
 
 
 @torch.jit.script
-def _howard72(w, L, include_hist):
-    # type: (torch.Tensor, int, bool) -> torch.Tensor
+def _howard72(w: torch.Tensor, L: int, stack_dim: Optional[int]) -> torch.Tensor:
     # recursion from Howard's 72 paper.
     # C(L, w) = C(L, w \ {w_t}) + w_t C(L - 1, w \ {w_t})
     # iteratively calculates C(\cdot, w_{\leq t}) using C(\cdot, w_{<t})
@@ -175,49 +261,48 @@ def _howard72(w, L, include_hist):
     C_t_first = torch.ones((1, N), dtype=w.dtype, device=w.device)
     C_t_rest = torch.zeros((L, N), dtype=w.dtype, device=w.device)
     C_tm1 = torch.cat([C_t_first, C_t_rest], 0)  # C_0
-    if include_hist:
+    if stack_dim is not None:
         C = [C_tm1]
     else:
         C = []  # for jit script
     for t in range(T):
         C_t_rest = C_t_rest + w[t] * C_tm1[:-1]
         C_tm1 = torch.cat([C_t_first, C_t_rest], 0)
-        if include_hist:
+        if stack_dim is not None:
             C.append(C_tm1)
-    if include_hist:
-        return torch.stack(C, 0)
+    if stack_dim is not None:
+        return torch.stack(C, stack_dim)
     else:
         return C_tm1
 
 
 @torch.jit.script
-def _full_matrix(w, L, include_hist):
-    # type: (torch.Tensor, int, bool) -> torch.Tensor
+def _full_matrix(w: torch.Tensor, L: int, stack_dim: Optional[int]) -> torch.Tensor:
     # uses same recusion as _howard72, but iteratively calculates
     # C(L, w) using C(L - 1, w). Uses a matrix-vector multiplication
+    print(stack_dim)
     N, T = w.shape
     w = torch.cat(
         [w, torch.zeros((N, 1), device=w.device, dtype=w.dtype)], -1
     )  # (N, T + 1)
     w = w.view(N, 1, T + 1).expand(N, T + 1, T + 1).tril(-1)  # (N, T + 1, T + 1)
     C_ell = torch.ones((N, T + 1), device=w.device, dtype=w.dtype)
-    if include_hist:
+    if stack_dim is not None:
         C = [C_ell]
     else:
-        C = [C_ell[:, -1]]
+        C = []
     for _ in range(L):
         C_ell = torch.bmm(w, C_ell.unsqueeze(-1)).squeeze(-1)
-        if include_hist:
+        if stack_dim is not None:
             C.append(C_ell)
-        else:
-            C.append(C_ell[:, -1])
-    C = torch.stack(C, 1)
-    return C
+    if stack_dim is not None:
+        return torch.stack(C, stack_dim)
+    else:
+        return C_ell
 
 
 @torch.jit.script
-def _block_matrix(w, L, include_hist):
-    # type: (torch.Tensor, int, bool) -> torch.Tensor
+def _block_matrix(w: torch.Tensor, L: int, stack_dim: Optional[int]) -> torch.Tensor:
     # same as _full_matrix, but splits full matrix multiplication into 3 blocks:
     #
     #     d           d
@@ -244,67 +329,64 @@ def _block_matrix(w, L, include_hist):
     C_ell_bot = torch.ones(
         (N, T + 1 - d), device=w.device, dtype=w.dtype
     )  # (N, T + 1 - d)
-    if include_hist:
+    if stack_dim is not None:
         C = [torch.cat([C_ell_top, C_ell_bot], 1)]  # [(N, T + 1)]
     else:
-        C = [C_ell_bot[:, -1]]  # [(N,)]
+        C = []  # for jit scripting
     for _ in range(L):
         C_ell_bot = (B2_row * C_ell_top).sum(1, keepdim=True).expand(
             N, T + 1 - d
         ) + torch.bmm(B3, C_ell_bot.unsqueeze(-1)).squeeze(-1)
         C_ell_top = torch.bmm(B1, C_ell_top.unsqueeze(-1)).squeeze(-1)
-        if include_hist:
+        if stack_dim is not None:
             C.append(torch.cat([C_ell_top, C_ell_bot], 1))
-        else:
-            C.append(C_ell_bot[:, -1])
-    C = torch.stack(C, 1)
-    return C
+    if stack_dim is not None:
+        return torch.stack(C, stack_dim)
+    else:
+        return torch.cat([C_ell_top, C_ell_bot], 1)
 
 
 @torch.jit.script
-def _cumsum(w, L, include_hist):
-    # type: (torch.Tensor, int, bool) -> torch.Tensor
+def _cumsum(w: torch.Tensor, L: int, stack_dim: Optional[int]) -> torch.Tensor:
     # similar to _full_matrix and _block_matrix in recursion, but uses cumsum instead of
     # matrix multiplication
     N, T = w.shape
     C_ell = torch.ones((N, T + 1), device=w.device, dtype=w.dtype)
     zeros = torch.zeros((N, 1), device=w.device, dtype=w.dtype)
-    if include_hist:
+    if stack_dim is not None:
         C = [C_ell]
     else:
-        C = [C_ell[:, -1]]
+        C = []  # jit scripting
     for _ in range(L):
         C_ell = torch.cat([zeros, torch.cumsum(w * C_ell[:, :-1], 1)], -1)
-        if include_hist:
+        if stack_dim is not None:
             C.append(C_ell)
-        else:
-            C.append(C_ell[:, -1])
-    C = torch.stack(C, 1)
-    return C
+    if stack_dim is not None:
+        return torch.stack(C, stack_dim)
+    else:
+        return C_ell
 
 
 _METHODS = {
-    "chen94": (_chen94, True),
-    "howard72": (_howard72, False),
-    "full_matrix": (_full_matrix, True),
-    "block_matrix": (_block_matrix, True),
-    "cumsum": (_cumsum, True),
+    "chen94": (_chen94, "NT", "LN"),
+    "howard72": (_howard72, "TN", "LN"),
+    "full_matrix": (_full_matrix, "NT", "NT"),
+    "block_matrix": (_block_matrix, "NT", "NT"),
+    "cumsum": (_cumsum, "NT", "NT"),
 }
 
 
 def log_count(
-    lw,
-    L,
-    method="log_cumsum",
-    include_hist=False,
-    direction="forward",
-    batch_first=True,
-):
+    lw: torch.Tensor,
+    L: int,
+    method: str = "log_cumsum",
+    in_shape: str = "NT",
+    out_shape: str = "N",
+) -> torch.Tensor:
     """The log-valued count function
 
     Perform the count function computations of :func:`count_function`, but try to stay
-    in log-space, i.e. ``count(w, ...) ~= log_count(w.log(), ...).exp()``. This function
-    is more numerically stable than that.
+    in log-space, i.e. ``count(w, ...) ~= log_count(w.log(), ...).exp()``.
 
     Parameters
     ----------
@@ -313,13 +395,21 @@ def log_count(
     method : {'log_chen94', 'log_howard72', 'log_cumsum'}, optional
         Identical methods as their counterparts in :func:`count`, except they use
         log-domain operations. Fewer methods are available.
-    include_hist : bool, optional
-    direction : {'forward', 'backward', 'both'}, optional
-    batch_first : bool, optional
+    in_shape : {'NT', 'TN'}, optional
+    out_shape : {'N', 'NL', 'LN', 'NLT', 'NTL', 'LNT', 'LTN', 'TNL', 'TLN'}, optional
 
     Returns
     -------
     lC : torch.Tensor
+
+    Notes
+    -----
+    Surprisingly, this function is more numerically instable than :func:`count` in most
+    instances. This is likely because there are far more sums than multiplications in
+    the regular count function, and the log-space calculations have to exponentiate and
+    then log every time. The only benefit of log-space representations appears to be the
+    ability to represent higher counts in floating point. However, double-precision
+    computations will usually be enough to accomplish this regardless.
     """
     if lw.dim() != 2:
         raise RuntimeError("Expected lw to be two dimensional")
@@ -327,30 +417,29 @@ def log_count(
         raise RuntimeError("L must be non-negative")
     if method not in _LOG_METHODS:
         raise RuntimeError("Invalid method {}".format(method))
-    func, needs_batch_first = _LOG_METHODS[method]
-    if needs_batch_first != batch_first:
+    if in_shape not in {"TN", "NT"}:
+        raise RuntimeError("in_shape must be 'TN' or 'NT'")
+    if out_shape not in {"N", "NL", "LN", "NLT", "NTL", "LNT", "LTN", "TNL", "TLN"}:
+        raise RuntimeError(
+            "out_shape must be one of 'N', 'NL', 'LN', 'NLT', 'NTL' 'LNT', 'LTN', "
+            "'TNL', or 'TLN'"
+        )
+    func, expected_in, small_out = _LOG_METHODS[method]
+    if expected_in != in_shape:
         lw = lw.transpose(0, 1)
-    if direction == "backward":
-        lw = lw.flip(1 if needs_batch_first else 0)
-    elif direction == "both":
-        if needs_batch_first:
-            lw = torch.cat([lw, lw.flip(1)], 0)
-        else:
-            lw = torch.cat([lw, lw.flip(0)], 1)
-    elif direction != "forward":
-        raise RuntimeError("Invalid direction {}".format(direction))
     lw = lw.contiguous()
-    lC = func(lw, L, include_hist, EPS_INF)
-    if needs_batch_first != batch_first:
-        lC = lC.transpose(0, -1)
-    if direction == "both":
-        lC = lC.contiguous()
-        if batch_first:
-            N2 = lC.shape[0]
-            lC = lC.view(*((2, N2 // 2) + lC.shape[1:]))
-        else:
-            N2 = lC.shape[-1]
-            lC = lC.view(*(lC.shape[:-1] + (2, N2 // 2)))
+    stack_dim, collapse_dim, transpose = _find_stack_collapse_transpose(
+        out_shape, small_out
+    )
+    lC = func(lw, L, stack_dim, EPS_INF)
+    if collapse_dim == 0:
+        lC = lC[-1]
+    elif collapse_dim == 1:
+        lC = lC[:, -1]
+    elif collapse_dim == 2:
+        lC = lC[..., -1]
+    if transpose is not None:
+        lC = lC.transpose(*transpose)
     return lC
 
 
@@ -365,8 +454,7 @@ try:
     _logaddexp = torch.logaddexp
 except AttributeError:
 
-    def _logaddexp(a, b):
-        # type: (torch.Tensor, torch.Tensor) -> torch.Tensor
+    def _logaddexp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         max_ = torch.max(a, b)
         diff = -(a - b).abs()
         return max_ + diff.exp().log1p()
@@ -379,16 +467,14 @@ try:
 except AttributeError:
 
     @torch.jit.script
-    def _logcumsumexp(x, dim):
-        # type: (torch.Tensor, int) -> torch.Tensor
+    def _logcumsumexp(x: torch.Tensor, dim: int) -> torch.Tensor:
         max_ = x.max(dim, keepdim=True)[0]
         x = -(x - max_).abs()
         return max_ + x.exp().cumsum(dim).log()
 
 
 @torch.jit.script
-def _logsubexp(a, b, eps):
-    # type: (torch.Tensor, torch.Tensor, float) -> torch.Tensor
+def _logsubexp(a: torch.Tensor, b: torch.Tensor, eps: float) -> torch.Tensor:
     x = (-(b - a).expm1()).log() + a
     # x = (-(b - a).exp()).log1p() + a
     # x = (a.exp() - b.exp()).log()
@@ -396,8 +482,7 @@ def _logsubexp(a, b, eps):
 
 
 @torch.jit.script
-def _log_chen94_helper(L, lS, eps):
-    # type: (int, List[torch.Tensor], float) -> torch.Tensor
+def _log_chen94_helper(L: int, lS: List[torch.Tensor], eps: float) -> torch.Tensor:
     N = lS[0].shape[0]
     lC = [torch.zeros((N,), device=lS[0].device, dtype=lS[0].dtype)]
     ninfs = torch.full((N,), eps, device=lS[0].device, dtype=lS[0].dtype)
@@ -410,76 +495,81 @@ def _log_chen94_helper(L, lS, eps):
                 lC_ell = _logsubexp(lC_ell, lS[i - 1] * lC[ell - i], eps)
         lC_ell = lC_ell - math.log(ell)
         lC.append(lC_ell)
-    return torch.stack(lC, -1)  # (N, L + 1)
+    return torch.stack(lC, 0)  # (L + 1, N)
 
 
 @torch.jit.script
-def _log_chen94(lw, L, include_hist, eps):
-    # type: (torch.Tensor, int, bool, float) -> torch.Tensor
+def _log_chen94(
+    lw: torch.Tensor, L: int, stack_dim: Optional[int], eps: float
+) -> torch.Tensor:
 
     lS = [(lw * ell).logsumexp(1) for ell in range(1, L + 1)]
 
     lC = _log_chen94_helper(L, lS, eps)
 
-    if include_hist:
+    if stack_dim is not None:
         lC_ = [lC]
         for t in range(lw.shape[1] - 1, -1, -1):
             lw_t = lw[:, t]
             # remove the last weight, update S, and perform the recursion
             lS = [_logsubexp(lS[ell - 1], lw_t * ell, eps) for ell in range(1, L + 1)]
             lC_.insert(0, _log_chen94_helper(L, lS, eps))
-        lC = torch.stack(lC_, -1)
+        lC = torch.stack(lC_, stack_dim)
 
     return lC
 
 
 @torch.jit.script
-def _log_howard72(lw, L, include_hist, eps):
-    # type: (torch.Tensor, int, bool, float) -> torch.Tensor
+def _log_howard72(
+    lw: torch.Tensor, L: int, stack_dim: Optional[int], eps: float
+) -> torch.Tensor:
     T, N = lw.shape
     lC_t_first = torch.zeros((1, N), dtype=lw.dtype, device=lw.device)
     lC_t_rest = torch.full((L, N), eps, dtype=lw.dtype, device=lw.device)
     lC_tm1 = torch.cat([lC_t_first, lC_t_rest], 0)  # lC_0
-    if include_hist:
+    if stack_dim is not None:
         lC = [lC_tm1]
     else:
         lC = []  # jit scripting
     for t in range(T):
         lC_t_rest = _logaddexp(lC_t_rest, lw[t] + lC_tm1[:-1])
         lC_tm1 = torch.cat([lC_t_first, lC_t_rest], 0)
-        if include_hist:
+        if stack_dim is not None:
             lC.append(lC_tm1)
-    if include_hist:
-        return torch.stack(lC, 0)
+    if stack_dim is not None:
+        return torch.stack(lC, stack_dim)
     else:
         return lC_tm1
 
 
 @torch.jit.script
-def _log_cumsum(lw, L, include_hist, eps):
-    # type: (torch.Tensor, int, bool, float) -> torch.Tensor
+def _log_cumsum(
+    lw: torch.Tensor, L: int, stack_dim: Optional[int], eps: float
+) -> torch.Tensor:
     N, T = lw.shape
     lC_ell = torch.zeros((N, T + 1), device=lw.device, dtype=lw.dtype)
     lw = lw.clamp(min=eps)
     ninfs = torch.full((N, 1), eps, device=lw.device, dtype=lw.dtype)
-    if include_hist:
+    if stack_dim is not None:
         lC = [lC_ell]
     else:
         lC = [lC_ell[:, -1]]
     for _ in range(L):
         lC_ell = torch.cat([ninfs, _logcumsumexp(lw + lC_ell[:, :-1], 1)], -1)
-        if include_hist:
+        if stack_dim is not None:
             lC.append(lC_ell)
         else:
             lC.append(lC_ell[:, -1])
-    lC = torch.stack(lC, 1)
-    return lC
+    if stack_dim is not None:
+        return torch.stack(lC, stack_dim)
+    else:
+        return lC_ell
 
 
 _LOG_METHODS = {
-    "log_chen94": (_log_chen94, True),
-    "log_howard72": (_log_howard72, False),
-    "log_cumsum": (_log_cumsum, True),
+    "log_chen94": (_log_chen94, "NT", "NL"),
+    "log_howard72": (_log_howard72, "TN", "LN"),
+    "log_cumsum": (_log_cumsum, "NT", "NT"),
 }
 
 
@@ -579,21 +669,22 @@ def _speed(opts):
 
     w = torch.zeros(N, T, device=opts.device, dtype=dtype)
     if opts.method.startswith("log"):
-        func, batch_first = _LOG_METHODS[opts.method]
+        func, expected_in, _ = _LOG_METHODS[opts.method]
     else:
-        func, batch_first = _METHODS[opts.method]
-    if not batch_first:
+        func, expected_in, _ = _METHODS[opts.method]
+    if expected_in != "NT":
         w = w.transpose(0, 1).contiguous()
+
     if opts.device.type == "cuda":
         torch.cuda.synchronize()
 
     for _ in range(burn_in):
-        func(w, L, opts.hist)
+        func(w, L, 0 if opts.hist else None)
 
     for repeat_no in range(repeat):
 
         with timeit() as timer:
-            v = func(w, L, opts.hist)
+            v = func(w, L, 0 if opts.hist else None)
         assert not torch.isnan(v).any() and not torch.isinf(v).any()
 
         cum_times.append(timer())
@@ -635,9 +726,13 @@ def _accuracy(opts):
     V = 2 ** opts.log2_expectation
 
     if opts.method.startswith("log_"):
-        func, batch_first = _LOG_METHODS[opts.method]
+        _func, expected_in, expected_out = _LOG_METHODS[opts.method]
+
+        def func(lw, L, stack_dim):
+            return _func(lw, L, stack_dim, EPS_INF)
+
     else:
-        func, batch_first = _METHODS[opts.method]
+        func, expected_in, expected_out = _METHODS[opts.method]
 
     # this method is similar to that of https://doi.org/10.1016/j.csda.2012.10.006 but
     # is essentially prop 1.c of 10.2307/2337119, a generalization of Vandermonde's
@@ -794,10 +889,15 @@ def _accuracy(opts):
         perm = torch.randperm(T, device=opts.device)
         w_permuted = torch.index_select(w, 0, perm)
 
-        actual = func(w_permuted.unsqueeze(0 if batch_first else 1), L, False).squeeze(
-            0 if batch_first else 1
-        )[-1]
+        actual = func(
+            w_permuted.unsqueeze(0 if expected_in == "NT" else 1), L, None
+        ).squeeze(0 if expected_in == "NT" else 1)
+        if expected_out[0] == "N":
+            actual = actual[:, -1]
+        else:
+            actual = actual[-1]
 
+        g = dhigh_diff = dmid_diff = dlow_diff = None  # stop pylance from complaining
         if L:
             (g,) = torch.autograd.grad(actual, w, torch.ones_like(actual))
         assert not torch.isinf(actual).any()
