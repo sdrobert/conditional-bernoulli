@@ -1,4 +1,4 @@
-# Copyright 2020 Sean Robertson
+# Copyright 2021 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,10 +53,9 @@ def count(
     Returns
     -------
     C : torch.Tensor
-        If `full` is :obj:`False`, `C` is a tensor of shape ``(L + 1, N)`` of shape
-        ``(N,)`` where :math:`C[\ell, n] = C(\ell; w[n])`. If :obj:`True`,  `C` is
-        a tensor of shape ``(L + 1, N, T + 1)`` where :math:`C[\ell, n, t] =
-        C(\ell; w[n, :t])`.
+        If `full` is :obj:`False`, `C` is a tensor of shape ``(L + 1, N)`` where
+        :math:`C[\ell, n] = C(\ell; w[n])`. If :obj:`True`,  `C` is a tensor of shape
+        ``(L + 1, N, T + 1)`` where :math:`C[\ell, n, t] = C(\ell; w[n, :t])`.
 
     Notes
     -----

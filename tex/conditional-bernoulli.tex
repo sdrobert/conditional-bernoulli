@@ -9,6 +9,8 @@
 \usepackage{cleveref}
 \usepackage{graphicx}
 
+\newcommand{\defeq}{\mathrel{:\mkern-0.25mu=}}
+\newcommand{\eqdef}{\mathrel{=\mkern-0.25mu:}}
 \newcommand{\gbinom}{\genfrac[]\z@{}}
 \newcommand{\ind}{\perp\!\!\!\!\perp}
 
@@ -245,7 +247,7 @@ to CTC and RNN Transducers \cite{gravesSequenceTransductionRecurrent2012}.
 The Conditional Bernoulli distribution
 \cite{chenWeightedFinitePopulation1994,chenStatisticalApplicationsPoissonBinomial1997},
 sometimes called the Conditional Poisson distribution
-\cite{tilleUnequalProbabilityExponential2006,bondessonParetoSamplingSampford2006},
+\cite{tilleSamplingAlgorithms2006,bondessonParetoSamplingSampford2006},
 is defined as
 %
 \begin{equation} \label{eq:cb}
@@ -1087,171 +1089,278 @@ conditioning is ignored by the ST estimator.
 
 \subsection{Exact expectations} \label{sec:exact}
 
-At the end of \cref{sec:reinforce}, we mentioned that we can marginalize out
-the Bernoulli latent variables efficiently, assuming $P(y_\ell|t_{\leq \ell},
-y_{< \ell}) = P(y_\ell|t_\ell, y_{< \ell})$. Further, it must be feasible to
-calculate that probability for all permutations of $t$ and $\ell$. In the case
-of the model proposed by \cite{luoLearningOnlineAlignments2017}, the
-distribution $\log P(y_t|t_\ell)$ is calculated by a simple linear
-transformation of the RNN hidden state $h_t$ followed by a SoftMax. These
-calculations can be parallelized across $t$ and are fully differentiable. The
-decoder structure of \cite{wuHardNonmonotonicAttention2018} is also a candidate
-as the distribution $P(y_\ell|t_\ell, y_{<\ell})$ is a simple two-layer
-feed-forward neural network on the combination of an encoder and a decoder
-hidden state.
-
-Starting from \cref{eq:breakdown_condition} and making the conditional
-independence assumption between $t_\ell$ and $t_{\ell - 1}$, we manipulate
-$P(y)$ into a form suitable for dynamic programming.
+Assume $f(b)$ can be decomposed into a product of functions of fixed-length
+history ($K$) over event locations $(t_1, t_2, \ldots, t_L)$:
 %
-\begin{equation} \label{eq:marginalization}
-    \begin{split}
-        P(y) &= P(L)\Sum{P(b|L)P(y|b)}{b} \\
-        &= P(L)\Sum{P(b|L)}{b}\Prod{P(y_\ell|b, y_{<\ell})}{\ell,1,L} \\
-        &= P(L)\sum_{\{t_1, t_2, \ldots, t_\ell\}}
-        P(t_1, t_2, \ldots, t_\ell|L)
-        \Prod{P(y_\ell|t_\ell, y_{<\ell})}{\ell,1,L} \\
-        &= P(L)\Sum{
-        \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)
-        P(y_\ell|t_\ell, y_{<\ell})}
-        {t_\ell,t_{\ell - 1} + 1,T - L + \ell}
-        }{\ell,1,L} \\
-        &= P(L)\Sum{
-        \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)P(y_\ell|t_\ell, y_{<\ell})}
-        {t_\ell,1,T}
-        }{\ell,1,L}
-    \end{split}
+\begin{equation} \label{eq:fb_fixed}
+    f(b) \defeq \Prod{f_\lambda(\tilde{t}_{\lambda})}{\lambda,1,L}
 \end{equation}
 %
-where the last line follows as $P(t_\ell|t_{\ell - 1}, L - \ell) = 0$ when
-$t_\ell \leq t_{\ell - 1}$.
+where we use $\tilde{t}_\lambda \defeq (t_{\max(\lambda - K + 1, 1)},
+\ldots, t_\lambda)$ to be the $K$ most recent event locations in $t_{\leq
+\lambda}$ (if they exist; otherwise fewer).
 
-Treating $P(t_\ell|t_{\ell - 1}, L)$ as the transition probability between
-states $t \in [1, T]$ and $P(y_\ell|t_\ell, y_{<\ell})$ as the emission
-probability, \cref{eq:marginalization} can be considered a Hidden Markov Model.
-Thus, $P(y)$ can be efficiently calculated using the forward algorithm. The
-backward step is implicit in the calculation of $P(t_\ell|\ldots)$, which
-effectively marginalizes over all suffixes.
-
-There exists a relationship between \cref{eq:marginalization} and the CTC
-objective \cite{gravesConnectionistTemporalClassification2006} when the history
-of class labels $y_{< \ell}$ is conditionally independent of the current class
-label $P(y_\ell|t_\ell, y_{< \ell}) = P(y_\ell|t_\ell)$. Recalling that
-$P(L)P(b|L) = P(b)$, the independent Bernoulli probabilities, then define a new
-distribution over an augmented class label set $\{y_t'\} = \{y_t\} \cup \{\_\}$
-as
+Define $\zeta$ as
 %
-\begin{equation} \label{eq:augmented_class}
-    P(y'_t) = \begin{cases}
-        P(B_t = 0)         & y'_t = \_        \\
-        P(B_t = 1)P(y_t|t) & \text{otherwise}
-    \end{cases}
+\begin{equation} \label{eq:zeta}
+    \zeta(\ell; w, f) \defeq \sum_{t_{\leq \ell}}
+        \Prod{w_{t_\lambda} f(\tilde{t}_\lambda)}{\lambda,1,\ell}
+\end{equation}
+
+It follows from \cref{eq:fb_fixed,eq:zeta} that
+%
+\begin{equation}
+    \zeta(L; w, f)
+        = \sum_{\{ b : \ell_T = L \}} f(b) \Prod{w_t^{b_t}}{t,1,T}
+        = R_{train} \Prod{(1 + w_t)}{t,1,T}
 \end{equation}
 %
-where the label ``\_'' acts as a stand-in for choosing not to emit at a given
-time step. Letting $\beta(y')$ remove all the ``\_'' labels from the augmented
-label set,
+which means when $B_t$ are independent and $f(b)$ decomposes into a product of
+fixed-history contributions, we can compute our training objective exactly with
+$\zeta$.
+
+We can derive a recurrence relation similar to the Howard recurrence by
+partitioning $w$. We canonically set $\zeta(0; w, f) = 0$, then
 %
-\begin{equation} \label{eq:ctc_obj}
-    \begin{split}
-        P(y) &= \Sum{\Sum{P(b_t)P(y_{\ell_t}|t)^{b_t}}{t,1,T}}{b} \\
-        &= \sum_{\{c': |c| = T \land \beta(y') = c\}}\Sum{P(y'_t|t)}{t,1,T}
-    \end{split}
+\begin{equation} \label{eq:zeta_recurrence}
+\begin{split}
+    \zeta(\ell; w_{\leq t'}, f) =&
+        \left(\sum_{\{t_{\leq \lambda} : t_\lambda < t'\}}
+            \Prod{w_{t_\lambda} f(\tilde{t}_\lambda)}{\lambda,1,\ell}\right) +
+        \left(\sum_{\{t_{\leq \lambda} : t_\lambda = t'\}}
+            \Prod{w_{t_\lambda} f(\tilde{t}_\lambda)}{\lambda,1,\ell}\right) \\
+    =&  \zeta(\ell; w_{< t'}, f) +
+        \left(\sum_{\{t_{\leq \lambda} : t_\lambda = t'\}}
+            \Prod{w_{t_\lambda} f(\tilde{t}_\lambda)}{\lambda,1,\ell}\right)
+\end{split}
 \end{equation}
 %
-This expression of the data likelihood is almost identical to that of CTC
-\cite{gravesConnectionistTemporalClassification2006}, with two restrictions.
-First, it assumes the distribution over labels factors as described in
-\cref{eq:augmented_class}. In general, \cref{eq:augmented_class} will lead
-to different gradient updates than directly parameterizing the augmented
-vocabulary $P(y'_t)$ since the blank label has its own parameterization.
-Second, $\beta(y')$ in \cref{eq:ctc_obj} does not reduce repeated labels in
-$c'$\footnote{
-    %
-    To the best of our knowledge, there has been no attempt to explore whether
-    the reduction operation leads to any performance benefits over just using
-    the blank label. \citet{gravesConnectionistTemporalClassification2012}
-    mention that reducing repeated labels existed prior to the blank label in
-    the formation of the CTC objective.
-    %
-}. Assuming it allows for the non-standard adjustment to $\beta$, the data
-likelihood marginalized over latent Bernoulli sequences can be trivially
-implemented using an existing CTC loss function. The additional dependency on
-$y_{< \ell}$ can be considered a generalization of the CTC loss function.
-
-\begin{figure}
-    \centering
-    \includegraphics[width=.5\textwidth]{rnnt_vs_cb.pdf}
-    \caption{
-        %
-        A comparison between RNN-T and \cref{eq:marginalization} forward passes
-        over time ($t$) and labels ($\ell$). The RNN-T steps forward in $t$ or
-        $\ell$ independently (black and red lines), while the CB steps forward
-        in either $t$ alone or $t$ and $\ell$ simultaneously (black and blue
-        lines).
-        %
-    } \label{fig:rnnt_vs_cb}
-\end{figure}
-
-\Cref{eq:marginalization} is similar to the RNN Transducer
-\cite{gravesSequenceTransductionRecurrent2012} with one key difference: the
-RNN-T emits labels and absorbs frames in time separately. \Cref{fig:rnnt_vs_cb}
-illustrates the difference between the two methods' forward calculations. To
-calculate the probability of having emitted the prefix $y_{\leq \ell}$ by time
-$t$, the RNN-T sums contributions from either having seen the entire prefix by
-time $t - 1$ and transitioning to time $t$ via a blank label, or having seen
-$\ell - 1$ labels by time $t$ and then emitting $y_\ell$ (without moving
-forward in time). \Cref{eq:marginalization} maintains the first contribution
-(transitioning from time $t-1$ to $t$ via an implied blank label), but replaces
-the latter with a transition that both absorbs a step in time ($t - 1 \to t$)
-and emits a label ($\ell - 1 \to \ell$).
-
-The choice to absorb time steps and emit labels independently in the RNN-T
-architecture was motivated partly by the desire to allow sequence transduction
-between inputs and outputs of arbitrary length. \Cref{eq:marginalization}
-requires $L \leq T$, making it (in its current form) unsuited to tasks where
-the output is potentially longer than the input, such as machine translation.
-However, this extra flexibility comes at the cost of uncoupling the events from
-time. Conceptually, the RNN-T models label events as instantaneous, making the
-path where all labels are output at time $t=0$ \textit{a priori} equally likely
-to the path where labels are distributed over time. This has a number of
-practical ramifications. First, when the problem can be conceptualized as
-sequential events in time, the RNN-T wastes probability mass on these
-impossible, instantaneous paths. Second, the monotonicity over $t$ makes
-heuristic search strategies for approximating $\arg_y \max P(y)$ more efficient
-and possibly more accurate for \cref{eq:marginalization} than for
-RNN-Ts\footnote{
+If $K = 1$, $\tilde{t}_\lambda = (t_\lambda)$ and
 %
-    Such searches, most popularly beam search, involve iteratively building
-    prefix paths over time, pruning low-probability paths. The monotonicity
-    w.r.t. $t$ of \cref{eq:marginalization} ensures only $V + 1$ possible
-    extensions of each stored prefix for the next time step, where $V$ is the
-    size of the vocabulary. Because the RNN-T can output as many labels as it
-    wants at a given time, the search space per prefix is technically
-    arbitrarily big, though practically bounded to some constant positive
-    multiple of $V + 1$.
+\begin{equation} \label{eq:zeta_recurrence_k1}
+\begin{split}
+    \zeta(\ell; w_{\leq t'}, f) =&
+            \zeta(\ell; w_{< t'}, f) +
+            w_{t'} f_\ell(t') \sum_{\{t_{\ell - 1} : t_{\ell - 1} < t'\}}
+                \Prod{w_{t_\lambda} f(\tilde{t}_\lambda)}{\lambda,1,\ell} \\
+    =& \zeta(\ell; w_{<t'}, f) +  w_{t'} f_\ell(t') \zeta(\ell - 1; w_{<t'}, f)
+\end{split}
+\end{equation}
+
+\Cref{eq:zeta_recurrence_k1} is remarkably similar to the Howard recurrence. In
+fact, choosing $f(b) \equiv 1$ and $K=1$, \cref{eq:zeta} becomes identical to
+\cref{eq:cb}. Therefore, $\zeta$ generalizes $C$ by allowing for ordering
+effects.
+
+While we can compute $\zeta$ via recurrence for $K > 1$, the process is more
+involved. Unlike in \cref{eq:zeta_recurrence_k1}, we cannot fully separate the
+contribution of the next event location because it will depend on some exact,
+non-empty prefix of events. To efficiently compute right summand of
+\cref{eq:zeta_recurrence}, we introduce an auxiliary function, $\Omega$, over
+different near-histories of prefixes $u \defeq (u_i)_{i \in [1, \min(K,\ell)]}$
 %
-}. Finally, \cref{eq:marginalization} can be easily parallelized over labels
-$\ell$ resulting in $O(T)$ serial operations, a na\"{i}ve implementation of the
-RNN-T forward pass requires $O(TL)$ serial operations and a vector-skewed
-implementation requires $O(T + L)$ serial operations
-\cite{bagbyEfficientImplementationRecurrent18}.
+\begin{equation} \label{eq:omega}
+\begin{split}
+    \Omega(\ell, u; w, f)
+    =&
+        \sum_{\{t_{\leq \ell} : \tilde{t}_\ell=u\}}
+       \Prod{w_{t_\lambda}f_\lambda(\tilde{t}_\lambda)}{\lambda,1,\ell} \\
+    =& \begin{dcases}
+        w_{u_K}f_\ell(u)
+        \Sum{
+           \sum_{\{t_{< \ell} : \tilde{t}_{\ell - 1} = u_0 \frown u_{<K}\}}
+                \Prod{w_{t_\lambda}f_\lambda(\tilde{t}_\lambda)}{\lambda,1,\ell-1}
+        }{u_0,\ell - K,u_1-1} & \ell > K \\
+        \Prod{w_{u_i}f_i(u_{\leq i})}{i,1,\ell} & \ell \leq K
+        \end{dcases} \\
+    =& \begin{dcases}
+        w_{u_K}f_\ell(u)
+        \Sum{\Omega(\ell - 1, u_0 \frown u_{<K})}{u_0,\ell - K,u_1-1} & \ell > K \\
+        w_{u_K}f_\ell(u) \Omega(\ell - 1, u_{<\ell}; w, f) & \ell \leq K
+        \end{dcases}
+\end{split}
+\end{equation}
+%
+Which is to say that the sum of contributions of events sequences of length
+$\ell$ and ending in event locations $u$ is the sum of $(\ell - 1)$-length
+paths ending in the largest strict prefix of $u$, $u_{<K}$, times the
+contribution of $u_K$. In order to sum the contributions of paths ending in the
+largest strict prefix, we prepend $u_{<K}$ with any $u_0$ less than $u_1$, the
+least element of $u$, and sum over all such $u_0$. When $u = t_{\leq \ell}$,
+there is only one path corresponding to the largest strict prefix, $u_{< \ell}
+= t_{< \ell}$.
 
-% To prove arbitrarily wide, all you need is T=1. Pick any constant K you'd
-% like, then pick some label set v \in V^K, then make
-% P(blank|v',t=0) = I[v' = v]
+Since the suffixes of sequences of event locations can be used to partition all
+event sequences of some fixed length ($t_{\leq \ell} \sim t'_{\leq \ell} \iff
+\tilde{t}_\ell = \tilde{t'}_\ell$) and $\Omega$ for that fixed length only sums
+over sequences in one partition, $\zeta(\ell; w, f) = \Sum{\Omega(\ell, u; w,
+f)}{u}$.
 
-There are two notable extensions that can be made to \cref{eq:marginalization}
-that derive from it being a first-order Markov model. First, we can perform an
-efficient search for $b* = \arg_b \max P(b|y)$ via the Viterbi algorithm. Such
-a search would be performed after training in order to determine the most
-likely times $t* = \{t: b^*_t = 1\}$ when events $y$ occurred in a given window
-of time. Second, we can easily adapt \cref{eq:marginalization} for higher-order
-models so that $P(y_\ell|\ldots)$ can depend on some arbitrary fixed-length
-history of emission points $t_\ell,\ldots,t_{\ell - W + 1}$. While the number
-of states that must be stored for a given order grows exponentially with that
-order, even second-order models may be sufficient to avoid the pitfalls of
-conditionally independent $B_t$. We discuss this more in \cref{sec:approx}.
+% At the end of \cref{sec:reinforce}, we mentioned that we can marginalize out
+% the Bernoulli latent variables efficiently, assuming $P(y_\ell|t_{\leq \ell},
+% y_{< \ell}) = P(y_\ell|t_\ell, y_{< \ell})$. Further, it must be feasible to
+% calculate that probability for all permutations of $t$ and $\ell$. In the case
+% of the model proposed by \cite{luoLearningOnlineAlignments2017}, the
+% distribution $\log P(y_t|t_\ell)$ is calculated by a simple linear
+% transformation of the RNN hidden state $h_t$ followed by a SoftMax. These
+% calculations can be parallelized across $t$ and are fully differentiable. The
+% decoder structure of \cite{wuHardNonmonotonicAttention2018} is also a candidate
+% as the distribution $P(y_\ell|t_\ell, y_{<\ell})$ is a simple two-layer
+% feed-forward neural network on the combination of an encoder and a decoder
+% hidden state.
+
+% Starting from \cref{eq:breakdown_condition} and making the conditional
+% independence assumption between $t_\ell$ and $t_{\ell - 1}$, we manipulate
+% $P(y)$ into a form suitable for dynamic programming.
+% %
+% \begin{equation} \label{eq:marginalization}
+%     \begin{split}
+%         P(y) &= P(L)\Sum{P(b|L)P(y|b)}{b} \\
+%         &= P(L)\Sum{P(b|L)}{b}\Prod{P(y_\ell|b, y_{<\ell})}{\ell,1,L} \\
+%         &= P(L)\sum_{\{t_1, t_2, \ldots, t_\ell\}}
+%         P(t_1, t_2, \ldots, t_\ell|L)
+%         \Prod{P(y_\ell|t_\ell, y_{<\ell})}{\ell,1,L} \\
+%         &= P(L)\Sum{
+%         \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)
+%         P(y_\ell|t_\ell, y_{<\ell})}
+%         {t_\ell,t_{\ell - 1} + 1,T - L + \ell}
+%         }{\ell,1,L} \\
+%         &= P(L)\Sum{
+%         \Sum{P(t_\ell|t_{\ell - 1}, L - \ell)P(y_\ell|t_\ell, y_{<\ell})}
+%         {t_\ell,1,T}
+%         }{\ell,1,L}
+%     \end{split}
+% \end{equation}
+% %
+% where the last line follows as $P(t_\ell|t_{\ell - 1}, L - \ell) = 0$ when
+% $t_\ell \leq t_{\ell - 1}$.
+
+% Treating $P(t_\ell|t_{\ell - 1}, L)$ as the transition probability between
+% states $t \in [1, T]$ and $P(y_\ell|t_\ell, y_{<\ell})$ as the emission
+% probability, \cref{eq:marginalization} can be considered a Hidden Markov Model.
+% Thus, $P(y)$ can be efficiently calculated using the forward algorithm. The
+% backward step is implicit in the calculation of $P(t_\ell|\ldots)$, which
+% effectively marginalizes over all suffixes.
+
+% There exists a relationship between \cref{eq:marginalization} and the CTC
+% objective \cite{gravesConnectionistTemporalClassification2006} when the history
+% of class labels $y_{< \ell}$ is conditionally independent of the current class
+% label $P(y_\ell|t_\ell, y_{< \ell}) = P(y_\ell|t_\ell)$. Recalling that
+% $P(L)P(b|L) = P(b)$, the independent Bernoulli probabilities, then define a new
+% distribution over an augmented class label set $\{y_t'\} = \{y_t\} \cup \{\_\}$
+% as
+% %
+% \begin{equation} \label{eq:augmented_class}
+%     P(y'_t) = \begin{cases}
+%         P(B_t = 0)         & y'_t = \_        \\
+%         P(B_t = 1)P(y_t|t) & \text{otherwise}
+%     \end{cases}
+% \end{equation}
+% %
+% where the label ``\_'' acts as a stand-in for choosing not to emit at a given
+% time step. Letting $\beta(y')$ remove all the ``\_'' labels from the augmented
+% label set,
+% %
+% \begin{equation} \label{eq:ctc_obj}
+%     \begin{split}
+%         P(y) &= \Sum{\Sum{P(b_t)P(y_{\ell_t}|t)^{b_t}}{t,1,T}}{b} \\
+%         &= \sum_{\{c': |c| = T \land \beta(y') = c\}}\Sum{P(y'_t|t)}{t,1,T}
+%     \end{split}
+% \end{equation}
+% %
+% This expression of the data likelihood is almost identical to that of CTC
+% \cite{gravesConnectionistTemporalClassification2006}, with two restrictions.
+% First, it assumes the distribution over labels factors as described in
+% \cref{eq:augmented_class}. In general, \cref{eq:augmented_class} will lead
+% to different gradient updates than directly parameterizing the augmented
+% vocabulary $P(y'_t)$ since the blank label has its own parameterization.
+% Second, $\beta(y')$ in \cref{eq:ctc_obj} does not reduce repeated labels in
+% $c'$\footnote{
+%     %
+%     To the best of our knowledge, there has been no attempt to explore whether
+%     the reduction operation leads to any performance benefits over just using
+%     the blank label. \citet{gravesConnectionistTemporalClassification2012}
+%     mention that reducing repeated labels existed prior to the blank label in
+%     the formation of the CTC objective.
+%     %
+% }. Assuming it allows for the non-standard adjustment to $\beta$, the data
+% likelihood marginalized over latent Bernoulli sequences can be trivially
+% implemented using an existing CTC loss function. The additional dependency on
+% $y_{< \ell}$ can be considered a generalization of the CTC loss function.
+
+% \begin{figure}
+%     \centering
+%     \includegraphics[width=.5\textwidth]{rnnt_vs_cb.pdf}
+%     \caption{
+%         %
+%         A comparison between RNN-T and \cref{eq:marginalization} forward passes
+%         over time ($t$) and labels ($\ell$). The RNN-T steps forward in $t$ or
+%         $\ell$ independently (black and red lines), while the CB steps forward
+%         in either $t$ alone or $t$ and $\ell$ simultaneously (black and blue
+%         lines).
+%         %
+%     } \label{fig:rnnt_vs_cb}
+% \end{figure}
+
+% \Cref{eq:marginalization} is similar to the RNN Transducer
+% \cite{gravesSequenceTransductionRecurrent2012} with one key difference: the
+% RNN-T emits labels and absorbs frames in time separately. \Cref{fig:rnnt_vs_cb}
+% illustrates the difference between the two methods' forward calculations. To
+% calculate the probability of having emitted the prefix $y_{\leq \ell}$ by time
+% $t$, the RNN-T sums contributions from either having seen the entire prefix by
+% time $t - 1$ and transitioning to time $t$ via a blank label, or having seen
+% $\ell - 1$ labels by time $t$ and then emitting $y_\ell$ (without moving
+% forward in time). \Cref{eq:marginalization} maintains the first contribution
+% (transitioning from time $t-1$ to $t$ via an implied blank label), but replaces
+% the latter with a transition that both absorbs a step in time ($t - 1 \to t$)
+% and emits a label ($\ell - 1 \to \ell$).
+
+% The choice to absorb time steps and emit labels independently in the RNN-T
+% architecture was motivated partly by the desire to allow sequence transduction
+% between inputs and outputs of arbitrary length. \Cref{eq:marginalization}
+% requires $L \leq T$, making it (in its current form) unsuited to tasks where
+% the output is potentially longer than the input, such as machine translation.
+% However, this extra flexibility comes at the cost of uncoupling the events from
+% time. Conceptually, the RNN-T models label events as instantaneous, making the
+% path where all labels are output at time $t=0$ \textit{a priori} equally likely
+% to the path where labels are distributed over time. This has a number of
+% practical ramifications. First, when the problem can be conceptualized as
+% sequential events in time, the RNN-T wastes probability mass on these
+% impossible, instantaneous paths. Second, the monotonicity over $t$ makes
+% heuristic search strategies for approximating $\arg_y \max P(y)$ more efficient
+% and possibly more accurate for \cref{eq:marginalization} than for
+% RNN-Ts\footnote{
+% %
+%     Such searches, most popularly beam search, involve iteratively building
+%     prefix paths over time, pruning low-probability paths. The monotonicity
+%     w.r.t. $t$ of \cref{eq:marginalization} ensures only $V + 1$ possible
+%     extensions of each stored prefix for the next time step, where $V$ is the
+%     size of the vocabulary. Because the RNN-T can output as many labels as it
+%     wants at a given time, the search space per prefix is technically
+%     arbitrarily big, though practically bounded to some constant positive
+%     multiple of $V + 1$.
+% %
+% }. Finally, \cref{eq:marginalization} can be easily parallelized over labels
+% $\ell$ resulting in $O(T)$ serial operations, a na\"{i}ve implementation of the
+% RNN-T forward pass requires $O(TL)$ serial operations and a vector-skewed
+% implementation requires $O(T + L)$ serial operations
+% \cite{bagbyEfficientImplementationRecurrent18}.
+
+% % To prove arbitrarily wide, all you need is T=1. Pick any constant K you'd
+% % like, then pick some label set v \in V^K, then make
+% % P(blank|v',t=0) = I[v' = v]
+
+% There are two notable extensions that can be made to \cref{eq:marginalization}
+% that derive from it being a first-order Markov model. First, we can perform an
+% efficient search for $b* = \arg_b \max P(b|y)$ via the Viterbi algorithm. Such
+% a search would be performed after training in order to determine the most
+% likely times $t* = \{t: b^*_t = 1\}$ when events $y$ occurred in a given window
+% of time. Second, we can easily adapt \cref{eq:marginalization} for higher-order
+% models so that $P(y_\ell|\ldots)$ can depend on some arbitrary fixed-length
+% history of emission points $t_\ell,\ldots,t_{\ell - W + 1}$. While the number
+% of states that must be stored for a given order grows exponentially with that
+% order, even second-order models may be sufficient to avoid the pitfalls of
+% conditionally independent $B_t$. We discuss this more in \cref{sec:approx}.
 
 % Thus, \cref{eq:marginalization} can be
 % considered a generalization of CTC.  Finally, the
