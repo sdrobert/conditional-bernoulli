@@ -16,6 +16,7 @@
 
 from typing import Callable, Optional, Union
 import torch
+import itertools
 
 
 def zeta(
@@ -42,6 +43,8 @@ def zeta(
     :math:`f_\ell(\ldots)` viz. the argument `f`. We use :math:`n` in the superscript,
     :math:`f^n_\ell(u)`, to denote the (family of) functions for the ``n``-th batch
     element :math:`n \in [1, N]`
+
+    FIXMEEEEE
 
     1. If `f` is a function and `L` and `K` are defined, `f` accepts :math:`K' + 1`
        positional arguments as input and returns a tensor of shape ``N`` where
@@ -98,19 +101,20 @@ def zeta(
     ...     f_0.reshape(1, N, 1, T).expand(1, N, T, T),  # recall u_2 comes first
     ...     f_gt_0
     ... ], 0)  # (L, N, T, T)
+
+    Notes
+    -----
     """
     if w.dim() != 2:
         raise RuntimeError("Expected w to be two dimensional")
     if callable(f):
-        if L is None:
-            raise RuntimeError("If f is a function, L must be specified")
-        elif K is None:
-            return _zeta_func_vectorized(w, f, L, full)
+        if L is None or L < 0 or K is None or K < 1:
+            raise RuntimeError("If f is a function, K >= 1 and L >= 0")
         elif K == 1:
             Z = _zeta_func_loop_k1(w.transpose(0, 1).contiguous(), f, L, full)
             return Z.transpose(1, 2) if full else Z
         else:
-            return _zeta_func_loop(w, f, L, K, full)
+            return _zeta_func_loop(w.transpose(0, 1).contiguous(), f, L, K, full)
     if f.dim() < 3:
         raise RuntimeError("If f is a tensor, f must be at least 3 dimensional")
     if L is not None and L != f.shape[0]:
@@ -121,7 +125,12 @@ def zeta(
         raise RuntimeError(
             "Expected f to have K + 2 ({}) dimensions, got {}".format(K + 2, f.dim())
         )
-    return _zeta_tensor(w, f, full)
+    else:
+        K = f.dim() - 2
+    if K == 1:
+        return _zeta_tensor_k1(w, f, full)
+    else:
+        return _zeta_tensor(w, f, full)
 
 
 def _zeta_func_loop_k1(
@@ -148,14 +157,97 @@ def _zeta_func_loop_k1(
 def _zeta_func_loop(
     w: torch.Tensor, f: Callable, L: int, K: int, full: bool
 ) -> torch.Tensor:
-    raise NotImplementedError("TODO")
+    # When K > 1, we use the auxiliary Omega:
+    # Omega(ell, u; w, f) = w_{u_K} f_ell(u) sum_{u_0 = ell - K}^{u_1 - 1}
+    #                       Omega(ell - 1, [u_0, u_1, ..., u_{K - 1}]; w, f)    ell > K
+    # Omega(ell, u; w, f) = w_{u_K} f_ell(u) Omega(ell - 1, [u_1, ..., u_{K-1}]; w, f)
+    #                                                                           else
+    # When ell > K, note that the sum is going to be the same for whoever shares the
+    # infix [u_1, ..., u_{K-1}], so we compute that first
+    T, N = w.shape
+    O_ell = torch.tensor(1, device=w.device, dtype=w.dtype)
+    zeros = torch.zeros((N,), device=w.device, dtype=w.dtype)
+    Z = [torch.ones((N, T + 1) if full else (N,), device=w.device, dtype=w.dtype)]
+    for ell in range(1, L + 1):
+        Kp = min(ell, K)
+        O_ellm1 = O_ell
+        # Omega will be flattened along the T dimensions for easier advanced indexing,
+        # i.e. O_ell[n, u_1, u_2, ..., u_K] = O_ell[n, u_1 * (T + 1) ** (K - 1) +
+        #                                              u_2 * (T + 1) ** (K - 2) +
+        #                                              ...
+        #                                              u_K]
+        O_ell = []
+        for u_lt_K in itertools.product(range(0, T + 1), repeat=Kp - 1):
+            if any(u_k == 0 for u_k in u_lt_K) or any(
+                u_lt_K[i - 1] >= u_lt_K[i] for i in range(1, Kp - 1)
+            ):
+                O_ell.extend([zeros] * (T + 1))
+                continue
+            if ell == 1:
+                sum_O_ellm1_u_lt_K = O_ellm1
+                u_Km1 = 0
+                O_ell.append(zeros)
+            else:
+                u_1, u_Km1 = u_lt_K[0], u_lt_K[-1]
+                O_ell.extend([zeros] * (u_Km1 + 1))
+                u_lt_K_index = sum(
+                    u_lt_K[i] * ((T + 1) ** (Kp - i - 2)) for i in range(Kp - 1)
+                )
+                if ell > K:
+                    sum_O_ellm1_u_lt_K = O_ellm1.view(N, T + 1, -1)[
+                        :, :u_1, u_lt_K_index
+                    ].sum(1)
+                else:
+                    sum_O_ellm1_u_lt_K = O_ellm1[:, u_lt_K_index]
+            for u_K in range(u_Km1 + 1, T + 1):
+                u = u_lt_K + (u_K,)
+                f_ell_u = f(ell, *u)
+                O_ell_u = sum_O_ellm1_u_lt_K * w[u_K - 1] * f_ell_u
+                O_ell.append(O_ell_u)  # (N,)
+        O_ell = torch.stack(O_ell, 1)  # (N, (T + 1) ** Kp)
+        if full:
+            Z.append(O_ell.view(N, -1, T + 1).sum(1).cumsum(1))
+        else:
+            Z.append(O_ell.view(N, -1).sum(1))
+    return torch.stack(Z, 0)
 
 
-def _zeta_func_vectorized(
-    w: torch.Tensor, f: Callable, L: int, full: bool
-) -> torch.Tensor:
-    raise NotImplementedError("TODO")
+@torch.jit.script
+def _zeta_tensor_k1(w: torch.Tensor, f: torch.Tensor, full: bool) -> torch.Tensor:
+    L, N, T = f.shape
+    Z_ell = torch.ones((N, T + 1), device=w.device, dtype=w.dtype)
+    zeros = torch.zeros((N, 1), device=w.device, dtype=w.dtype)
+    Z = [Z_ell if full else Z_ell[:, -1]]
+    for ellm1 in range(L):
+        Z_ell = torch.cat([zeros, torch.cumsum(f[ellm1] * w * Z_ell[:, :-1], 1)], -1)
+        Z.append(Z_ell if full else Z_ell[:, -1])
+    return torch.stack(Z, 0)  # (L + 1, N, T + 1) if full else (L + 1, N)
 
 
+@torch.jit.script
 def _zeta_tensor(w: torch.Tensor, f: torch.Tensor, full: bool) -> torch.Tensor:
-    raise NotImplementedError("TODO")
+    L, N, T = f.shape[:3]
+    K = f.dim() - 2
+    tril = torch.ones((T, T), device=w.device, dtype=w.dtype).tril_(-1)
+    O_ell = ones = torch.ones((N,), device=w.device, dtype=w.dtype)
+    valid = ones.unsqueeze(1)
+    Z = [ones.unsqueeze(1).expand(N, T + 1) if full else ones]
+    zeros = torch.zeros((N, 1), device=w.device, dtype=w.dtype)
+    for ellm1 in range(L):
+        O_ellm1 = O_ell
+        f_ell = f[ellm1]
+        if ellm1 < K:
+            sO_ellm1 = O_ellm1
+            f_ell = f_ell.view((N, -1) + (T,) * (ellm1 + 1))[:, 0]
+            if ellm1 > 0:
+                valid = valid.unsqueeze(-1) * tril
+                w = w.unsqueeze(-1)
+        else:
+            sO_ellm1 = (O_ellm1 * tril).sum(K)
+        O_ell = f_ell * w * valid * sO_ellm1.unsqueeze(1)
+        if full:
+            Z_ell = torch.cat([zeros, O_ell.view(N, T, -1).sum(2).cumsum(1)], 1)
+        else:
+            Z_ell = O_ell.flatten(1).sum(1)
+        Z.append(Z_ell)
+    return torch.stack(Z, 0)
