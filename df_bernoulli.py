@@ -1,13 +1,15 @@
 """Sequential classification based on Drezner & Farnum 1993"""
 
-from typing import Tuple
+from estimators import EnumerateEstimator, Estimator, RejectionEstimator, Theta
+from typing import List, Tuple
 import torch
+import param
 
 
 @torch.jit.script
 @torch.no_grad()
 def dependent_bernoulli_sample(
-    p: torch.Tensor, theta: torch.Tensor, tmax: int
+    p: torch.Tensor, gamma: torch.Tensor, tmax: int
 ) -> torch.Tensor:
     r"""Sample from Drezner & Farnum's Dependent Bernoulli model
 
@@ -15,14 +17,14 @@ def dependent_bernoulli_sample(
 
     .. math::
 
-        P(b_t = 1|b_{1:t-1}) = p * (1 - \theta) + \frac{\theta\sum_{t'=1}^{t-1}b_t}{t-1}
+        P(b_t = 1|b_{1:t-1}) = p * (1 - \gamma) + \frac{\gamma\sum_{t'=1}^{t-1}b_t}{t-1}
 
     Parameters
     ----------
     p : torch.Tensor
         Shape ``(nmax,)`` of batch's independent Bernoulli probabilities, :math:`p`
-    theta : torch.Tensor
-        Shape ``(nmax,)`` of batch's sample average mixing coefficient, :math:`\theta`
+    gamma : torch.Tensor
+        Shape ``(nmax,)`` of batch's sample average mixing coefficient, :math:`\gamma`
     tmax : int
         Number of sequential Bernoulli values to sample
 
@@ -30,20 +32,20 @@ def dependent_bernoulli_sample(
     -------
     b : torch.Tensor
         Shape ``(tmax, nmax)`` where ``b[:, n]`` is the sequence of `tmax` sampled
-        Bernoulli values with parameters ``p[n]`` and ``theta[n]``.
+        Bernoulli values with parameters ``p[n]`` and ``gamma[n]``.
     """
     assert tmax >= 0
     assert p.dim() == 1
     nmax = p.size(0)
-    assert theta.size(0) == nmax
+    assert gamma.size(0) == nmax
     device = p.device
-    assert theta.device == device
+    assert gamma.device == device
     b = torch.empty((tmax, nmax), device=device)
     if not tmax:
         return b
     b[0] = S_tm1 = torch.bernoulli(p)
     for tm1 in range(1, tmax):
-        p_t = (1.0 - theta) * p + theta * S_tm1 / tm1
+        p_t = (1.0 - gamma) * p + gamma * S_tm1 / tm1
         b_t = torch.bernoulli(p_t)
         b[tm1] = b_t  # 0-indexed
         S_tm1 += b_t
@@ -52,7 +54,7 @@ def dependent_bernoulli_sample(
 
 @torch.jit.script
 def dependent_bernoulli_logprob(
-    p: torch.Tensor, theta: torch.Tensor, b: torch.Tensor
+    p: torch.Tensor, gamma: torch.Tensor, b: torch.Tensor
 ) -> torch.Tensor:
     """Return the log-probability of sample under D & F Dependent Bernoulli model
 
@@ -65,11 +67,11 @@ def dependent_bernoulli_logprob(
         of the Bernoulli sequence ``b[:, n]`` under the Drezner & Farnum model.
     """
     assert b.dim() == 2
-    assert theta.size() == p.size() == b.size()[1:]
+    assert gamma.size() == p.size() == b.size()[1:]
     tmax, device = b.size(0), b.device
-    assert p.device == theta.device == device
+    assert p.device == gamma.device == device
     if not tmax:
-        return torch.empty((0, theta.size(0)), device=device)
+        return torch.empty((0, gamma.size(0)), device=device)
     b = b.detach()
     logp, log1mp = p.log(), torch.log1p(-p)
     logp_1 = (logp * b[0]).nan_to_num_(neginf=-float("inf")) + (
@@ -81,17 +83,17 @@ def dependent_bernoulli_logprob(
     t_tm1 = torch.arange(1, tmax, device=device).unsqueeze(1)
     logt_tm1 = t_tm1.log()
     logpp_t, log1mpp_t = S_tm1.log() - logt_tm1, (t_tm1 - S_tm1).log() - logt_tm1
-    logtheta, log1mtheta = theta.log(), torch.log1p(-theta)
+    loggamma, log1mgamma = gamma.log(), torch.log1p(-gamma)
     b, negb = b[1:], 1.0 - b[1:]
     left_t = (
         (logp.unsqueeze(0) * b).nan_to_num_(neginf=-float("inf"))
         + (log1mp.unsqueeze(0) * negb).nan_to_num_(neginf=-float("inf"))
-        + log1mtheta
+        + log1mgamma
     )
     right_t = (
         (logpp_t * b).nan_to_num_(neginf=-float("inf"))
         + (log1mpp_t * negb).nan_to_num_(neginf=-float("inf"))
-        + logtheta
+        + loggamma
     )
     max_t = torch.max(left_t, right_t).nan_to_num_()
     logp_t = ((left_t - max_t).exp() + (right_t - max_t).exp()).log() + max_t
@@ -108,7 +110,7 @@ def event_sample(
     For a given batch element (:math:`t` and :math:`\ell` are 1-indexed)
 
     .. math::
-        P(\tau_\ell = v|b,x) = \frac{exp(Wx_{\tau_\ell})_v}
+        P(y_\ell = v|b,x) = \frac{exp(Wx_{\tau_\ell})_v}
                                     {\sum_{v'} exp(Wx_{\tau_\ell})_{v'}}
         \tau_\ell = \min_t \{t : \sum_{t'=1}^t b_t = \ell\}
 
@@ -233,15 +235,159 @@ def enumerate_latent_likelihoods(
     return torch.stack(g, 0), tmax - lens
 
 
+# For command-line task
+
+
+class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
+    seed = param.Integer(
+        None,
+        bounds=(-0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF),
+        inclusive_bounds=(True, True),
+    )
+    num_trials = param.Integer(100, bounds=(1, None))
+    batch_size = param.Integer(16, bounds=(1, None))
+    tmax = param.Integer(1024, bounds=(1, None))
+    fmax = param.Integer(16, bounds=(1, None))
+    vmax = param.Integer(16, bounds=(1, None))
+    p = param.Magnitude(None)
+    gamma = param.Magnitude(None)
+    x_std = param.Number(1.0, bounds=(0, None))
+    W_std = param.Number(1.0, bounds=(0, None))
+    learning_rate = param.Magnitude(1e-3)
+    estimator = param.ObjectSelector("rejection", objects=("rejection", "enumerate"))
+    optimizer = param.ObjectSelector(
+        torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
+    )
+    mc_num_samples = param.Integer(1024, bounds=(1, None))
+
+
+def initialize(
+    df_params: DreznerFarnumBernoulliExperimentParameters,
+) -> Tuple[torch.optim.Optimizer, Theta, Theta, Estimator]:
+    if df_params.seed is not None:
+        torch.manual_seed(df_params.seed)
+    p_exp = (
+        torch.tensor(df_params.p).logit_()
+        if df_params.p is not None
+        else torch.randn(1)
+    )
+    gamma_exp = (
+        torch.tensor(df_params.gamma).logit_()
+        if df_params.gamma is not None
+        else torch.randn(1)
+    )
+    W_exp = torch.randn((df_params.fmax, df_params.vmax)) * df_params.W_std
+    theta_exp = [p_exp, gamma_exp, W_exp]
+    p_act = torch.randn(1).requires_grad_(True)
+    gamma_act = torch.randn(1).requires_grad_(True)
+    W_act = torch.randn((df_params.fmax, df_params.vmax), requires_grad=True)
+    theta_act = [p_act, gamma_act, W_act]
+    optimizer = df_params.optimizer(
+        [p_act, gamma_act, W_act], lr=df_params.learning_rate
+    )
+    if df_params.estimator == "rejection":
+        estimator = RejectionEstimator(_PSampler, df_params.mc_num_samples)
+    elif df_params.estimator == "enumerate":
+        estimator = EnumerateEstimator()
+    return optimizer, theta_exp, theta_act, estimator
+
+
+def train_for_trial(
+    optimizer: torch.optim.Optimizer,
+    theta_exp: Theta,
+    theta_act: Theta,
+    estimator: Estimator,
+    df_params: DreznerFarnumBernoulliExperimentParameters,
+) -> float:
+    optimizer.zero_grad()
+    x = (
+        torch.randn((df_params.tmax, df_params.batch_size, df_params.fmax))
+        * df_params.x_std
+    )
+    b = _PSampler(x, theta_exp)
+    events, lmax = event_sample(theta_exp[2], x, b)
+    y = _pad_events(events, lmax)
+    zhat, back = estimator(x, y, lmax, theta_act, _lP, _G)
+    (-back).backward()  # gradient descent
+    optimizer.step()
+    return zhat.item()
+
+
+@torch.no_grad()
+def sum_of_squared_errors(theta_a: Theta, theta_b: Theta) -> float:
+    sse = 0.0
+    for var_a, var_b in zip(theta_a, theta_b):
+        sse += ((var_a - var_b) ** 2).sum().item()
+    return sse
+
+
+def run(
+    df_params: DreznerFarnumBernoulliExperimentParameters,
+) -> Tuple[List[float], List[float]]:
+    optimizer, theta_exp, theta_act, estimator = initialize(df_params)
+    sses = []
+    zhats = []
+    for trial in range(1, df_params.num_trials + 1):
+        zhats.append(
+            train_for_trial(optimizer, theta_exp, theta_act, estimator, df_params)
+        )
+        sses.append(sum_of_squared_errors(theta_exp, theta_act))
+    return sses, zhats
+
+
+def _lP(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+    p = theta[0].sigmoid()
+    gamma = theta[1].sigmoid()
+    nmax = b.size(1)
+    p = p.expand(nmax)
+    gamma = gamma.expand(nmax)
+    return dependent_bernoulli_logprob(p, gamma, b)
+
+
+@torch.jit.script
+@torch.no_grad()
+def _pad_events(events: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
+    device = events.device
+    assert device == lens.device
+    nmax = lens.size(0)
+    max_len = int(lens.max().item())
+    len_mask = torch.arange(max_len, device=lens.device).unsqueeze(0) < lens.unsqueeze(
+        1
+    )
+    return torch.empty(
+        (nmax, max_len), device=events.device, dtype=lens.dtype
+    ).masked_scatter(len_mask, events)
+
+
+def _G(y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+    W = theta[2]
+    lens = b.sum(0)
+    len_mask = torch.arange(y.size(1), device=lens.device).unsqueeze(
+        0
+    ) < lens.unsqueeze(1)
+    events = y.masked_select(len_mask)
+    return event_logprob(W, x, b, events).exp()
+
+
+@torch.no_grad()
+def _PSampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
+    p = theta[0].sigmoid()
+    gamma = theta[1].sigmoid()
+    tmax, nmax = x.size(0), x.size(1)
+    p = p.expand(nmax)
+    gamma = gamma.expand(nmax)
+    return dependent_bernoulli_sample(p, gamma, tmax)
+
+
 # TESTS
 
 
 def test_dependent_bernoulli_expectation():
     torch.manual_seed(1)
     nmax, tmax = 10, 10000
-    # theta close to 1 take a long time to converge
-    p, theta = torch.rand(nmax), torch.rand(nmax) * 0.5 + 0.25
-    b = dependent_bernoulli_sample(p, theta, tmax)
+    # gamma close to 1 take a long time to converge
+    p, gamma = torch.rand(nmax), torch.rand(nmax) * 0.5 + 0.25
+    b = dependent_bernoulli_sample(p, gamma, tmax)
     p_act = b.mean(0)
     assert torch.allclose(p, p_act, atol=1e-1)
 
@@ -251,14 +397,14 @@ def test_dependent_bernoulli_logprob():
     nmax, tmax = 100, 20
     p = torch.rand(nmax)
 
-    # theta = 0 has the same probabilities as independent Bernoulli trials
+    # gamma = 0 has the same probabilities as independent Bernoulli trials
     b = dependent_bernoulli_sample(p, torch.zeros((nmax,)), tmax)
     exp_logprob = torch.distributions.Bernoulli(probs=p).log_prob(b).sum(0)
     act_logprob = dependent_bernoulli_logprob(p, torch.zeros((nmax,)), b)
     assert exp_logprob.shape == act_logprob.shape
     assert torch.allclose(exp_logprob, act_logprob)
 
-    # theta = 1 duplicates the previous Bernoulli trial's value after the first trial
+    # gamma = 1 duplicates the previous Bernoulli trial's value after the first trial
     b = dependent_bernoulli_sample(p, torch.ones((nmax,)), tmax)
     exp_logprob = torch.distributions.Bernoulli(probs=p).log_prob(b[0])
     act_logprob = dependent_bernoulli_logprob(p, torch.ones((nmax,)), b)
@@ -278,9 +424,9 @@ def test_event_sample():
     b = torch.randint(0, 2, (tmax, nmax)).float()
     W = torch.eye(vmax)
     x[..., 0] += 1.0 - b
-    y, lens = event_sample(W, x, b)
-    assert lens.sum().item() == b.sum().long().item() == y.numel()
-    freq = y.bincount() / y.numel()
+    events, lens = event_sample(W, x, b)
+    assert lens.sum().item() == b.sum().long().item() == events.numel()
+    freq = events.bincount() / events.numel()
     assert freq.numel() == vmax
     assert torch.allclose(freq, torch.tensor(1 / vmax), atol=1e-3)
 
@@ -291,16 +437,16 @@ def test_event_logprob():
     x = torch.randn((tmax, nmax, vmax))
     W = torch.rand(fmax, vmax)
     b = torch.cat([torch.ones(tmax // 2, nmax), torch.zeros((tmax + 1) // 2, nmax)])
-    y, lens = event_sample(W, x, b)
+    events, lens = event_sample(W, x, b)
     assert torch.all(lens == tmax // 2)
     exp_logprob = (
         (x[: tmax // 2] @ W)
         .log_softmax(2)
-        .gather(2, y.view(tmax // 2, nmax, 1))
+        .gather(2, events.view(tmax // 2, nmax, 1))
         .squeeze(2)
         .sum(0)
     )
-    act_logprob = event_logprob(W, x, b, y)
+    act_logprob = event_logprob(W, x, b, events)
     assert exp_logprob.size() == act_logprob.size()
     assert torch.allclose(exp_logprob, act_logprob)
 
@@ -311,10 +457,10 @@ def test_enumerate_latent_likelihoods():
     lens = torch.arange(nmax)
     tmax = (2 * lens.max()).item()
     vmax = lens.sum().item()
-    y = torch.arange(vmax)
+    events = torch.arange(vmax)
     x = torch.randn((tmax, nmax, fmax))
     W = torch.rand(fmax, vmax)
-    g, lens_ = enumerate_latent_likelihoods(W, x, y, lens)
+    g, lens_ = enumerate_latent_likelihoods(W, x, events, lens)
     assert torch.all(lens_ == tmax - lens)
     assert g.dim() == 3
     assert g.size(0) == nmax - 1
@@ -323,14 +469,44 @@ def test_enumerate_latent_likelihoods():
     for n in range(1, nmax):
         assert lens[n] == n
         x_n = x[:, n]
-        y_n, y = y[:n], y[n:]
+        events_n, events = events[:n], events[n:]
         lmax_n = n
         for ell in range(lmax_n):
-            y_n_ell = y_n[ell]
+            events_n_ell = events_n[ell]
             x_n_ell = x_n[ell : tmax - lmax_n + ell + 1]
             probs_n_ell = (x_n_ell @ W).softmax(1)
-            g_n_ell_exp = probs_n_ell[:, y_n_ell]
+            g_n_ell_exp = probs_n_ell[:, events_n_ell]
             g_n_ell_act = g[ell, : tmax - lmax_n + 1, n]
             assert g_n_ell_exp.size() == g_n_ell_act.size()
             assert torch.allclose(g_n_ell_exp, g_n_ell_act)
-    assert not y.numel()
+    assert not events.numel()
+
+
+def test_estimator_hooks():
+    torch.manual_seed(6)
+    tmax, nmax, fmax, vmax, mc = range(7, 12)
+    p = torch.randn((1,)).sigmoid().requires_grad_(True)
+    gamma = torch.randn((1,)).sigmoid().requires_grad_(True)
+    W = torch.randn((fmax, vmax), requires_grad=True)
+    theta = [p.logit(), gamma.logit(), W]
+    x = torch.randn((tmax, nmax, fmax))
+    b = dependent_bernoulli_sample(
+        theta[0].sigmoid().expand(nmax), theta[1].sigmoid().expand(nmax), tmax
+    )
+    events, lmax = event_sample(W, x, b)
+    y = _pad_events(events, lmax)
+    zhat, back = RejectionEstimator(_PSampler, mc)(x, y, lmax, theta, _lP, _G)
+    grad_zhat = torch.autograd.grad(back, theta)
+    assert not torch.allclose(zhat, torch.tensor(0.0))
+    assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
+    assert not torch.allclose(grad_zhat[1], torch.tensor(0.0))
+    assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
+
+
+def test_run():
+    torch.manual_seed(7)
+    df_params = DreznerFarnumBernoulliExperimentParameters(
+        num_trials=2, tmax=16, batch_size=32, estimator="enumerate"
+    )
+    sses, _ = run(df_params)
+    assert sses[0] > sses[1]

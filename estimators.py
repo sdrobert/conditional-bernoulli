@@ -10,15 +10,24 @@ simultaneously for batches of :math:`\ell_*` and :math:`x` as well as its deriva
 with respect to parameters the
 """
 import abc
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Tuple
 import torch
 from utils import enumerate_bernoulli_support
+
+__all__ = [
+    "Theta",
+    "PSampler",
+    "LogPDensity",
+    "GDensity",
+    "Estimator",
+    "EnumerateEstimator",
+    "RejectionEstimator",
+]
 
 Theta = List[torch.Tensor]
 PSampler = Callable[[torch.Tensor, Theta], torch.Tensor]
 LogPDensity = Callable[[torch.Tensor, torch.Tensor, Theta], torch.Tensor]
 GDensity = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, Theta], torch.Tensor]
-ZHatAndGrad = Tuple[torch.Tensor, Theta]
 
 
 class Estimator(metaclass=abc.ABCMeta):
@@ -31,7 +40,7 @@ class Estimator(metaclass=abc.ABCMeta):
         theta: Theta,
         lP: LogPDensity,
         G: GDensity,
-    ) -> ZHatAndGrad:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
 
 
@@ -44,7 +53,7 @@ class EnumerateEstimator(Estimator):
         theta: Theta,
         lP: LogPDensity,
         G: GDensity,
-    ) -> ZHatAndGrad:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         tmax, nmax = x.size(0), x.size(1)
         b, lens = enumerate_bernoulli_support(tmax, lmax)
         b = b.t()  # (tmax, smax)
@@ -54,8 +63,7 @@ class EnumerateEstimator(Estimator):
         p = lP(b, x, theta).exp()
         g = G(y, b, x, theta)
         zhat = (p * g).sum() / nmax
-        nabla_zhat = list(torch.autograd.grad(zhat, theta))
-        return zhat, nabla_zhat
+        return zhat.detach(), zhat
 
 
 class RejectionEstimator(Estimator):
@@ -76,7 +84,7 @@ class RejectionEstimator(Estimator):
         theta: Theta,
         lP: LogPDensity,
         G: GDensity,
-    ) -> ZHatAndGrad:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         tmax, nmax, fmax = x.size()
         x = x.repeat_interleave(self.num_mc_samples, 1)
         y = y.repeat_interleave(self.num_mc_samples, 0)
@@ -101,24 +109,7 @@ class RejectionEstimator(Estimator):
         lp = lP(b, x, theta)
         g = G(y, b, x, theta)
         zhat = g.sum() / total
-        nabla_zhat_g = torch.autograd.grad(zhat, theta, allow_unused=True)
-        nabla_zhat_lp = torch.autograd.grad(
-            (g.detach() * lp).sum() / total, theta, allow_unused=True
-        )
-        nabla_zhat = []
-        for a, b in zip(nabla_zhat_g, nabla_zhat_lp):
-            if a is None:
-                if b is None:
-                    raise RuntimeError(
-                        "One of the differentiated Tensors appears not to have been "
-                        "used in the graph"
-                    )
-                nabla_zhat.append(b)
-            elif b is None:
-                nabla_zhat.append(a)
-            else:
-                nabla_zhat.append(a + b)
-        return zhat, nabla_zhat
+        return zhat.detach(), zhat + (g.detach() * lp).sum() / total
 
 
 # TESTS
@@ -160,11 +151,12 @@ def test_enumerate_estimator():
         p_n = _lP(b_n, x_n, theta).exp()
         g_n = _G(y_n, b_n, x_n, theta)
         zhat_exp += (p_n * g_n).sum() / nmax
-    nabla_zhat_exp = torch.autograd.grad(zhat_exp, theta)
-    zhat_act, nabla_zhat_act = EnumerateEstimator()(x, y, lmax, theta, _lP, _G)
+    grad_zhat_exp = torch.autograd.grad(zhat_exp, theta)
+    zhat_act, back_act = EnumerateEstimator()(x, y, lmax, theta, _lP, _G)
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
     assert torch.allclose(zhat_exp, zhat_act)
-    assert torch.allclose(nabla_zhat_exp[0], nabla_zhat_act[0])
-    assert torch.allclose(nabla_zhat_exp[1], nabla_zhat_act[1])
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0])
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1])
 
 
 def test_rejection_estimator():
@@ -176,10 +168,12 @@ def test_rejection_estimator():
     theta = [logits, weights]
     y = torch.randn(nmax)
     lmax = torch.randint(tmax + 1, size=(nmax,))
-    zhat_exp, nabla_zhat_exp = EnumerateEstimator()(x, y, lmax, theta, _lP, _G)
-    zhat_act, nabla_zhat_act = RejectionEstimator(_PSampler, mc)(
-        x, y, lmax, theta, _lP, _G
-    )
+    zhat_exp, back_exp = EnumerateEstimator()(x, y, lmax, theta, _lP, _G)
+    grad_zhat_exp = torch.autograd.grad(back_exp, theta)
+    zhat_act, back_act = RejectionEstimator(_PSampler, mc)(x, y, lmax, theta, _lP, _G)
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
     assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
-    assert torch.allclose(nabla_zhat_exp[0], nabla_zhat_act[0], atol=1e-2)
-    assert torch.allclose(nabla_zhat_exp[1], nabla_zhat_act[1], atol=1e-2)
+    # N.B. in general, back_exp != back_act. Only their gradients should be roughly
+    # equal
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
