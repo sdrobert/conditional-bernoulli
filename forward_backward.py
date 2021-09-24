@@ -1,0 +1,194 @@
+"""Forward and backward functions"""
+
+import torch
+
+
+@torch.jit.script
+def extract_relevant_odds_forward(w: torch.Tensor, lmax: torch.Tensor) -> torch.Tensor:
+    r"""Transforms a tensor of odds into a shape usable for forward comps
+
+    In the forward algorithm, only a subset of odds with index :math:`t` will be
+    relevant when determining the :math:`\ell`-th event location when the total number
+    of events are fixed:
+
+    * :math:`t \geq \ell`, since it is impossible to have seen :math`\ell - 1` events
+      prior to the :math:`\ell`-th possible event location
+    * :math:`t \leq tmax - lmax + \ell`, since it is impossible to see
+      :math:`\lmax - \ell + 1` events in the future with only :math:`\lmax - \ell`
+      upcoming event locations.
+
+    This function rearranges `w` to index only the relevant odds for a given event
+    location :math:`\ell`.
+
+    Parameters
+    ----------
+    w : torch.Tensor
+        Of shape ``(binom(tmax, kmax), nmax)``. ``w[:, n]`` are the weights for batch
+        element ``n``. For ``kmax == 1``, the first index specifies the ``t``-th
+        independent odds. Otherwise, the first index is a flattened, column-major
+        multi-index of length ``kmax``, ``bart[1:kmax]``, such that
+        ``0 <= bart[0] < bart[1] < ... < bart[kmax] < tmax`` and ``w[bart, n]`` are
+        the odds of the next event location being ``bart[kmax]`` given
+        prior event locations ``bart[:kmax - 1]``.
+    lmax : torch.Tensor
+        Of shape ``(nmax,)`` where ``lmax[n]`` is the target number of events for
+        batch element ``n``.
+
+    Returns
+    -------
+    w_f : torch.Tensor
+        Of shape ``(lmax.max(), binom(tmax - lmax.min() + 1, kmax), nmax)``, where
+        ``w_[:lmax[n], :binom(tmax - lmax[n] + 1, kmax), n]`` contain the odds relevant
+        to batch index ``n``. For ``kmax == 1`` and ``t < tmax - lmax[n] + ell + 1``,
+        ``w_[ell, t, n] == w[t + ell, n]``. The values for indices
+        ``t >= tmax - lmax[n] + ell + 1`` and ``ell >= lmax[n]`` are all set to zero.
+    """
+    device = w.device
+    assert device == lmax.device
+    assert w.dim() == 2
+    tmax, nmax = w.size()
+    assert lmax.dim() == 1 and lmax.size(0) == nmax
+    # FIXME(sdrobert): I believe the logic is the same regardless of kmax, but check
+    lmax_min, lmax_max = int(lmax.min().long().item()), int(lmax.max().item())
+    if not lmax_max:
+        return torch.empty((0, tmax + 1, nmax), device=device)
+    w = torch.cat(
+        [w, torch.empty((tmax - lmax_min + lmax_max + 1, nmax), device=device)]
+    )
+    w_f = []
+    for ell in range(lmax_max):
+        w_f.append(w[ell : tmax - lmax_min + ell + 1])
+    mask = torch.arange(tmax - lmax_min + 1, device=device).unsqueeze(1) >= (
+        tmax - lmax + 1
+    )
+    mask = (torch.arange(lmax_max).unsqueeze(1) >= lmax).unsqueeze(1) | mask
+    return torch.stack(w_f, 0).masked_fill(mask, 0.0)
+
+
+# @torch.jit.script
+# def flip_relevant_odds(w_f: torch.Tensor, lmax: torch.Tensor) -> torch.Tensor:
+#     # FIXME(sdrobert): Once again, check higher-order kmax
+#     device = w_f.device
+#     assert device == lmax.device
+#     assert w_f.dim() == 3
+#     lmax_max, diffmax, nmax = w_f.size()
+#     assert lmax.dim() == 1 and lmax.size(0) == nmax
+#     if not lmax_max:
+#         return w_f
+#     tmax = diffmax + lmax.min() - 1
+#     ldim_flip = (
+#         -torch.arange(1, lmax_max + 1, device=device).unsqueeze(1) + lmax
+#     ).clamp_min_(0)
+#     diffdim_flip = (
+#         -torch.arange(1, diffmax + 1, device=device).unsqueeze(1) + tmax - lmax + 1
+#     ).clamp_min_(0)
+#     flip_idx = ((ldim_flip * diffmax).unsqueeze(1) + diffdim_flip).flatten(end_dim=1)
+#     return w_f.flatten(end_dim=1).gather(0, flip_idx).view_as(w_f)
+
+
+# @torch.jit.script
+def _R_forward_k_eq_1(w_f: torch.Tensor) -> torch.Tensor:
+    assert w_f.dim() == 3
+    w_f_shape = w_f.size()
+    r = [torch.ones(w_f_shape[1:], device=w_f.device, dtype=w_f.dtype)]
+    for ell in range(w_f_shape[0]):
+        r.append((w_f[ell] * r[ell]).cumsum(0))
+    return torch.stack(r)
+
+
+@torch.jit.script_if_tracing
+def R_forward(
+    w_f: torch.Tensor, lmax: torch.Tensor, kmax: int = 1, return_all: bool = False
+) -> torch.Tensor:
+    assert kmax == 1, "kmax > 1 not yet implemented"
+    assert w_f.dim() == 3 and lmax.dim() == 1
+    _, diffdim, nmax = w_f.size()
+    assert nmax == lmax.size(0)
+    r = _R_forward_k_eq_1(w_f)
+    if return_all:
+        return r
+    else:
+        return r[
+            lmax,
+            diffdim + lmax.min() - lmax - 1,
+            torch.arange(nmax, device=lmax.device),
+        ]
+
+
+# TESTS
+
+
+def test_extract_relevant_odds_forward():
+    tmax, nmax = 123, 45
+    lmax = torch.arange(nmax)
+    w = torch.arange(tmax * nmax).view(nmax, tmax).t()
+    w_f = extract_relevant_odds_forward(w, lmax)
+    assert w_f.size() == torch.Size([nmax - 1, tmax + 1, nmax])
+    for n in range(nmax):
+        w_f_n = w_f[..., n]
+        assert (w_f_n[:, tmax - lmax[n] + 1 :] == 0).all()
+        assert (w_f_n[lmax[n] :] == 0).all()
+        w_f_n = w_f_n[: lmax[n], : tmax - lmax[n] + 1]
+        w_f_n_exp = torch.arange(w_f_n.size(1)) + n * tmax
+        for ell in range(lmax[n].item()):
+            assert (w_f_n[ell] == (w_f_n_exp + ell)).all()
+
+
+def test_R_forward_k1():
+    torch.manual_seed(2)
+    w = torch.randn((4, 3), requires_grad=True)
+    lmax = torch.tensor([3, 1, 2])
+    g = torch.randn((3, 4, 3), requires_grad=True)
+    r_exp = torch.stack(
+        [
+            w[0, 0]
+            * g[0, 0, 0]
+            * (
+                w[1, 0] * g[1, 1, 0] * (w[2, 0] * g[2, 2, 0] + w[3, 0] * g[2, 3, 0])
+                + w[2, 0] * g[1, 2, 0] * w[3, 0] * g[2, 3, 0]
+            )
+            + w[1, 0] * g[0, 1, 0] * w[2, 0] * g[1, 2, 0] * w[3, 0] * g[2, 3, 0],
+            w[0, 1] * g[0, 0, 1]
+            + w[1, 1] * g[0, 1, 1]
+            + w[2, 1] * g[0, 2, 1]
+            + w[3, 1] * g[0, 3, 1],
+            w[0, 2]
+            * g[0, 0, 2]
+            * (w[1, 2] * g[1, 1, 2] + w[2, 2] * g[1, 2, 2] + w[3, 2] * g[1, 3, 2])
+            + w[1, 2] * g[0, 1, 2] * (w[2, 2] * g[1, 2, 2] + w[3, 2] * g[1, 3, 2])
+            + w[2, 2] * g[0, 2, 2] * w[3, 2] * g[1, 3, 2],
+        ]
+    )
+    grad_w_exp, grad_g_exp = torch.autograd.grad(r_exp, [w, g], torch.ones_like(r_exp))
+    g_f = torch.stack(
+        [
+            g[0],
+            torch.cat([g[1, 1:], torch.empty_like(g[1, :1])]),
+            torch.cat([g[2, 2:], torch.empty_like(g[2, :2])]),
+        ]
+    )
+    w_f = extract_relevant_odds_forward(w, lmax) * g_f
+    r_act = R_forward(w_f, lmax)
+    assert r_exp.shape == r_act.shape
+    assert torch.allclose(r_exp, r_act)
+    grad_w_act, grad_g_act = torch.autograd.grad(r_act, [w, g], torch.ones_like(r_act))
+    assert torch.allclose(grad_w_exp, grad_w_act)
+    assert torch.allclose(grad_g_exp, grad_g_act)
+
+
+# def test_flip_relevant_odds():
+#     torch.manual_seed(2)
+#     tmax, nmax = 123, 456
+#     lmax = torch.randint(0, tmax + 1, (nmax,))
+#     w = torch.arange(tmax * nmax).view(nmax, tmax).t()
+#     w_f = extract_relevant_odds_forward(w, lmax)
+#     w_b_act = flip_relevant_odds(w_f, lmax)
+#     for w_b_n_act, w_n, lmax_n in zip(
+#         w_b_act.transpose(0, 2).transpose(1, 2), w.t(), lmax
+#     ):
+#         w_b_n_exp = extract_relevant_odds_forward(
+#             w_n.flip(0).unsqueeze(1), lmax_n.view(1)
+#         ).squeeze(2)
+#         w_b_n_act = w_b_n_act[:lmax_n, : tmax - lmax_n + 1]
+#         assert w_b_n_exp.size() == w_b_n_act.size()
+#         assert (w_b_n_exp == w_b_n_act).all()
