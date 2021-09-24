@@ -4,6 +4,13 @@ from estimators import EnumerateEstimator, Estimator, RejectionEstimator, Theta
 from typing import List, Tuple
 import torch
 import param
+import argparse
+import sys
+import pydrobert.param.argparse as pargparse
+from pydrobert.param.serialization import DefaultObjectSelectorSerializer
+from tqdm import tqdm
+import pandas as pd
+import numpy as np
 
 
 @torch.jit.script
@@ -246,7 +253,7 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     )
     num_trials = param.Integer(100, bounds=(1, None))
     batch_size = param.Integer(16, bounds=(1, None))
-    tmax = param.Integer(1024, bounds=(1, None))
+    tmax = param.Integer(128, bounds=(1, None))
     fmax = param.Integer(16, bounds=(1, None))
     vmax = param.Integer(16, bounds=(1, None))
     p = param.Magnitude(None)
@@ -258,7 +265,7 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     )
-    mc_num_samples = param.Integer(1024, bounds=(1, None))
+    num_mc_samples = param.Integer(2 ** 14, bounds=(1, None))
 
 
 def initialize(
@@ -286,7 +293,7 @@ def initialize(
         [p_act, gamma_act, W_act], lr=df_params.learning_rate
     )
     if df_params.estimator == "rejection":
-        estimator = RejectionEstimator(_PSampler, df_params.mc_num_samples)
+        estimator = RejectionEstimator(_PSampler, df_params.num_mc_samples)
     elif df_params.estimator == "enumerate":
         estimator = EnumerateEstimator()
     return optimizer, theta_exp, theta_act, estimator
@@ -313,26 +320,83 @@ def train_for_trial(
     return zhat.item()
 
 
-@torch.no_grad()
-def sum_of_squared_errors(theta_a: Theta, theta_b: Theta) -> float:
-    sse = 0.0
-    for var_a, var_b in zip(theta_a, theta_b):
-        sse += ((var_a - var_b) ** 2).sum().item()
-    return sse
-
-
-def run(
+def train(
     df_params: DreznerFarnumBernoulliExperimentParameters,
-) -> Tuple[List[float], List[float]]:
+) -> Tuple[List[float], List[float], List[float], List[float]]:
     optimizer, theta_exp, theta_act, estimator = initialize(df_params)
-    sses = []
     zhats = []
-    for trial in range(1, df_params.num_trials + 1):
+    sses_p = []
+    sses_gamma = []
+    sses_W = []
+    p_exp = theta_exp[0].sigmoid().item()
+    gamma_exp = theta_exp[1].sigmoid().item()
+    for _ in tqdm(range(df_params.num_trials)):
         zhats.append(
             train_for_trial(optimizer, theta_exp, theta_act, estimator, df_params)
         )
-        sses.append(sum_of_squared_errors(theta_exp, theta_act))
-    return sses, zhats
+        sses_p.append((theta_act[0].sigmoid().item() - p_exp) ** 2)
+        sses_gamma.append((theta_act[1].sigmoid().item() - gamma_exp) ** 2)
+        sses_W.append(((theta_exp[2] - theta_act[2]) ** 2).sum().item())
+    return zhats, sses_p, sses_gamma, sses_W
+
+
+def main(args=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run Drezner & Farnum dependent Bernoulli experiments"
+    )
+    pargparse.add_parameterized_print_group(
+        parser, DreznerFarnumBernoulliExperimentParameters
+    )
+    pargparse.add_parameterized_read_group(
+        parser, type=DreznerFarnumBernoulliExperimentParameters
+    )
+    parser.add_argument(
+        "--seed",
+        default=None,
+        type=int,
+        help="If set, overrides the seed in the config file (if any)",
+    )
+    parser.add_argument(
+        "--csv",
+        default=sys.stdout,
+        type=argparse.FileType("w"),
+        help="Where to store (csv) results to. Default is stdout",
+    )
+    options = parser.parse_args()
+    if options.seed is not None:
+        options.params.seed = options.seed
+    zhats, sses_p, sses_gamma, sses_W = train(options.params)
+    sses_p = pd.Series(sses_p)
+    sses_gamma = pd.Series(sses_gamma)
+    sses_W = pd.Series(sses_W)
+    zhats = pd.Series(zhats)
+    trials = pd.Series(np.arange(1, options.params.num_trials + 1))
+    df = pd.DataFrame(
+        {
+            "Seed": np.nan if options.params.seed is None else options.params.seed,
+            "Total Number of Trials": options.params.num_trials,
+            "Batch Size": options.params.batch_size,
+            "x Sequence Length": options.params.tmax,
+            "x Vector Length": options.params.fmax,
+            "p": np.nan if options.params.p is None else options.params.p,
+            "gamma": np.nan if options.params.gamma is None else options.params.gamma,
+            "x Standard Deviation": options.params.x_std,
+            "W Standard Deviation": options.params.W_std,
+            "Learning Rate": options.params.learning_rate,
+            "Estimator": options.params.estimator,
+            "Optimizer": DefaultObjectSelectorSerializer().serialize(
+                "optimizer", options.params
+            ),
+            "Number of Monte Carlo Samples": options.params.num_mc_samples,
+            "Trial": trials,
+            "SSE p": sses_p,
+            "SSE gamma": sses_gamma,
+            "SSE W": sses_W,
+            "z Batch Estimate": zhats,
+        }
+    )
+    df.to_csv(options.csv, header=True, index=False)
+    return 0
 
 
 def _lP(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
@@ -378,6 +442,9 @@ def _PSampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
     gamma = gamma.expand(nmax)
     return dependent_bernoulli_sample(p, gamma, tmax)
 
+
+if __name__ == "__main__":
+    sys.exit(main())
 
 # TESTS
 
@@ -503,10 +570,10 @@ def test_estimator_hooks():
     assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
 
 
-def test_run():
+def test_train():
     torch.manual_seed(7)
     df_params = DreznerFarnumBernoulliExperimentParameters(
         num_trials=2, tmax=16, batch_size=32, estimator="enumerate"
     )
-    sses, _ = run(df_params)
-    assert sses[0] > sses[1]
+    sses_p = train(df_params)[1]
+    assert sses_p[0] > sses_p[1]
