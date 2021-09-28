@@ -1,264 +1,113 @@
+"""Distributions, in particular the Conditional Bernoulli"""
+
+from forward_backward import R_forward, extract_relevant_odds_forward
+from typing import Optional, Union
 import torch
 
-from numbers import Number
+import torch.distributions.constraints as constraints
+from torch.distributions.utils import lazy_property
 
 
-def generalized_binomial_coefficient(logits, k_max, intermediate=None):
-    r'''Calculate the generalized binomial coefficient for log-odds
-
-    For a set of odds :math:`w_t \in [0, 1]` and :math:`t \in [1, T]`, the
-    generalized binomial coefficient for some number of choices :math:`k` is
-    defined as
-
-    .. math::
-
-        C(k, w) = \sum_{\{S \subseteq T: |S| = k\}} \prod_{t \in S} w_t
-
-    This function computes :math:`log C(k, w)` using
-    :math:`\text{logits}_t = \log w_t`. `logits` is a float vector of shape
-    ``(T,)`` or a matrix of shape ``(T, N)``, where ``T`` is the choice
-    dimension and ``N`` is the batch dimension. `k_max` is an integer of the
-    maximum `k` value to compute.
-
-    If `intermediate` is :obj:`None` (the default), this function returns `lC`,
-    which is either a vector of shape ``(k_max + 1,)`` or a matrix of shape
-    ``(k_max + 1, N)``, depending on whether `logits` was batched.
-    :math:`lC[k] = \log C(k, w)`.
-
-    If `intermediate` is either ``"forward"`` or ``"reverse"``, `Cl` is a
-    tensor of shape ``(T + 1, k.max() + 1[, N])`` that stores all intermediate
-    values used in the computation. If ``"forward"``,
-    :math:`lC[t, k'] = \log C(k', w_{\leq t})`. If ``"reverse"``, the mapping
-    :math:`w_t \mapsto \tilde{w}_{T - t + 1}` is first applied before the
-    forward procedure.
-
-    Parameters
-    ----------
-    logits : torch.tensor
-    k_max : int
-    intermediate : {None, "forward", "reverse"}
-
-    Returns
-    -------
-    lC : torch.tensor
-    '''
-    # Implementation note: this is the "direct" method from
-    # Chen and Liu, 1997. "Statistical applications of the Poisson-Binomial and
-    # Conditional Bernoulli distributions"
-    # TODO: look at matrix multiplication version from "Improving the
-    # efficiency of the forward-backward algorithm..."
-
-    if logits.dim() == 1:
-        flatten = True
-        logits = logits.unsqueeze(-1)
-    else:
-        flatten = False
-    if logits.dim() != 2:
-        raise RuntimeError('logits must be one or two dimensional')
-    T, N = logits.shape
-
-    if k_max < 0:
-        raise RuntimeError('k_max must be >= 0 (note: log C(<0, *) = -inf)')
-
-    if intermediate not in {None, "forward", "reverse"}:
-        raise RuntimeError(
-            "intermediate must be one of None, 'forward', or 'reverse'")
-
-    if not k_max or not T:
-        Cl = torch.full(
-            (1, N), 0 if not k_max else -float('inf'),
-            device=logits.device, dtype=logits.dtype)
-        if intermediate:
-            Cl = Cl.expand(T + 1, 1, N)
-        if flatten:
-            Cl = Cl.squeeze(1)
-        return Cl
-
-    lC_first = torch.zeros(1, N, device=logits.device, dtype=logits.dtype)
-    lC_rest = torch.full(
-        (k_max, N), -float('inf'), device=logits.device, dtype=logits.dtype)
-    if intermediate:
-        hist = [torch.cat([lC_first, lC_rest])]
-
-    logits = logits.unsqueeze(1)
-    for t in range(T):
-        if intermediate == 'reverse':
-            t = T - t - 1
-
-        x = torch.cat([lC_first, lC_rest[:-1]], 0)
-        # if x is infinite or logits is infinite, we don't want a gradient
-        x = torch.where(
-            torch.isfinite(x + logits[t]),
-            x + logits[t],
-            x.detach() + logits[t].detach()
-        )
-        lC_rest = torch.logsumexp(torch.stack([lC_rest, x], -1), -1)
-        del x
-
-        if intermediate:
-            hist.append(torch.cat([lC_first, lC_rest]))
-
-    if intermediate:
-        Cl = torch.stack(hist, 0)
-    else:
-        Cl = torch.cat([lC_first, lC_rest])
-    if flatten:
-        Cl = Cl.squeeze(-1)
-    return Cl
+def poisson_binomial(w: torch.Tensor) -> torch.Tensor:
+    return torch.bernoulli(w / (1 + w)).sum(-1)
 
 
-def poisson_binomial(probs):
-    '''Sample a Poisson Binomial
-
-    The Poisson Binomial is a generalization of the Binomial where the
-    individual Bernoulli trials need not have equal probability.
-
-    Parameters
-    ----------
-    probs : torch.Tensor
-        A float tensor containing the probability of each Bernoulli trial.
-        Of shape ``(T, *)``, where ``T`` is the trial dimension (is
-        accumulated).
-
-    Returns
-    -------
-    b : torch.Tensor
-        A float tensor of shape ``(*)`` containing the sum of
-        the high Bernoulli trials (between :math:`[0, T]` inclusive).
-
-    See Also
-    --------
-    PoissonBinomial
-    '''
-    with torch.no_grad():
-        if not probs.dim():
-            raise RuntimeError('probs must be at least one dimensional')
-        b = torch.bernoulli(probs)
-        b = b.sum(-1)
-
-    return b
-
-
-class PoissonBinomial(torch.distributions.Binomial):
-    r'''A Binomial distribution with possibly unequal probabilities per trial
-
-    The Poisson-Binomial distribution is a generalization of the Binomial
-    distribution to Bernoulli trials with (possibly) unequal probabilities.
-    The probability of :math:`k` trials being high is
-
-    .. math::
-
-        P(K=k) = \frac{C(k, w)}{\prod_t (1 + w_t)}
-
-    where :math:`w_t = \text{probs}_t / (1 - \text{probs}_t) =
-    \exp(\text{logits}_t)` are the odds of the :math:`t`-th Bernoulli trial.
-
-    Either `probs` or `logits` must be specified, but not both. Each has a
-    shape ``(*, T)``, where ``T`` is the dimension along which the trials
-    will be summed.
-
-    Parameters
-    ----------
-    total_count : None or int or torch.Tensor, optional
-        Specifies some number between :math:`[0, T]`` inclusive such that the
-        values indexed past this value along the ``T`` dimension will be
-        considered padding (right-padding). If unspecified, it will be assumed
-        to be the full length ``T``. Otherwise, it must broadcast with ``(*)``
-    probs : torch.Tensor, optional
-    logits : torch.Tensor, optional
-    '''
+class PoissonBinomial(torch.distributions.Distribution):
 
     arg_constraints = {
-        'total_count': torch.distributions.constraints.dependent,
-        'probs': torch.distributions.constraints.unit_interval,
-        'logits': torch.distributions.constraints.real,
+        "total_count": constraints.nonnegative_integer,
+        "probs": constraints.unit_interval,
+        "logits": constraints.real,
+        "odds": constraints.greater_than_eq(0.0),
     }
 
     def __init__(
-            self, total_count=None, probs=None, logits=None,
-            validate_args=None):
-        # modified version of torch.distributions.Binomial. Make sure to handle
-        # license!
-        if (probs is None) == (logits is None):
-            raise ValueError(
-                "Either `probs` or `logits` must be specified, but not both")
-        self._param = probs if logits is None else logits
-        is_scalar = isinstance(self._param, Number) or not self._param.dim()
-        self._T = 1 if is_scalar else self._param.shape[-1]
+        self,
+        total_count: Union[torch.Tensor, int, None] = None,
+        probs: Optional[torch.Tensor] = None,
+        logits: Optional[torch.Tensor] = None,
+        odds: Optional[torch.Tensor] = None,
+        validate_args=None,
+    ):
+        non_none = {x for x in (probs, logits, odds) if x is not None}
+        if len(non_none) != 1:
+            raise ValueError("Exactly one of probs, logits, or must be non-None.")
+        param = non_none.pop()
+        if param.dim() < 1:
+            raise ValueError("parameter must be at least 1-dimensional")
+        param_size = param.size()
+        batch_size = param_size[:-1]
+        tmax = param_size[-1]
         if total_count is None:
-            total_count = self._T
-            do_mask = False
+            mask = None
         else:
-            do_mask = True
-        if is_scalar:
-            self.total_count, self._param = (
-                torch.distributions.utils.broadcast_all(
-                    total_count, self._param))
-            batch_shape = torch.Size()
+            self.total_count = (
+                torch.as_tensor(total_count).expand(batch_size).type_as(param)
+            )
+            mask = self.total_count.unsqueeze(-1) <= torch.arange(tmax)
+        if probs is not None:
+            self.probs = self._param = (
+                probs if mask is None else probs.masked_fill(mask, 0.0)
+            )
+        elif logits is not None:
+            self.logits = self._param = (
+                logits if mask is None else logits.masked_fill(mask, -float("inf"))
+            )
         else:
-            self.total_count, param_wo_T = (
-                torch.distributions.utils.broadcast_all(
-                    total_count, self._param[..., 0]))
-            _, self._param = (
-                torch.distributions.utils.broadcast_all(
-                    param_wo_T.unsqueeze(-1), self._param))
-            batch_shape = param_wo_T.shape
-        self.total_count = self.total_count.type_as(self._param)
-        # we get rid of padded values right away so we never have to
-        # worry about counts > total_count. This'll stop any gradients, too
-        if do_mask:
-            mask = self._padding_mask()
-        if probs is None:
-            if do_mask:
-                self._param = self._param.masked_fill(mask, -float('inf'))
-            self.logits = self._param
-        else:
-            if do_mask:
-                self._param = self._param.masked_fill(mask, 0.)
-            self.probs = self._param
-        super(torch.distributions.Binomial, self).__init__(
-            batch_shape, validate_args=validate_args)
-        if (
-                self._validate_args and
-                not self.total_count.le(self._T).all() and
-                not self.total_count.ge(0)):
-            raise ValueError(
-                'total_count must be <= first dimension of probs/logits and '
-                '>= 0')
+            self.odds = self._param = (
+                odds if mask is None else odds.masked_fill(mask, 0.0)
+            )
+        super(PoissonBinomial, self).__init__(batch_size, validate_args=validate_args)
 
-    def _padding_mask(self):
-        mask = torch.arange(
-                self._T, dtype=self._param.dtype, device=self._param.device)
-        mask = self.total_count.unsqueeze(-1) <= mask
-        return mask
+    @lazy_property
+    def total_count(self):
+        return torch.full(self.batch_shape, self.odds.size(-1)).type_as(self._param)
 
-    def expand(self, batch_shape, _instance=None):
-        new = self._get_checked_instance(PoissonBinomial, _instance)
-        batch_shape = torch.Size(batch_shape)
-        param_shape = batch_shape + torch.Size((self._T,))
-        all_log_probs_shape = batch_shape + torch.Size((self._T + 1,))
-        if 'probs' in self.__dict__:
-            new.probs = self.probs.expand(param_shape)
-            new._param = self._param
-        if 'logits' in self.__dict__:
-            new.logits = self.logits.expand(param_shape)
-            new._param = self._param
-        if 'log_pmf' in self.__dict__:
-            new.log_pmf = self.log_pmf.expand(all_log_probs_shape)
-        new.total_count = self.total_count.expand(batch_shape)
-        new._T = self._T
-        super(torch.distributions.Binomial, new).__init__(
-            batch_shape, validate_args=False)
-        new._validate_args = self._validate_args
-        return new
+    @constraints.dependent_property(is_discrete=True, event_dim=0)
+    def support(self):
+        return constraints.integer_interval(0, self.total_count)
 
-    @torch.distributions.utils.lazy_property
+    # probs <= odds <= logits <= probs
+
+    @lazy_property
+    def probs(self):
+        return self.odds / (1 + self.odds)
+
+    @lazy_property
+    def odds(self):
+        return self.logits.exp()
+
+    @lazy_property
     def logits(self):
-        # clamp "real" probabilities, but pad those greater than total_count
-        logits = torch.distributions.utils.probs_to_logits(self._param, True)
-        mask = self._padding_mask()
-        logits.masked_fill_(mask, -float('inf'))
-        return logits
+        return self.probs.logit()
+
+    @lazy_property
+    def log_r(self):
+        odds, total_count = self.odds, self.total_count
+        batch_shape = self.batch_shape
+        batch_dims = len(batch_shape)
+        if not batch_dims:
+            odds, total_count = odds.unqueeze(0), total_count.view(1)
+        else:
+            odds, total_count = (
+                odds.flatten(end_dim=batch_dims - 1),
+                total_count.flatten(),
+            )
+        # unfortunately, the sums can get pretty big. This leads to NaNs in the
+        # backward pass. We go straight into log here
+        log_odds = odds.log()
+        r_ell = torch.zeros_like(odds)
+        r = [r_ell[:, -1]]
+        for _ in range(odds.size(1)):
+            r_ell = (log_odds + r_ell).logcumsumexp(1)
+            r.append(r_ell[:, -1])
+            log_odds, r_ell = log_odds[:, 1:], r_ell[:, :-1]
+        r = torch.stack(r, 1)
+        log_r = r.log_softmax(1)
+        if not batch_dims:
+            return log_r.flatten()
+        else:
+            return log_r.expand(batch_shape + log_r.size()[1:])
 
     @property
     def mean(self):
@@ -266,278 +115,480 @@ class PoissonBinomial(torch.distributions.Binomial):
 
     @property
     def variance(self):
-        return (self.probs * (1 - self.probs)).sum(-1)
+        return (self.probs * (1.0 - self.probs)).sum(-1)
 
-    @torch.distributions.utils.lazy_property
-    def log_pmf(self):
-        # unfortunately, the generalized binomial coefficient goes T first,
-        # whereas we go T last. We need the latter so that we can expand
-        # without copying, so we do a bunch of transposition
-        logits = self.logits
-        if logits.dim() > 1:
-            logits = logits.flatten(end_dim=-2).T
-        lC = generalized_binomial_coefficient(logits, self._T)
-        return lC.T.log_softmax(-1).view(*self._batch_shape, self._T + 1)
+    @property
+    def param_shape(self):
+        return self._param.size()
+
+    def expand(self, batch_shape, _instance=None):
+        # FIXME(sdrobert): I dunnae ken to do this without using the
+        # method _get_checked_instance and _validate_args
+        new = self._get_checked_instance(PoissonBinomial, _instance)
+        batch_shape = list(batch_shape)
+        if "total_count" in self.__dict__:
+            new.total_count = self.total_count.expand(batch_shape)
+        if "probs" in self.__dict__:
+            new.probs = self.probs.expand(batch_shape + [self.probs.size(-1)])
+            new._param = new.probs
+        if "logits" in self.__dict__:
+            new.logits = self.logits.expand(batch_shape + [self.logits.size(-1)])
+            new._param = new.logits
+        if "odds" in self.__dict__:
+            new.odds = self.odds.expand(batch_shape + [self.odds.size(-1)])
+            new._param = new.odds
+        if "log_r" in self.__dict__:
+            new.log_r = self.r.expand(batch_shape + [self.log_r.size(-1)])
+        super(PoissonBinomial, new).__init__(
+            torch.Size(batch_shape), validate_args=False
+        )
+        new._validate_args = self._validate_args
+        return new
 
     def sample(self, sample_shape=torch.Size()):
+        shape = self._extended_shape(sample_shape)
+        odds = self.odds
+        odds = odds.expand(shape + odds.size()[-1:])
         with torch.no_grad():
-            shape = self._extended_shape(sample_shape) + torch.Size((self._T,))
-            probs = self.probs.expand(shape)
-            return poisson_binomial(probs)
+            return poisson_binomial(odds)
 
-    def log_prob(self, value):
-        # from torch.distributions.Categorical. Make sure to handle license!
+    def log_prob(self, value: torch.Tensor):
         if self._validate_args:
             self._validate_sample(value)
-        value = value.long().unsqueeze(-1)
-        value, log_pmf = torch.broadcast_tensors(value, self.log_pmf)
-        value = value[..., :1]
-        return log_pmf.gather(-1, value).squeeze(-1)
+        shape = value.shape
+        log_r = self.log_r
+        log_r = log_r.expand(shape + log_r.size()[-1:])
+        return log_r.gather(-1, value.long().unsqueeze(-1)).squeeze(-1)
 
 
-class ConditionalBernoulli(torch.distributions.Bernoulli):
-    r'''Bernoulli trials conditioned on the total number of emitting trials
+@torch.jit.script_if_tracing
+@torch.no_grad()
+def extended_conditional_bernoulli(
+    w_f: torch.Tensor,
+    lmax: torch.Tensor,
+    kmax: int = 1,
+    r_f: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert kmax == 1, "kmax > 1 not yet implemented"
+    device = w_f.device
+    if w_f.dim() == 2:
+        # the user passed regular odds instead of the relevant odds forward.
+        nmax, tmax = w_f.size()
+        # call checks lmax size
+        w_f = extract_relevant_odds_forward(w_f, lmax, True)
+    else:
+        _, nmax, diffmax = w_f.size()
+        tmax = diffmax + int(lmax.min()) - 1
+        assert device == lmax.device and lmax.dim() == 1 and lmax.size(0) == nmax
+    if r_f is None:
+        r_f = R_forward(w_f, lmax, kmax, True, True)
+    else:
+        assert (
+            r_f.dim() == 3
+            and r_f.size(0) == w_f.size(0) + 1
+            and r_f.size(1) == nmax
+            and r_f.size(2) == diffmax
+        )
+    assert r_f.dim() == 3
+    return _extended_conditional_bernoulli_k_eq_1(w_f, lmax.long(), r_f, tmax)
 
-    The Conditional Bernoulli distribution samples Bernoulli trials under the
-    condition that the total number of emitting (value 1) trials equals some
-    fixed value. Letting :math:`L = \text{condition\_count}`,
-    :math:`w_t = \exp(\text{logits}_t) =
-    \text{probs}_t / (1 - \text{probs}_t)` and :math:`A \subseteq [1, T],
-    |A| = L` be a set of emitting Bernoulli trials, the probability of
-    :math:`A` given :math:`L` is:
 
-    .. math::
+@torch.jit.script
+@torch.no_grad()
+def _extended_conditional_bernoulli_k_eq_1(
+    w_f: torch.Tensor, lmax: torch.Tensor, r_f: torch.Tensor, tmax: int
+) -> torch.Tensor:
+    device = w_f.device
+    lmax_max, nmax, diffmax = w_f.size()
+    remainder = lmax
+    nrange = torch.arange(nmax)
+    drange = torch.arange(diffmax)
+    lmax_max = r_f.size(0) - 1
+    tau_ellp1 = torch.full((nmax, 1), diffmax)
+    b = torch.zeros((nmax, tmax), device=device)
+    for _ in range(lmax_max):
+        valid_ell = remainder > 0
+        mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
+        weights_ell = (
+            w_f[remainder - 1, nrange] * r_f[remainder - 1, nrange]
+        ).masked_fill(mask_ell, 0)
+        tau_ell = torch.multinomial(weights_ell + (~valid_ell).unsqueeze(1), 1, True)
+        remainder = (remainder - 1).clamp_min_(0)
+        b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
+        tau_ellp1 = tau_ell
+    return b[:, :tmax]
 
-        P(A|L) = \frac{\prod_{a \in A} w_a}{C(L, w)}
 
-    where :math:`C(L, w)` is the generalized binomial coefficient.
-
-    Either `probs` or `logits` must be specified, but not both. Each has a
-    shape ``(*, T)``, where ``T`` is the dimension along which the trials
-    are selected to match `condition_count`. `condition_count` must broadcast
-    with ``(*)``.
-
-    Parameters
-    ----------
-    condition_count : int or torch.Tensor
-    total_count : None or int or torch.Tensor, optional
-        Specifies some number between :math:`[\text{condition\_count}, T]``
-        inclusive such that the values indexed past this value along the ``T``
-        dimension will be considered padding (right-padding). If unspecified,
-        it will be assumed to be the full length ``T``. Otherwise, it must
-        broadcast with ``(*)``
-    probs : torch.Tensor, optional
-    logits : torch.Tensor, optional
-    '''
+class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
     arg_constraints = {
-        'condition_count': torch.distributions.constraints.dependent,
-        'total_count': torch.distributions.constraints.dependent,
-        'probs': torch.distributions.constraints.unit_interval,
-        'logits': torch.distributions.constraints.real_vector,
+        "total_count": constraints.nonnegative_integer,
+        "given_count": constraints.nonnegative_integer,
+        "probs": constraints.unit_interval,
+        "logits": constraints.real,
+        "odds": constraints.greater_than_eq(0.0),
     }
+    _mean_carrier_measure = 0
 
-    class _SampleConstraint(torch.distributions.constraints.Constraint):
-        '''Ensures samples could be from this Conditional Bernoulli'''
+    class SupportConstraint(constraints.Constraint):
+        is_discrete = True
+        event_dim = 1
 
-        def __init__(self, total_count, condition_count):
-            self.total_count = total_count
-            self.condition_count = condition_count
-
-        def check(self, value):
-            is_bool_mask = (value == 0) | (value == 1)
-            counts = value * torch.arange(value.shape[-1], device=value.device)
-            total_count = self.total_count.expand(counts.shape[:-1])
-            total_count_mask = total_count.unsqueeze(-1) > counts
-            val_sum = value.sum(-1)
-            condition_count = self.condition_count.expand_as(val_sum)
-            cond_count_mask = (val_sum == condition_count)
-            return (
-                is_bool_mask & total_count_mask & cond_count_mask.unsqueeze(-1)
+        def __init__(
+            self, total_count: torch.Tensor, given_count: torch.Tensor, tmax: int
+        ) -> None:
+            self.given_count = given_count
+            self.total_count_mask = total_count.unsqueeze(-1) >= torch.arange(
+                tmax, device=total_count.device
             )
+            super().__init__()
 
-    sample_constraint = _SampleConstraint
+        def check(self, value: torch.Tensor) -> torch.Tensor:
+            is_bool = ((value == 0) | (value == 1)).all(-1)
+            isnt_gte_tc = (self.total_count_mask.expand_as(value) * value).sum(-1) != 0
+            value_sum = value.sum(-1)
+            matches_count = value_sum == self.given_count.expand_as(value_sum)
+            return is_bool & isnt_gte_tc & matches_count
 
     def __init__(
-            self, condition_count, total_count=None, probs=None, logits=None,
-            validate_args=None):
-        if (probs is None) == (logits is None):
-            raise ValueError(
-                "Either `probs` or `logits` must be specified, but not both")
-        self._param = probs if logits is None else logits
-        is_scalar = isinstance(self._param, Number) or not self._param.dim()
-        self._T = 1 if is_scalar else self._param.shape[-1]
-        event_shape = torch.Size((self._T,))
+        self,
+        given_count: Union[torch.Tensor, int],
+        probs: Optional[torch.Tensor] = None,
+        logits: Optional[torch.Tensor] = None,
+        odds: Optional[torch.Tensor] = None,
+        total_count: Union[torch.Tensor, int, None] = None,
+        validate_args=None,
+    ):
+        non_none = {x for x in (probs, logits, odds) if x is not None}
+        if len(non_none) != 1:
+            raise ValueError("Exactly one of probs, logits, or must be non-None.")
+        param = non_none.pop()
+        if param.dim() < 1:
+            raise ValueError("parameter must be at least 1-dimensional")
+        param_size = param.size()
+        batch_size = param_size[:-1]
+        tmax = param_size[-1]
         if total_count is None:
-            total_count = self._T
-            do_mask = False
+            mask = None
         else:
-            do_mask = True
-        if is_scalar:
-            self.total_count, self.condition_count, self._param = (
-                torch.distributions.utils.broadcast_all(
-                    total_count, condition_count, self._param))
-            batch_shape = torch.Size()
+            self.total_count = (
+                torch.as_tensor(total_count).expand(batch_size).type_as(param)
+            )
+            mask = self.total_count.unsqueeze(-1) <= torch.arange(tmax)
+        if probs is not None:
+            self.probs = self._param = (
+                probs if mask is None else probs.masked_fill(mask, 0.0)
+            )
+        elif logits is not None:
+            self.logits = self._param = (
+                logits if mask is None else logits.masked_fill(mask, -float("inf"))
+            )
         else:
-            self.total_count, self.condition_count, param_wo_T = (
-                torch.distributions.utils.broadcast_all(
-                    total_count, condition_count, self._param[..., 0]))
-            _, self._param = (
-                torch.distributions.utils.broadcast_all(
-                    param_wo_T.unsqueeze(-1), self._param))
-            batch_shape = param_wo_T.shape
-        self.total_count = self.total_count.type_as(self._param)
-        self.condition_count = self.condition_count.type_as(self._param)
-        # we get rid of padded values right away so we never have to
-        # worry about counts > total_count. This'll stop any gradients, too
-        if probs is None:
-            if do_mask:
-                self._param = self._param.masked_fill(
-                    self._padding_mask(), -float('inf'))
-            self.logits = self._param
-        else:
-            if do_mask:
-                self._param = self._param.masked_fill(
-                    self._padding_mask(), 0.)
-            self.probs = self._param
-        self._L = int(self.condition_count.max().item())
-        super(torch.distributions.Bernoulli, self).__init__(
-            batch_shape=batch_shape, event_shape=event_shape,
-            validate_args=validate_args)
-        if (
-                self._validate_args and
-                (
-                    self.total_count.gt(self._T).any() or
-                    self.total_count.lt(self.condition_count).any())):
-            raise ValueError(
-                'total_count must be <= first dimension of probs/logits and '
-                '>= condition_count')
+            self.odds = self._param = (
+                odds if mask is None else odds.masked_fill(mask, 0.0)
+            )
+        self.given_count = (
+            torch.as_tensor(given_count).expand(batch_size).type_as(param)
+        )
+        super(ConditionalBernoulli, self).__init__(
+            batch_size, param_size[-1:], validate_args
+        )
 
-    def _padding_mask(self):
-        mask = torch.arange(
-                self._T, dtype=self._param.dtype, device=self._param.device)
-        mask = self.total_count.unsqueeze(-1) <= mask
-        return mask
+    @lazy_property
+    def total_count(self):
+        return torch.full(self.batch_shape, self.odds.size(-1)).type_as(self._param)
 
-    @torch.distributions.constraints.dependent_property
-    def support(self):
-        return self.sample_constraint(self.total_count, self.condition_count)
+    @constraints.dependent_property
+    def support(self) -> torch.Tensor:
+        return self.SupportConstraint(
+            self.total_count, self.given_count, self._event_shape[0]
+        )
 
-    @torch.distributions.utils.lazy_property
+    @lazy_property
+    def probs(self):
+        return self.odds / (1 + self.odds)
+
+    @lazy_property
+    def odds(self):
+        return self.logits.exp()
+
+    @lazy_property
     def logits(self):
-        # clamp "real" probabilities, but pad those greater than total_count
-        logits = torch.distributions.utils.probs_to_logits(self._param, True)
-        logits.masked_fill_(self._padding_mask(), -float('inf'))
-        return logits
+        return self.probs.logit()
 
-    @torch.distributions.utils.lazy_property
-    def lC_reverse(self):
-        # as with poisson_binomial, we need to push the T dimension last. We
-        # have to do the same for the L dimension.
-        logits = self.logits
-        if logits.dim() > 1:
-            logits = logits.flatten(end_dim=-2).T
-        lC = generalized_binomial_coefficient(logits, self._L, "reverse")
-        lC = lC.flatten(end_dim=1).T  # (N, (T + 1) * (L + 1))
-        return lC.reshape(*self._batch_shape, self._T + 1, self._L + 1)
+    @lazy_property
+    def odds_f(self):
+        odds, given_count = self.odds, self.given_count
+        batch_shape = list(self.batch_shape)
+        batch_dims = len(batch_shape)
+        if not batch_dims:
+            odds, given_count = odds.unqueeze(0), given_count.view(1)
+        else:
+            odds, given_count = (
+                odds.flatten(end_dim=batch_dims - 1),
+                given_count.flatten(),
+            )
+        odds_f = extract_relevant_odds_forward(odds, given_count, True)
+        if not batch_dims:
+            odds_f = odds_f.squeeze(1)
+        else:
+            odds_f = odds_f.reshape([odds_f.size(0)] + batch_shape + [odds_f.size(-1)])
+        return odds_f
 
-    @torch.distributions.utils.lazy_property
-    def lC_forward(self):
-        logits = self.logits
-        if logits.dim() > 1:
-            logits = logits.flatten(end_dim=-2).T
-        lC = generalized_binomial_coefficient(logits, self._L, "forward")
-        lC = lC.flatten(end_dim=1).T  # (N, (T + 1) * (L + 1))
-        return lC.reshape(*self._batch_shape, self._T + 1, self._L + 1)
+    @lazy_property
+    def r_f(self):
+        odds_f, given_count = self.odds_f, self.given_count
+        batch_shape = list(self.batch_shape)
+        batch_dims = len(batch_shape)
+        if not batch_dims:
+            odds_f, given_count = odds_f.unqueeze(0), given_count.view(1)
+        else:
+            odds_f, given_count = (
+                odds_f.flatten(1, batch_dims),
+                given_count.flatten(),
+            )
+        r_f = R_forward(odds_f, given_count, 1, True, True)
+        if not batch_dims:
+            r_f = r_f.squeeze(1)
+        else:
+            r_f = r_f.reshape([r_f.size(0)] + batch_shape + [r_f.size(-1)])
+        return r_f
+
+    @lazy_property
+    def log_partition(self):
+        r_f, given_count = self.r_f, self.given_count
+        batch_shape = list(self.batch_shape)
+        batch_dims = len(batch_shape)
+        if not batch_dims:
+            r_f, given_count = r_f.unqueeze(0), given_count.view(1)
+        else:
+            r_f, given_count = (
+                r_f.flatten(1, batch_dims),
+                given_count.flatten(),
+            )
+        given_count = given_count.long()
+        _, nmax, diffdim = r_f.size()
+        return (
+            r_f[
+                given_count,
+                torch.arange(nmax),
+                diffdim + given_count.min() - given_count - 1,
+            ]
+            .log()
+            .view(batch_shape)
+        )
 
     @property
     def mean(self):
-        # we want the overall probability of w_t being drafted.
-        # the probability of being drafted as the l-th term is
-        # P(t = t_l) = C(l - 1, <t) w_t C(L - l, >t) / Z
-        # and if we sum all l we get
-        # P(t) = w_tC(L - 1, !t) / Z
-        # if we sum t we get
-        # LC(L) = LZ (property 1 of chen 94)
-        # log C(l - 1, <t) = lC_forward[..., t - 1, l - 1]
-        # log C(L - l, >t) = lC_reverse[..., T - t, counts - l]
-        # log w_t = logits[..., t - 1]
-
-        # we need to map
-        # lC_reverse'[..., t, l] = lC_reverse[..., T - t - 1, L - l - 1]
-
-        # l -> L - l - 1
-        idxs_L = self.condition_count.long()
-        idxs_L = idxs_L.unsqueeze(-1).expand(self._batch_shape + (1,))
-
-        idxs_L = torch.where(
-            idxs_L > 0,
-            (
-                idxs_L - torch.arange(1, self._L + 1, device=idxs_L.device)
-            ) % idxs_L.clamp(1),
-            idxs_L
-        )  # handling pytorch modulo 0 crash
-
-        # t -> T - t - 1
-        idxs_T = torch.arange(
-            self._T - 1, -1, -1, dtype=torch.long, device=idxs_L.device)
-        idxs_T = idxs_T.expand(self._batch_shape + self._event_shape)
-
-        idxs = (idxs_T.unsqueeze(-1) * (self._L + 1)) + idxs_L.unsqueeze(-2)
-        idxs = idxs.flatten(-2)
-
-        x = self.lC_reverse.flatten(-2).gather(-1, idxs).view(
-            *self._batch_shape, self._T, self._L)
-
-        x = x + self.lC_forward[..., :-1, :-1]
-        x = x.logsumexp(-1)  # (N, T)
-        x = x + self.logits
-
-        x = x.softmax(-1)  # P(t) / L
-        return x * self.condition_count.unsqueeze(-1)
+        return self.probs.sum(-1)
 
     @property
     def variance(self):
-        p = self.mean
-        return p * (1 - p)
+        return (self.probs * (1.0 - self.probs)).sum(-1)
 
-    def sample(self, sample_shape=torch.Size()):
-        # the Direct Method of Chen '97
-        # remember - we don't have to worry about t past total_count... they
-        # have weight zero and will never be picked
-        with torch.no_grad():
-            logits_shape = self._extended_shape(sample_shape)
-            logits = self.logits.expand(logits_shape)
-            lC_reverse_shape = (
-                logits_shape[:-1] +
-                torch.Size((self._T + 1,)) +
-                torch.Size((self._L + 1,))
+    @property
+    def param_shape(self):
+        return self._param.size()
+
+    @property
+    def _natural_params(self):
+        return self.logits
+
+    def _log_normalizer(self, logits):
+        assert torch.allclose(logits, self.logits)
+        return self.log_partition
+
+    def expand(self, batch_shape, _instance=None):
+        new = self._get_checked_instance(ConditionalBernoulli, _instance)
+        batch_shape = list(batch_shape)
+        new.given_count = self.given_count.expand(batch_shape)
+        if "total_count" in self.__dict__:
+            new.total_count = self.total_count.expand(batch_shape)
+        if "probs" in self.__dict__:
+            new.probs = self.probs.expand(batch_shape + [self.probs.size(-1)])
+            new._param = new.probs
+        if "logits" in self.__dict__:
+            new.logits = self.logits.expand(batch_shape + [self.logits.size(-1)])
+            new._param = new.logits
+        if "odds" in self.__dict__:
+            new.odds = self.odds.expand(batch_shape + [self.odds.size(-1)])
+            new._param = new.odds
+        if "odds_f" in self.__dict__:
+            new.odds_f = self.r_f.expand(
+                [self.w_f.size(0)] + batch_shape + [self.w_f.size(-1)]
             )
+        if "r_f" in self.__dict__:
+            new.r_f = self.r.expand(
+                [self.r_f.size(0)] + batch_shape + [self.r_f.size(-1)]
+            )
+        if "log_partition" in self.__dict__:
+            new.log_partition = self.log_partition.expand(batch_shape)
+        super(ConditionalBernoulli, new).__init__(
+            torch.Size(batch_shape), self.event_shape, validate_args=False
+        )
+        new._validate_args = self._validate_args
+        return new
 
-            lC_reverse = self.lC_reverse.expand(lC_reverse_shape)
-            n_minus_r = self.condition_count.expand(logits_shape[:-1]).long()
-            n_minus_r = n_minus_r.unsqueeze(-1)
-            U = (  # noise
-                torch.rand_like(logits[..., 0]).log() +
-                lC_reverse[..., -1, :].gather(-1, n_minus_r).squeeze(-1)
-            )  # (N,)
+    def sample(self, sample_shape=torch.Size([])):
+        sample_shape = torch.Size(sample_shape)
+        shape = self._extended_shape(sample_shape)
+        with torch.no_grad():
+            odds_f = (
+                self.odds_f.expand(sample_shape + self.odds_f.shape)
+                .transpose(0, 1)
+                .flatten(1, -2)
+            )
+            r_f = (
+                self.r_f.expand(sample_shape + self.r_f.shape)
+                .transpose(0, 1)
+                .flatten(1, -2)
+            )
+            given_count = self.given_count.expand(shape[:-1]).flatten()
+            b = extended_conditional_bernoulli(odds_f, given_count, 1, r_f)
+        return b.view(shape)
 
-            b = []
-            for t in range(1, self._T + 1):
-                # this is numerically unstable - errors accumulate with the
-                # subtraction. We should probably switch to the Bounded
-                # Bernoulli sampling procedure
-                print(n_minus_r[70375, 7], U[70375, 7].exp())
-                lC_t = lC_reverse[..., -t - 1, :].gather(
-                    -1, n_minus_r).squeeze(-1)
-                print(lC_t[70375, 7].exp(), logits[70375, 7, t - 1].exp())
-                match = (U >= lC_t) & (n_minus_r.squeeze(-1) > 0)  # hack!
-                b.append(match)
-                U = torch.where(
-                    match,
-                    U + torch.log1p(-((lC_t - U).exp())) - logits[..., t - 1],
-                    U
-                )
-                n_minus_r = n_minus_r - match.long().unsqueeze(-1)
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        if self._validate_args:
+            self._validate_sample(value)
+        num = (value * self.logits.expand_as(value)).sum(-1)
+        denom = self.log_partition.expand_as(num)
+        return num - denom
 
-            return torch.stack(b, -1).float()
+
+# TESTS
+
+
+def test_poisson_binomial():
+    # The Poisson Binomial equals the Binomial distribution when all probs are equal
+    torch.manual_seed(1)
+    tmax, nmax, mmax = 5, 16, 2 ** 15
+    p = torch.rand(nmax, requires_grad=True)
+    total_count = torch.randint(tmax + 1, (nmax,))
+
+    binom = torch.distributions.Binomial(total_count, probs=p)
+
+    p_ = p.unsqueeze(1).expand(nmax, tmax)
+    poisson_binom = PoissonBinomial(total_count, probs=p_)
+    lmax = poisson_binom.sample([mmax])
+    mean = lmax.mean(0)
+    assert torch.allclose(mean, p * total_count, atol=1e-2)
+
+    log_prob_act = poisson_binom.log_prob(lmax).t()
+    (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [p])
+
+    binom = torch.distributions.Binomial(total_count, probs=p)
+    log_prob_exp = binom.log_prob(lmax).t()
+    assert torch.allclose(log_prob_exp, log_prob_act, atol=1e-3)
+    (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [p])
+    assert torch.allclose(grad_log_prob_exp, grad_log_prob_act, atol=1e-3)
+
+
+def test_conditional_bernoulli():
+    torch.manual_seed(2)
+    tmax, nmax, mmax = 32, 8, 2 ** 15
+    logits = torch.randn(nmax, tmax, requires_grad=True)
+    idx_1_first = []
+    idx_1_second = []
+    for first in range(tmax - 1):
+        for second in range(first + 1, tmax):
+            idx_1_first.append(first)
+            idx_1_second.append(second)
+    idx_1_first = torch.tensor(idx_1_first)
+    idx_1_second = torch.tensor(idx_1_second)
+    logits_ = logits[:, idx_1_first] + logits[:, idx_1_second]
+    probs_ = logits_.softmax(1)  # (nmax, s)
+    first_matches = torch.arange(tmax).unsqueeze(1) == idx_1_first  # (tmax, s)
+    second_matches = torch.arange(tmax).unsqueeze(1) == idx_1_second  # (tmax, s)
+    inclusions_exp = (probs_.unsqueeze(1) * (first_matches | second_matches)).sum(2)
+    assert torch.allclose(inclusions_exp.sum(1), torch.tensor(2.0))
+    conditional_bernoulli = ConditionalBernoulli(2, logits=logits)
+
+    b = conditional_bernoulli.sample([mmax])
+    assert b.shape == torch.Size([mmax, nmax, tmax])
+    assert (b.sum(-1) == 2).all()
+    assert (b.max(-1)[0] == 1).all()
+    inclusions_act = b.mean(0)
+    assert torch.allclose(inclusions_exp, inclusions_act, atol=1e-2)
+
+    poisson_binomial = PoissonBinomial(tmax, logits=logits)
+    log_prob_act = conditional_bernoulli.log_prob(b) + poisson_binomial.log_prob(
+        torch.full((nmax,), 2)
+    )
+    (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [logits])
+
+    bernoulli = torch.distributions.Bernoulli(logits=logits)
+    log_prob_exp = bernoulli.log_prob(b).sum(-1)
+    assert log_prob_exp.shape == log_prob_act.shape
+    assert torch.allclose(log_prob_exp, log_prob_act)
+    (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [logits])
+    assert torch.allclose(grad_log_prob_exp, grad_log_prob_act)
+
+    total_count = torch.randint(tmax, (nmax,), dtype=torch.float)
+    given_count = (torch.rand((nmax,)) * (total_count + 1)).floor_()
+    conditional_bernoulli = ConditionalBernoulli(
+        given_count, logits=logits, total_count=total_count, validate_args=True
+    )
+    b = conditional_bernoulli.sample([mmax])
+    total_count_mask = total_count.unsqueeze(1) > torch.arange(tmax)
+    assert (b.sum(-1) == given_count.unsqueeze(0)).all()
+    assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
+    assert (b.max(-1)[0] <= 1).all()
+
+
+# XXX(sdrobert): The following did not work. I've had difficulty with algorithms based
+# on subtraction/division.
+# @torch.no_grad()
+# def extended_conditional_bernoulli(
+#     w_f: torch.Tensor,
+#     lmax: torch.Tensor,
+#     kmax: int = 1,
+#     r_f: Optional[torch.Tensor] = None,
+# ) -> torch.Tensor:
+#     assert kmax == 1, "kmax > 1 not yet implemented"
+#     device = w_f.device
+#     if w_f.dim() == 2:
+#         # the user passed regular odds instead of the relevant odds forward.
+#         nmax, tmax = w_f.size()
+#         # call checks lmax size
+#         w_f = extract_relevant_odds_forward(w_f, lmax, True)
+#     else:
+#         _, nmax, diffmax = w_f.size()
+#         tmax = diffmax + int(lmax.min()) - 1
+#         assert device == lmax.device and lmax.dim() == 1 and lmax.size(0) == nmax
+#     if r_f is None:
+#         r_f = R_forward(w_f, lmax, kmax, True, True)
+#     else:
+#         assert (
+#             r_f.dim() == 3
+#             and r_f.size(0) == w_f.size(0) + 1
+#             and r_f.size(1) == nmax
+#             and r_f.size(2) == diffmax
+#         )
+#     # "Direct Sampling" (Procedure 5) from Chen and Liu '97, modified for the
+#     # interpretations of w_f and r_f. Full tables of w_f and r_f (including irrelevant
+#     # values) would always involve moving left (i.e. subtracting 1 from idx_0 below at
+#     # each iteration) and optionally up (i.e. subtracting 1 from idx_2) depending on
+#     # whether or not b_t was drawn to be high. Hence, we start at the bottom-right
+#     # element and take steps either left or up-left to the top-left. However, the
+#     # relevant tables w_f and r_f exclude all irrelevant values outside of a shifting
+#     # window on idx_2. Effectively, a movement up in the relevant-only w_f and r_f
+#     # corresponds to an up-left movement on the full table. Hence, we move either up
+#     # or left (not up-left) in the below loop over relevant values.
+#     b = torch.empty((tmax, nmax), device=device)
+#     idx_0 = lmax.long()  # a.k.a. how many samples left to draw, ell
+#     idx_1 = torch.arange(nmax, device=device)  # batch dim
+#     idx_2 = tmax - idx_0  # a.k.a. (prefix size - ell)
+#     u_k = torch.rand((nmax,), device=device) * r_f[idx_0, idx_1, idx_2]
+#     for t in range(tmax - 1, -1, -1):
+#         w_k = w_f[(idx_0 - 1).clamp_min_(0), idx_1, idx_2]
+#         r_k = r_f[idx_0, idx_1, (idx_2 - 1).clamp_min_(0)]
+#         b_t = u_k >= r_k
+#         b[t] = b_t
+#         u_k = torch.where(b_t, (u_k - r_k) / w_k, u_k)
+#         b_t_ = b_t.long()
+#         idx_0 -= b_t_
+#         idx_2 += b_t_ - 1
+#     # print(u_k)
+#     assert (idx_0 == 0).all()
+#     assert (idx_2 == 0).all()
+#     return b.t()

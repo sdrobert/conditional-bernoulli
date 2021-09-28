@@ -4,7 +4,9 @@ import torch
 
 
 @torch.jit.script
-def extract_relevant_odds_forward(w: torch.Tensor, lmax: torch.Tensor) -> torch.Tensor:
+def extract_relevant_odds_forward(
+    w: torch.Tensor, lmax: torch.Tensor, batch_first: bool = False
+) -> torch.Tensor:
     r"""Transforms a tensor of odds into a shape usable for forward comps
 
     In the forward algorithm, only a subset of odds with index :math:`t` will be
@@ -46,6 +48,8 @@ def extract_relevant_odds_forward(w: torch.Tensor, lmax: torch.Tensor) -> torch.
     device = w.device
     assert device == lmax.device
     assert w.dim() == 2
+    if batch_first:
+        w = w.t()
     tmax, nmax = w.size()
     assert lmax.dim() == 1 and lmax.size(0) == nmax
     # FIXME(sdrobert): I believe the logic is the same regardless of kmax, but check
@@ -55,14 +59,18 @@ def extract_relevant_odds_forward(w: torch.Tensor, lmax: torch.Tensor) -> torch.
     w = torch.cat(
         [w, torch.empty((tmax - lmax_min + lmax_max + 1, nmax), device=device)]
     )
-    w_f = []
+    w_f_ = []
     for ell in range(lmax_max):
-        w_f.append(w[ell : tmax - lmax_min + ell + 1])
-    mask = torch.arange(tmax - lmax_min + 1, device=device).unsqueeze(1) >= (
-        tmax - lmax + 1
+        w_f_.append(w[ell : tmax - lmax_min + ell + 1].t())
+    # some weirdness here. We're probably going to call R_forward on this later, and the
+    # cumulative sum is more efficient on the rightmost axis, so we prefer contiguous on
+    # batch_first = True (though we prefer w input to be contiguous the other way)
+    mask = (tmax - lmax + 1).unsqueeze(1) <= torch.arange(
+        tmax - lmax_min + 1, device=device
     )
-    mask = (torch.arange(lmax_max).unsqueeze(1) >= lmax).unsqueeze(1) | mask
-    return torch.stack(w_f, 0).masked_fill(mask, 0.0)
+    mask = (torch.arange(lmax_max).unsqueeze(1) >= lmax).unsqueeze(2) | mask
+    w_f = torch.stack(w_f_, 0).masked_fill(mask, 0.0)
+    return w_f if batch_first else w_f.transpose(1, 2)
 
 
 # @torch.jit.script
@@ -86,32 +94,39 @@ def extract_relevant_odds_forward(w: torch.Tensor, lmax: torch.Tensor) -> torch.
 #     return w_f.flatten(end_dim=1).gather(0, flip_idx).view_as(w_f)
 
 
-# @torch.jit.script
+@torch.jit.script
 def _R_forward_k_eq_1(w_f: torch.Tensor) -> torch.Tensor:
     assert w_f.dim() == 3
     w_f_shape = w_f.size()
     r = [torch.ones(w_f_shape[1:], device=w_f.device, dtype=w_f.dtype)]
     for ell in range(w_f_shape[0]):
-        r.append((w_f[ell] * r[ell]).cumsum(0))
+        r.append((w_f[ell] * r[ell]).cumsum(1))
     return torch.stack(r)
 
 
 @torch.jit.script_if_tracing
 def R_forward(
-    w_f: torch.Tensor, lmax: torch.Tensor, kmax: int = 1, return_all: bool = False
+    w_f: torch.Tensor,
+    lmax: torch.Tensor,
+    kmax: int = 1,
+    return_all: bool = False,
+    batch_first: bool = False,
 ) -> torch.Tensor:
     assert kmax == 1, "kmax > 1 not yet implemented"
     assert w_f.dim() == 3 and lmax.dim() == 1
-    _, diffdim, nmax = w_f.size()
+    if not batch_first:
+        w_f = w_f.transpose(1, 2)
+    _, nmax, diffdim = w_f.size()
     assert nmax == lmax.size(0)
+    lmax = lmax.to(torch.long)
     r = _R_forward_k_eq_1(w_f)
     if return_all:
-        return r
+        return r if batch_first else r.transpose(1, 2)
     else:
         return r[
             lmax,
-            diffdim + lmax.min() - lmax - 1,
             torch.arange(nmax, device=lmax.device),
+            diffdim + lmax.min() - lmax - 1,
         ]
 
 
@@ -136,9 +151,9 @@ def test_extract_relevant_odds_forward():
 
 def test_R_forward_k1():
     torch.manual_seed(2)
-    w = torch.randn((4, 3), requires_grad=True)
+    w = torch.randn((4, 3)).exp().requires_grad_(True)
     lmax = torch.tensor([3, 1, 2])
-    g = torch.randn((3, 4, 3), requires_grad=True)
+    g = torch.randn((3, 4, 3)).exp().requires_grad_(True)
     r_exp = torch.stack(
         [
             w[0, 0]
