@@ -289,20 +289,19 @@ def initialize(
     gamma_act = torch.randn(1).requires_grad_(True)
     W_act = torch.randn((df_params.fmax, df_params.vmax), requires_grad=True)
     theta_act = [p_act, gamma_act, W_act]
-    optimizer = df_params.optimizer(
-        [p_act, gamma_act, W_act], lr=df_params.learning_rate
-    )
+    optimizer = df_params.optimizer(theta_act, lr=df_params.learning_rate)
     if df_params.estimator == "rejection":
-        estimator = RejectionEstimator(_PSampler, df_params.num_mc_samples)
+        estimator = RejectionEstimator(
+            _psampler, df_params.num_mc_samples, _lp, _g, theta_act
+        )
     elif df_params.estimator == "enumerate":
-        estimator = EnumerateEstimator()
+        estimator = EnumerateEstimator(_lp, _g, theta_act)
     return optimizer, theta_exp, theta_act, estimator
 
 
 def train_for_trial(
     optimizer: torch.optim.Optimizer,
     theta_exp: Theta,
-    theta_act: Theta,
     estimator: Estimator,
     df_params: DreznerFarnumBernoulliExperimentParameters,
 ) -> float:
@@ -311,13 +310,17 @@ def train_for_trial(
         torch.randn((df_params.tmax, df_params.batch_size, df_params.fmax))
         * df_params.x_std
     )
-    b = _PSampler(x, theta_exp)
+    b = _psampler(x, theta_exp)
     events, lmax = event_sample(theta_exp[2], x, b)
     y = _pad_events(events, lmax)
-    zhat, back = estimator(x, y, lmax, theta_act, _lP, _G)
-    (-back).backward()  # gradient descent
+    zhat, back = estimator(x, y, lmax)
+    grad_theta_act = torch.autograd.grad(-back, estimator.theta, allow_unused=True)
+    for theta_act_v, grad_theta_act_v in zip(estimator.theta, grad_theta_act):
+        theta_act_v.backward(-grad_theta_act_v)
     optimizer.step()
-    return zhat.item()
+    zhat_ = zhat.item()
+    del back, x, y, events, lmax, zhat, grad_theta_act, b
+    return zhat_
 
 
 def train(
@@ -331,9 +334,7 @@ def train(
     p_exp = theta_exp[0].sigmoid().item()
     gamma_exp = theta_exp[1].sigmoid().item()
     for _ in tqdm(range(df_params.num_trials)):
-        zhats.append(
-            train_for_trial(optimizer, theta_exp, theta_act, estimator, df_params)
-        )
+        zhats.append(train_for_trial(optimizer, theta_act, estimator, df_params))
         sses_p.append((theta_act[0].sigmoid().item() - p_exp) ** 2)
         sses_gamma.append((theta_act[1].sigmoid().item() - gamma_exp) ** 2)
         sses_W.append(((theta_exp[2] - theta_act[2]) ** 2).sum().item())
@@ -362,7 +363,7 @@ def main(args=None) -> int:
         type=argparse.FileType("w"),
         help="Where to store (csv) results to. Default is stdout",
     )
-    options = parser.parse_args()
+    options = parser.parse_args(args)
     if options.seed is not None:
         options.params.seed = options.seed
     zhats, sses_p, sses_gamma, sses_W = train(options.params)
@@ -399,7 +400,7 @@ def main(args=None) -> int:
     return 0
 
 
-def _lP(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     p = theta[0].sigmoid()
     gamma = theta[1].sigmoid()
     nmax = b.size(1)
@@ -423,7 +424,7 @@ def _pad_events(events: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
     ).masked_scatter(len_mask, events)
 
 
-def _G(y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+def _g(y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     W = theta[2]
     lens = b.sum(0)
     len_mask = torch.arange(y.size(1), device=lens.device).unsqueeze(
@@ -434,7 +435,7 @@ def _G(y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch
 
 
 @torch.no_grad()
-def _PSampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
+def _psampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
     p = theta[0].sigmoid()
     gamma = theta[1].sigmoid()
     tmax, nmax = x.size(0), x.size(1)
@@ -562,7 +563,7 @@ def test_estimator_hooks():
     )
     events, lmax = event_sample(W, x, b)
     y = _pad_events(events, lmax)
-    zhat, back = RejectionEstimator(_PSampler, mc)(x, y, lmax, theta, _lP, _G)
+    zhat, back = RejectionEstimator(_psampler, mc, _lp, _g, theta)(x, y, lmax)
     grad_zhat = torch.autograd.grad(back, theta)
     assert not torch.allclose(zhat, torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
@@ -575,5 +576,5 @@ def test_train():
     df_params = DreznerFarnumBernoulliExperimentParameters(
         num_trials=2, tmax=16, batch_size=32, estimator="enumerate"
     )
-    sses_p = train(df_params)[1]
-    assert sses_p[0] > sses_p[1]
+    res = train(df_params)
+    assert res[1][0] > res[1][-1]

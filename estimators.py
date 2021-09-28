@@ -14,45 +14,33 @@ from typing import Callable, List, Tuple
 import torch
 from utils import enumerate_bernoulli_support
 
-__all__ = [
-    "Theta",
-    "PSampler",
-    "LogPDensity",
-    "GDensity",
-    "Estimator",
-    "EnumerateEstimator",
-    "RejectionEstimator",
-]
-
 Theta = List[torch.Tensor]
-PSampler = Callable[[torch.Tensor, Theta], torch.Tensor]
+PSampler = IndependentOdds = Callable[[torch.Tensor, Theta], torch.Tensor]
 LogPDensity = Callable[[torch.Tensor, torch.Tensor, Theta], torch.Tensor]
-GDensity = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, Theta], torch.Tensor]
+GDensity = IndependentLikelihoods = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, Theta], torch.Tensor
+]
 
 
 class Estimator(metaclass=abc.ABCMeta):
+
+    lp: LogPDensity
+    g: GDensity
+    theta: Theta
+
+    def __init__(self, lp: LogPDensity, g: GDensity, theta: Theta) -> None:
+        self.lp, self.g, self.theta = lp, g, theta
+
     @abc.abstractmethod
     def __call__(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor,
-        lmax: torch.Tensor,
-        theta: Theta,
-        lP: LogPDensity,
-        G: GDensity,
+        self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
 
 
 class EnumerateEstimator(Estimator):
     def __call__(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor,
-        lmax: torch.Tensor,
-        theta: Theta,
-        lP: LogPDensity,
-        G: GDensity,
+        self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         tmax, nmax = x.size(0), x.size(1)
         b, lens = enumerate_bernoulli_support(tmax, lmax)
@@ -60,8 +48,8 @@ class EnumerateEstimator(Estimator):
         x = x.repeat_interleave(lens, 1)
         y = y.repeat_interleave(lens, 0)
         assert x.size(1) == b.size(1)
-        p = lP(b, x, theta).exp()
-        g = G(y, b, x, theta)
+        p = self.lp(b, x, self.theta).exp()
+        g = self.g(y, b, x, self.theta)
         zhat = (p * g).sum() / nmax
         return zhat.detach(), zhat
 
@@ -71,26 +59,27 @@ class RejectionEstimator(Estimator):
     psampler: PSampler
     mc_samples: int
 
-    def __init__(self, psampler: PSampler, num_mc_samples: int) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        psampler: PSampler,
+        num_mc_samples: int,
+        lp: LogPDensity,
+        g: GDensity,
+        theta: Theta,
+    ) -> None:
         self.psampler = psampler
         self.num_mc_samples = num_mc_samples
+        super().__init__(lp, g, theta)
 
     def __call__(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor,
-        lmax: torch.Tensor,
-        theta: Theta,
-        lP: LogPDensity,
-        G: GDensity,
+        self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         tmax, nmax, fmax = x.size()
         x = x.repeat_interleave(self.num_mc_samples, 1)
         y = y.repeat_interleave(self.num_mc_samples, 0)
         lmax = lmax.repeat_interleave(self.num_mc_samples, 0)
         total = nmax * self.num_mc_samples
-        b = self.psampler(x, theta).t()
+        b = self.psampler(x, self.theta).t()
         accept_mask = (b.sum(1) == lmax).unsqueeze(1)
         b = b.masked_select(accept_mask).view(-1, tmax).t()
         x = (
@@ -106,8 +95,8 @@ class RejectionEstimator(Estimator):
             .masked_select(accept_mask)
             .view(y_shape)
         )
-        lp = lP(b, x, theta)
-        g = G(y, b, x, theta)
+        lp = self.lp(b, x, self.theta)
+        g = self.g(y, b, x, self.theta)
         zhat = g.sum() / total
         return zhat.detach(), zhat + (g.detach() * lp).sum() / total
 
@@ -118,17 +107,17 @@ class RejectionEstimator(Estimator):
 # theta = (logits, weights)
 # y_act = sum of weights * x corresponding to chosen b
 # get y_act close to y via MSE
-def _lP(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     logits = theta[0]
     return torch.distributions.Bernoulli(logits=logits).log_prob(b.t()).sum(1)
 
 
-def _PSampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
+def _psampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
     logits = theta[0]
     return torch.distributions.Bernoulli(logits=logits).sample([x.size(1)]).t()
 
 
-def _G(y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+def _g(y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     y_act = (theta[1].unsqueeze(1) * x.squeeze(2) * b).sum(0)
     return (y_act - y) ** 2
 
@@ -140,6 +129,7 @@ def test_enumerate_estimator():
     logits = torch.randn((tmax,), requires_grad=True)
     weights = torch.randn((tmax,), requires_grad=True)
     theta = [logits, weights]
+    optimizer = torch.optim.Adam(theta)
     y = torch.randn(nmax)
     lmax = torch.randint(tmax + 1, size=(nmax,))
     zhat_exp = torch.zeros(1)
@@ -148,15 +138,20 @@ def test_enumerate_estimator():
         y_n = y[n : n + 1]
         b_n, _ = enumerate_bernoulli_support(tmax, lmax[n : n + 1])
         b_n = b_n.t()
-        p_n = _lP(b_n, x_n, theta).exp()
-        g_n = _G(y_n, b_n, x_n, theta)
+        p_n = _lp(b_n, x_n, theta).exp()
+        g_n = _g(y_n, b_n, x_n, theta)
         zhat_exp += (p_n * g_n).sum() / nmax
     grad_zhat_exp = torch.autograd.grad(zhat_exp, theta)
-    zhat_act, back_act = EnumerateEstimator()(x, y, lmax, theta, _lP, _G)
+    zhat_act, back_act = EnumerateEstimator(_lp, _g, theta)(x, y, lmax)
     grad_zhat_act = torch.autograd.grad(back_act, theta)
     assert torch.allclose(zhat_exp, zhat_act)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0])
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1])
+    theta[0].backward(-grad_zhat_act[0])
+    theta[1].backward(-grad_zhat_act[1])
+    optimizer.step()
+    zhat_act_2, _ = EnumerateEstimator(_lp, _g, theta)(x, y, lmax)
+    assert zhat_act_2 > zhat_act
 
 
 def test_rejection_estimator():
@@ -168,9 +163,9 @@ def test_rejection_estimator():
     theta = [logits, weights]
     y = torch.randn(nmax)
     lmax = torch.randint(tmax + 1, size=(nmax,))
-    zhat_exp, back_exp = EnumerateEstimator()(x, y, lmax, theta, _lP, _G)
+    zhat_exp, back_exp = EnumerateEstimator(_lp, _g, theta)(x, y, lmax)
     grad_zhat_exp = torch.autograd.grad(back_exp, theta)
-    zhat_act, back_act = RejectionEstimator(_PSampler, mc)(x, y, lmax, theta, _lP, _G)
+    zhat_act, back_act = RejectionEstimator(_psampler, mc, _lp, _g, theta)(x, y, lmax)
     grad_zhat_act = torch.autograd.grad(back_act, theta)
     assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
     # N.B. in general, back_exp != back_act. Only their gradients should be roughly
