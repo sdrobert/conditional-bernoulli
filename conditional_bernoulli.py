@@ -6,6 +6,7 @@ from poisson_binomial import lR, R
 # sample using the "direct" method from Chen '97. It's fast and numerically
 # stable
 
+
 def sample(w, counts):
     # in w = (T, *), counts = int or (*)
     # out b = (T, *)
@@ -49,17 +50,13 @@ def lsample(logits, counts):
 
     b = []
     Rhist = lR(logits, max_count, True, True)  # [T + 1, ]
-    U = (
-        torch.rand_like(logits[0]).log() +
-        Rhist[-1].gather(0, counts.unsqueeze(0))[0]
-    )
+    U = torch.rand_like(logits[0]).log() + Rhist[-1].gather(0, counts.unsqueeze(0))[0]
     # N.B. counts is now going to double for n - r in Chen '97
     for k in range(1, T + 1):
         R = Rhist[-k - 1].gather(0, counts.unsqueeze(0))[0]
         match = U >= R
         b.append(match)
-        U = torch.where(
-            match, U + torch.log1p(-((R - U).exp())) - logits[k - 1], U)
+        U = torch.where(match, U + torch.log1p(-((R - U).exp())) - logits[k - 1], U)
         counts = counts - match.long()
     del Rhist, U
 
@@ -71,7 +68,7 @@ def probs(w, b):
     # out p = (*)
     counts = b.sum(0).long()
     denom = R(w, counts.max()).gather(0, counts.unsqueeze(0))[0]
-    w = w.masked_fill(~b.bool(), 1.)
+    w = w.masked_fill(~b.bool(), 1.0)
     num = w.prod(0)
     return num / denom
 
@@ -81,6 +78,6 @@ def lprobs(logits, b):
     # out lp = (*)
     counts = b.sum(0).long()
     denom = lR(logits, counts.max()).gather(0, counts.unsqueeze(0))[0]
-    logits = logits.masked_fill(~b.bool(), 0.)
+    logits = logits.masked_fill(~b.bool(), 0.0)
     num = logits.sum(0)
     return num - denom
