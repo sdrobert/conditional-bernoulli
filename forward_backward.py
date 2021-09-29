@@ -1,11 +1,18 @@
 """Forward and backward functions"""
 
 import torch
+import math
+
+# for log count functions, we want -inf to behave the same way as if it were zero in
+# the regular count function. Thus we replace any occurrence with a log value that,
+# when exponentiated, is nonzero, but only just. The division by two here ensures that
+# we can add two EPS_INF values without the result being zero.
+EPS_INF = math.log(torch.finfo(torch.float32).tiny) / 2
 
 
 @torch.jit.script
 def extract_relevant_odds_forward(
-    w: torch.Tensor, lmax: torch.Tensor, batch_first: bool = False
+    w: torch.Tensor, lmax: torch.Tensor, batch_first: bool = False, fill: float = 0.0
 ) -> torch.Tensor:
     r"""Transforms a tensor of odds into a shape usable for forward comps
 
@@ -55,7 +62,10 @@ def extract_relevant_odds_forward(
     # FIXME(sdrobert): I believe the logic is the same regardless of kmax, but check
     lmax_min, lmax_max = int(lmax.min().long().item()), int(lmax.max().item())
     if not lmax_max:
-        return torch.empty((0, tmax + 1, nmax), device=device)
+        out_shape = torch.Size(
+            [0, nmax, tmax + 1] if batch_first else [0, tmax + 1, nmax]
+        )
+        return torch.empty(out_shape, device=device, dtype=w.dtype)
     w = torch.cat(
         [w, torch.empty((tmax - lmax_min + lmax_max + 1, nmax), device=device)]
     )
@@ -69,7 +79,7 @@ def extract_relevant_odds_forward(
         tmax - lmax_min + 1, device=device
     )
     mask = (torch.arange(lmax_max).unsqueeze(1) >= lmax).unsqueeze(2) | mask
-    w_f = torch.stack(w_f_, 0).masked_fill(mask, 0.0)
+    w_f = torch.stack(w_f_, 0).masked_fill(mask, fill)
     return w_f if batch_first else w_f.transpose(1, 2)
 
 
@@ -104,6 +114,16 @@ def _R_forward_k_eq_1(w_f: torch.Tensor) -> torch.Tensor:
     return torch.stack(r)
 
 
+@torch.jit.script
+def _log_R_forward_k_eq_1(logits_f: torch.Tensor) -> torch.Tensor:
+    assert logits_f.dim() == 3
+    logits_f_shape = logits_f.size()
+    lr = [torch.zeros(logits_f_shape[1:], device=logits_f.device, dtype=logits_f.dtype)]
+    for ell in range(logits_f_shape[0]):
+        lr.append((logits_f[ell] + lr[ell]).logcumsumexp(1))
+    return torch.stack(lr)
+
+
 @torch.jit.script_if_tracing
 def R_forward(
     w_f: torch.Tensor,
@@ -124,6 +144,32 @@ def R_forward(
         return r if batch_first else r.transpose(1, 2)
     else:
         return r[
+            lmax,
+            torch.arange(nmax, device=lmax.device),
+            diffdim + lmax.min() - lmax - 1,
+        ]
+
+
+@torch.jit.script_if_tracing
+def log_R_forward(
+    logits_f: torch.Tensor,
+    lmax: torch.Tensor,
+    kmax: int = 1,
+    return_all: bool = False,
+    batch_first: bool = False,
+) -> torch.Tensor:
+    assert kmax == 1, "kmax > 1 not yet implemented"
+    assert logits_f.dim() == 3 and lmax.dim() == 1
+    if not batch_first:
+        logits_f = logits_f.transpose(1, 2)
+    _, nmax, diffdim = logits_f.size()
+    assert nmax == lmax.size(0)
+    lmax = lmax.to(torch.long)
+    lr = _log_R_forward_k_eq_1(logits_f)
+    if return_all:
+        return lr if batch_first else lr.transpose(1, 2)
+    else:
+        return lr[
             lmax,
             torch.arange(nmax, device=lmax.device),
             diffdim + lmax.min() - lmax - 1,
@@ -189,6 +235,27 @@ def test_R_forward_k1():
     grad_w_act, grad_g_act = torch.autograd.grad(r_act, [w, g], torch.ones_like(r_act))
     assert torch.allclose(grad_w_exp, grad_w_act)
     assert torch.allclose(grad_g_exp, grad_g_act)
+
+
+def test_log_R_forward_k_eq_1():
+    torch.manual_seed(3)
+    nmax, tmax = 5, 16
+    logits = torch.randn(nmax, tmax, requires_grad=True, dtype=torch.double)
+    lmax = torch.randint(0, tmax + 1, (nmax,))
+    logits_f = extract_relevant_odds_forward(logits, lmax, True, EPS_INF)
+    lg_f = torch.randn_like(logits_f, requires_grad=True)
+    lwg_f = logits_f + lg_f.masked_fill(torch.isinf(logits_f), EPS_INF)
+    r_act = log_R_forward(lwg_f, lmax, batch_first=True)
+    logits_grad_act, lg_f_grad_act = torch.autograd.grad(r_act.mean(), [logits, lg_f])
+
+    w, g_f = logits.exp(), lg_f.exp()
+    w_f = extract_relevant_odds_forward(w, lmax, True)
+    wg_f = w_f * g_f.masked_fill(w_f == 0, 0.0)
+    r_exp = R_forward(wg_f, lmax, batch_first=True).log()
+    assert torch.allclose(r_exp, r_act)
+    logits_grad_exp, lg_f_grad_exp = torch.autograd.grad(r_exp.mean(), [logits, lg_f])
+    # assert torch.allclose(logits_grad_exp, logits_grad_act)
+    assert torch.allclose(lg_f_grad_exp, lg_f_grad_act)
 
 
 # def test_flip_relevant_odds():

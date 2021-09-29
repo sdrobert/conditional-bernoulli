@@ -51,7 +51,7 @@ def enumerate_bernoulli_support(
     support = (
         support.t().unsqueeze(0).masked_select(accept_mask.unsqueeze(2)).view(-1, tmax)
     )
-    return support.to(torch.float), lens
+    return support, lens
 
 
 # TESTS
