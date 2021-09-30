@@ -14,6 +14,7 @@
 
 """Different implementations and benchmarking CLI for the count function"""
 
+import config
 import torch
 import contextlib
 import math
@@ -284,7 +285,7 @@ def log_count(
     if wants_batch_second:
         lw = lw.transpose(0, 1)
     lw = lw.contiguous()
-    lC = func(lw, L, full, EPS_INF)
+    lC = func(lw, L, full, config.EPS_INF)
     if full and gives_tln:
         lC = (
             lC.view(lC.shape[0], -1)
@@ -292,13 +293,6 @@ def log_count(
             .reshape(lC.shape[1], lC.shape[2], lC.shape[0])
         )
     return lC
-
-
-# for log count functions, we want -inf to behave the same way as if it were zero in
-# the regular count function. Thus we replace any occurrence with a log value that,
-# when exponentiated, is nonzero, but only just. The division by two here ensures that
-# we can add two EPS_INF values without the result being zero.
-EPS_INF = math.log(torch.finfo(torch.float32).tiny) / 2
 
 
 try:

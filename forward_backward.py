@@ -1,13 +1,7 @@
 """Forward and backward functions"""
 
 import torch
-import math
-
-# for log count functions, we want -inf to behave the same way as if it were zero in
-# the regular count function. Thus we replace any occurrence with a log value that,
-# when exponentiated, is nonzero, but only just. The division by two here ensures that
-# we can add two EPS_INF values without the result being zero.
-EPS_INF = math.log(torch.finfo(torch.float32).tiny) / 2
+import config
 
 
 @torch.jit.script
@@ -67,7 +61,7 @@ def extract_relevant_odds_forward(
         )
         return torch.empty(out_shape, device=device, dtype=w.dtype)
     w = torch.cat(
-        [w, torch.empty((tmax - lmax_min + lmax_max + 1, nmax), device=device)]
+        [w, torch.zeros((tmax - lmax_min + lmax_max + 1, nmax), device=device)]
     )
     w_f_ = []
     for ell in range(lmax_max):
@@ -114,16 +108,6 @@ def _R_forward_k_eq_1(w_f: torch.Tensor) -> torch.Tensor:
     return torch.stack(r)
 
 
-@torch.jit.script
-def _log_R_forward_k_eq_1(logits_f: torch.Tensor) -> torch.Tensor:
-    assert logits_f.dim() == 3
-    logits_f_shape = logits_f.size()
-    lr = [torch.zeros(logits_f_shape[1:], device=logits_f.device, dtype=logits_f.dtype)]
-    for ell in range(logits_f_shape[0]):
-        lr.append((logits_f[ell] + lr[ell]).logcumsumexp(1))
-    return torch.stack(lr)
-
-
 @torch.jit.script_if_tracing
 def R_forward(
     w_f: torch.Tensor,
@@ -148,6 +132,41 @@ def R_forward(
             torch.arange(nmax, device=lmax.device),
             diffdim + lmax.min() - lmax - 1,
         ]
+
+
+@torch.jit.script
+def _log_R_forward_k_eq_1(
+    logits_f: torch.Tensor, neg_inf: float = config.EPS_INF
+) -> torch.Tensor:
+    assert logits_f.dim() == 3
+    logits_f = logits_f.clamp_min(neg_inf)
+    logits_f_shape = logits_f.size()
+    lr = [torch.zeros(logits_f_shape[1:], device=logits_f.device, dtype=logits_f.dtype)]
+    for ell in range(logits_f_shape[0]):
+        lr.append((logits_f[ell] + lr[ell]).logcumsumexp(1))
+    return torch.stack(lr)
+
+
+# @torch.jit.script_if_tracing
+# def log_R_forward(
+#     logits_f: torch.Tensor,
+#     lmax: torch.Tensor,
+#     kmax: int = 1,
+#     return_all: bool = False,
+#     batch_first: bool = False,
+# ) -> torch.Tensor:
+#     max_logits_f = logits_f.detach().max()
+#     logits_f = logits_f - max_logits_f
+#     w_f = logits_f.exp()
+#     lr = R_forward(w_f, lmax, kmax, return_all, batch_first).log()
+#     if return_all:
+#         max_range = max_logits_f * torch.arange(
+#             lr.size(0), device=lmax.device, dtype=lmax.dtype
+#         )
+#         lr += max_range.unsqueeze(1).unsqueeze(2)
+#     else:
+#         lr += max_logits_f * lmax
+#     return lr
 
 
 @torch.jit.script_if_tracing
@@ -242,9 +261,9 @@ def test_log_R_forward_k_eq_1():
     nmax, tmax = 5, 16
     logits = torch.randn(nmax, tmax, requires_grad=True, dtype=torch.double)
     lmax = torch.randint(0, tmax + 1, (nmax,))
-    logits_f = extract_relevant_odds_forward(logits, lmax, True, EPS_INF)
+    logits_f = extract_relevant_odds_forward(logits, lmax, True, config.EPS_INF)
     lg_f = torch.randn_like(logits_f, requires_grad=True)
-    lwg_f = logits_f + lg_f.masked_fill(torch.isinf(logits_f), EPS_INF)
+    lwg_f = logits_f + lg_f.masked_fill(torch.isinf(logits_f), config.EPS_INF)
     r_act = log_R_forward(lwg_f, lmax, batch_first=True)
     logits_grad_act, lg_f_grad_act = torch.autograd.grad(r_act.mean(), [logits, lg_f])
 
@@ -254,7 +273,7 @@ def test_log_R_forward_k_eq_1():
     r_exp = R_forward(wg_f, lmax, batch_first=True).log()
     assert torch.allclose(r_exp, r_act)
     logits_grad_exp, lg_f_grad_exp = torch.autograd.grad(r_exp.mean(), [logits, lg_f])
-    # assert torch.allclose(logits_grad_exp, logits_grad_act)
+    assert torch.allclose(logits_grad_exp, logits_grad_act)
     assert torch.allclose(lg_f_grad_exp, lg_f_grad_act)
 
 

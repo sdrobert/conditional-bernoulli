@@ -9,8 +9,8 @@ The functions in this module can estimate values
 simultaneously for batches of :math:`\ell_*` and :math:`x` as well as its derivative
 with respect to parameters the
 """
+import config
 import abc
-from count_function import EPS_INF
 from forward_backward import extract_relevant_odds_forward, log_R_forward
 from typing import Callable, List, Tuple
 import torch
@@ -86,6 +86,14 @@ class RejectionEstimator(Estimator):
         lmax = lmax.repeat_interleave(self.num_mc_samples, 0)
         b = self.psampler(x, self.theta).t()
         accept_mask = (b.sum(1) == lmax).unsqueeze(1)
+        if not accept_mask.any():
+            # no samples were accepted. We set zhat to -inf. To acquire a zero gradient,
+            # we sum all the parameters in self.theta and mask 'em out
+            v = self.theta[0].sum()
+            for x in self.theta[1:]:
+                v += x.sum()
+            v = v.masked_fill(torch.tensor(True, device=v.device), 0.0)
+            return torch.tensor(-float("inf"), device=v.device), v
         b = b.masked_select(accept_mask).view(-1, tmax).t()
         x = (
             x.transpose(0, 1)
@@ -138,7 +146,7 @@ class ConditionalBernoulliEstimator(Estimator):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         ilw = self.ilw(x, self.theta)  # (tmax, nmax)
         ilw_f = extract_relevant_odds_forward(
-            ilw.t(), lmax, True, EPS_INF
+            ilw.t(), lmax, True, config.EPS_INF
         )  # (l, nmax, d)
         ilg = self.ilg(x, y, lmax, self.theta)  # (l, d, nmax)
         iwg_f = ilw_f + ilg.transpose(1, 2)  # (l, nmax, d)
@@ -183,7 +191,9 @@ def _ilg(
     weights = theta[1]
     y_act = x.squeeze(2).t() * weights  # (nmax, tmax)
     nse = -((y - y_act) ** 2)
-    return extract_relevant_odds_forward(nse, lmax, True, EPS_INF).transpose(1, 2)
+    return extract_relevant_odds_forward(nse, lmax, True, config.EPS_INF).transpose(
+        1, 2
+    )
 
 
 def test_enumerate_estimator():
