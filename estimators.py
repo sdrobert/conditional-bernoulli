@@ -2,7 +2,7 @@ from distributions import SimpleSamplingWithoutReplacement
 import config
 import abc
 from forward_backward import extract_relevant_odds_forward, log_R_forward
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 import torch
 import math
 from utils import enumerate_bernoulli_support
@@ -173,6 +173,87 @@ class StaticSsworImportanceSampler(Estimator):
         return zhat.detach(), zhat
 
 
+class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
+
+    num_mc_samples: int
+    x: Optional[torch.Tensor]
+    y: Optional[torch.Tensor]
+    lmax: Optional[torch.Tensor]
+
+    def __init__(
+        self, num_mc_samples: int, lp: LogDensity, lg: LogLikelihood, theta: Theta
+    ) -> None:
+        self.num_mc_samples = num_mc_samples
+        self.x = self.y = self.lmax = None
+        super().__init__(lp, lg, theta)
+
+    def clear(self) -> None:
+        self.x = self.y = self.lmax = None
+
+    def initialize_proposal(self) -> None:
+        pass
+
+    def get_first_sample(self) -> torch.Tensor:
+        # use sswor until we have a sample in the support of pi
+        assert self.x is not None and self.y is not None and self.lmax is not None
+        tmax, nmax, _ = self.x.size()
+        sswor = SimpleSamplingWithoutReplacement(self.lmax, tmax, tmax)
+        b = torch.empty_like(self.x[..., 0])
+        is_supported = torch.zeros((nmax,), device=self.x.device, dtype=torch.bool)
+        while not is_supported.all():
+            b_ = sswor.sample().t()  # (tmax, lmax)
+            b_[:, is_supported] = b[:, is_supported]
+            b = b_
+            lp = self.lp(b, self.x, self.theta)
+            lg = self.lg(self.y, b, self.x, self.theta)
+            is_supported = ~(lp + lg).isinf()
+        return b
+
+    def update_proposal(self, b: torch.Tensor, mc_sample_num: int) -> None:
+        pass
+
+    @abc.abstractmethod
+    def sample_proposal(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def proposal_log_prob(self, b: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def __call__(
+        self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.x, self.y, self.lmax = x, y, lmax
+        nmax = x.size(1)
+        total = nmax * self.num_mc_samples
+        self.initialize_proposal()
+        b_last = self.get_first_sample()
+        with torch.no_grad():
+            lomega_last = (
+                self.lp(b_last, x, self.theta)
+                + self.lg(y, b_last, x, self.theta)
+                - self.proposal_log_prob(b_last)
+            )
+        zhat = torch.full_like(lmax, config.EPS_INF)
+        for mc in range(1, self.num_mc_samples + 1):
+            b_prop = self.sample_proposal()
+            lomega_prop = (
+                self.lp(b_prop, x, self.theta)
+                + self.lg(y, b_prop, x, self.theta)
+                - self.proposal_log_prob(b_prop)
+            )
+            zhat = zhat.logaddexp(lomega_prop)
+            lomega_prop = lomega_prop.detach().clamp_min(config.EPS_INF)
+            choice = torch.bernoulli((lomega_prop - lomega_last).sigmoid_())
+            not_choice = 1 - choice
+            b_last = b_prop * choice + b_last * not_choice
+            self.update_proposal(b_last, mc)
+            lomega_last = lomega_prop * choice + lomega_last * not_choice
+        self.clear()
+        zhat = zhat.logsumexp(0) - math.log(total)
+        return zhat.detach(), zhat
+
+
 # TESTS
 
 # a dumb little objective to test our estimators.
@@ -300,3 +381,35 @@ def test_sswor_is():
     assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
+
+
+class _DummyAisImhEstimator(AisImhEstimator):
+    def initialize_proposal(self) -> None:
+        tmax = self.x.size(0)
+        self.sswor = SimpleSamplingWithoutReplacement(self.lmax, tmax, tmax)
+
+    def sample_proposal(self) -> torch.Tensor:
+        return self.sswor.sample().t()
+
+    def proposal_log_prob(self, b: torch.Tensor) -> torch.Tensor:
+        l = self.sswor.log_prob(b.t())
+        return l
+
+
+def test_dummy_ais():
+    torch.manual_seed(5)
+    tmax, nmax, mc = 5, 4, 50000
+    x = torch.randn((tmax, nmax, 1))
+    logits = torch.randn((tmax,), requires_grad=True)
+    weights = torch.randn((tmax,), requires_grad=True)
+    theta = [logits, weights]
+    y = torch.randn(nmax, tmax)
+    lmax = torch.randint(tmax + 1, size=(nmax,))
+    zhat_exp, back_exp = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
+    grad_zhat_exp = torch.autograd.grad(back_exp, theta)
+    zhat_act, back_act = _DummyAisImhEstimator(mc, _lp, _lg, theta)(x, y, lmax)
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
+    assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
+
