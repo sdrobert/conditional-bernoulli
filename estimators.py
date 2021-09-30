@@ -1,4 +1,4 @@
-from distributions import SimpleSamplingWithoutReplacement
+from distributions import ConditionalBernoulli, SimpleSamplingWithoutReplacement
 import config
 import abc
 from forward_backward import extract_relevant_odds_forward, log_R_forward
@@ -10,7 +10,7 @@ from utils import enumerate_bernoulli_support
 Theta = List[torch.Tensor]
 PSampler = IndependentLogits = Callable[[torch.Tensor, Theta], torch.Tensor]
 LogDensity = Callable[[torch.Tensor, torch.Tensor, Theta], torch.Tensor]
-LogLikelihood = IndependentLogLikelihoods = Callable[
+LogLikelihood = IndependentLogLikelihoods = LogInclusionEstimates = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, Theta], torch.Tensor
 ]
 
@@ -228,14 +228,14 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
         total = nmax * self.num_mc_samples
         self.initialize_proposal()
         b_last = self.get_first_sample()
-        with torch.no_grad():
-            lomega_last = (
-                self.lp(b_last, x, self.theta)
-                + self.lg(y, b_last, x, self.theta)
-                - self.proposal_log_prob(b_last)
-            )
         zhat = torch.full_like(lmax, config.EPS_INF)
         for mc in range(1, self.num_mc_samples + 1):
+            with torch.no_grad():
+                lomega_last = (
+                    self.lp(b_last, x, self.theta)
+                    + self.lg(y, b_last, x, self.theta)
+                    - self.proposal_log_prob(b_last)
+                )
             b_prop = self.sample_proposal()
             lomega_prop = (
                 self.lp(b_prop, x, self.theta)
@@ -244,14 +244,77 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
             )
             zhat = zhat.logaddexp(lomega_prop)
             lomega_prop = lomega_prop.detach().clamp_min(config.EPS_INF)
+
+            with torch.no_grad():
+                # N.B. This is intentionally the previous sample, not the current one.
+                self.update_proposal(b_last, mc)
+
             choice = torch.bernoulli((lomega_prop - lomega_last).sigmoid_())
             not_choice = 1 - choice
             b_last = b_prop * choice + b_last * not_choice
-            self.update_proposal(b_last, mc)
-            lomega_last = lomega_prop * choice + lomega_last * not_choice
         self.clear()
         zhat = zhat.logsumexp(0) - math.log(total)
         return zhat.detach(), zhat
+
+
+class CbAisImhEstimator(AisImhEstimator):
+
+    cb: Optional[ConditionalBernoulli]
+    li: Optional[torch.Tensor]
+    alpha: float
+    li_requires_norm: bool
+    lie: LogInclusionEstimates
+
+    def __init__(
+        self,
+        lie: LogInclusionEstimates,
+        num_mc_samples: int,
+        lp: LogDensity,
+        lg: LogLikelihood,
+        theta: Theta,
+        alpha: float = 2.0,
+        li_requires_norm: bool = True,
+    ) -> None:
+        self.lie, self.alpha, self.li_requires_norm = lie, alpha, li_requires_norm
+        self.cb = self.li = None
+        super().__init__(num_mc_samples, lp, lg, theta)
+
+    def clear(self) -> None:
+        self.cb = self.li = None
+        return super().clear()
+
+    def initialize_proposal(self) -> None:
+        assert self.x is not None and self.lmax is not None
+        self.cb = ConditionalBernoulli(
+            self.lmax, logits=torch.randn_like(self.x[..., 0].t())
+        )
+        self.li = None
+
+    def update_proposal(self, b: torch.Tensor, mc_sample_num: int) -> None:
+        assert self.lmax is not None and self.y is not None and self.x is not None
+        li_new = self.lie(self.y, b, self.x, self.theta)
+        if mc_sample_num == 1:
+            self.li = li_new
+        else:
+            assert self.li is not None
+            self.li = (self.li + math.log(mc_sample_num - 1)).logaddexp(
+                li_new
+            ) - math.log(mc_sample_num)
+        li = self.li
+        if self.li_requires_norm:
+            ldenom = (self.alpha * (li.max(0)[0].exp_() - 1).clamp_min_(0.0)).log1p_()
+            li = li - ldenom
+        assert (li <= 0.0).all()
+        logits = li - torch.log1p(-li.exp()).clamp_min_(config.EPS_INF)
+        self.cb = ConditionalBernoulli(self.lmax, logits=logits.t())
+
+    def sample_proposal(self) -> torch.Tensor:
+        assert self.cb is not None
+        return self.cb.sample().t()
+
+    def proposal_log_prob(self, b: torch.Tensor) -> torch.Tensor:
+        assert self.cb is not None
+        return self.cb.log_prob(b.t())
 
 
 # TESTS
@@ -292,6 +355,15 @@ def _ilg(
     return extract_relevant_odds_forward(nse, lmax, True, config.EPS_INF).transpose(
         1, 2
     )
+
+
+def _lie(
+    y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
+) -> torch.Tensor:
+    logits, weights = theta
+    y_act = x.squeeze(2).t() * weights  # (nmax, tmax)
+    nse = -((y - y_act) ** 2)
+    return (nse + logits).t()  # (tmax, nmax)
 
 
 def test_enumerate_estimator():
@@ -413,3 +485,20 @@ def test_dummy_ais():
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
 
+
+def test_cb_ais_imh():
+    torch.manual_seed(6)
+    tmax, nmax, mc = 5, 4, 5000
+    x = torch.randn((tmax, nmax, 1))
+    logits = torch.randn((tmax,), requires_grad=True)
+    weights = torch.randn((tmax,), requires_grad=True)
+    theta = [logits, weights]
+    y = torch.randn(nmax, tmax)
+    lmax = torch.randint(tmax + 1, size=(nmax,))
+    zhat_exp, back_exp = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
+    grad_zhat_exp = torch.autograd.grad(back_exp, theta)
+    zhat_act, back_act = CbAisImhEstimator(_lie, mc, _lp, _lg, theta)(x, y, lmax)
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
+    assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)

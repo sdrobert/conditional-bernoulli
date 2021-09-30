@@ -409,19 +409,21 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         sample_shape = torch.Size(sample_shape)
         shape = self._extended_shape(sample_shape)
         with torch.no_grad():
-            odds_f = (
-                self.logits_f.exp()
-                .expand(sample_shape + self.logits_f.shape)
-                .transpose(0, 1)
-                .flatten(1, -2)
-            )
-            r_f = (
-                self.log_r_f.exp()
-                .expand(sample_shape + self.log_r_f.shape)
-                .transpose(0, 1)
-                .flatten(1, -2)
-            )
-            given_count = self.given_count.expand(shape[:-1]).flatten()
+            odds_f = self.logits_f.exp()
+            r_f = self.log_r_f.exp()
+            given_count = self.given_count
+            if sample_shape:
+                odds_f = (
+                    odds_f.unsqueeze(1)
+                    .expand(odds_f.shape[:1] + sample_shape + odds_f.shape[1:])
+                    .flatten(1, 2)
+                )
+                r_f = (
+                    r_f.unsqueeze(1)
+                    .expand(r_f.shape[:1] + sample_shape + r_f.shape[1:])
+                    .flatten(1, 2)
+                )
+                given_count = self.given_count.expand(shape[:-1]).flatten()
             b = extended_conditional_bernoulli(odds_f, given_count, 1, r_f)
         return b.view(shape)
 
