@@ -1,14 +1,4 @@
-r"""Implementations of batched estimators of z
-
-The functions in this module can estimate values
-
-.. math::
-
-    z = E_{b \sim P_\theta}[I[\sum_t b_t = \ell_*] G_\theta(b|x)]
-
-simultaneously for batches of :math:`\ell_*` and :math:`x` as well as its derivative
-with respect to parameters the
-"""
+from distributions import SimpleSamplingWithoutReplacement
 import config
 import abc
 from forward_backward import extract_relevant_odds_forward, log_R_forward
@@ -18,20 +8,20 @@ import math
 from utils import enumerate_bernoulli_support
 
 Theta = List[torch.Tensor]
-PSampler = IndependentLogOdds = Callable[[torch.Tensor, Theta], torch.Tensor]
-LogPDensity = Callable[[torch.Tensor, torch.Tensor, Theta], torch.Tensor]
-LogGDensity = IndependentLogLikelihoods = Callable[
+PSampler = IndependentLogits = Callable[[torch.Tensor, Theta], torch.Tensor]
+LogDensity = Callable[[torch.Tensor, torch.Tensor, Theta], torch.Tensor]
+LogLikelihood = IndependentLogLikelihoods = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, Theta], torch.Tensor
 ]
 
 
 class Estimator(metaclass=abc.ABCMeta):
 
-    lp: LogPDensity
-    lg: LogGDensity
+    lp: LogDensity
+    lg: LogLikelihood
     theta: Theta
 
-    def __init__(self, lp: LogPDensity, lg: LogGDensity, theta: Theta) -> None:
+    def __init__(self, lp: LogDensity, lg: LogLikelihood, theta: Theta) -> None:
         self.lp, self.lg, self.theta = lp, lg, theta
 
     @abc.abstractmethod
@@ -68,8 +58,8 @@ class RejectionEstimator(Estimator):
         self,
         psampler: PSampler,
         num_mc_samples: int,
-        lp: LogPDensity,
-        g: LogGDensity,
+        lp: LogDensity,
+        g: LogLikelihood,
         theta: Theta,
     ) -> None:
         self.psampler = psampler
@@ -126,15 +116,15 @@ class RejectionEstimator(Estimator):
 
 class ConditionalBernoulliEstimator(Estimator):
 
-    iw: IndependentLogOdds
+    iw: IndependentLogits
     ig: IndependentLogLikelihoods
 
     def __init__(
         self,
-        ilw: IndependentLogOdds,
+        ilw: IndependentLogits,
         ilg: IndependentLogLikelihoods,
-        lp: LogPDensity,
-        lg: LogGDensity,
+        lp: LogDensity,
+        lg: LogLikelihood,
         theta: Theta,
     ) -> None:
         self.ilw = ilw
@@ -153,6 +143,33 @@ class ConditionalBernoulliEstimator(Estimator):
         log_r = log_R_forward(iwg_f, lmax, batch_first=True)  # (nmax)
         log_denom = ilw.t().exp().log1p().sum(1)  # (nmax)
         zhat = (log_r - log_denom).logsumexp(0) - math.log(log_r.size(0))
+        return zhat.detach(), zhat
+
+
+class StaticSsworImportanceSampler(Estimator):
+
+    num_mc_samples: int
+
+    def __init__(
+        self, num_mc_samples: int, lp: LogDensity, g: LogLikelihood, theta: Theta,
+    ) -> None:
+        self.num_mc_samples = num_mc_samples
+        super().__init__(lp, g, theta)
+
+    def __call__(
+        self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        tmax, nmax, fmax = x.size()
+        total = nmax * self.num_mc_samples
+        sswor = SimpleSamplingWithoutReplacement(lmax, tmax)
+        b = sswor.sample([self.num_mc_samples])
+        lqb = sswor.log_prob(b).flatten().detach()  # mc * nmax
+        b = b.flatten(end_dim=1).t()  # tmax, mc * nmax
+        x = x.unsqueeze(1).expand(tmax, self.num_mc_samples, nmax, fmax).flatten(1, 2)
+        y = y.expand([self.num_mc_samples] + list(y.size())).flatten(end_dim=1)
+        lpb = self.lp(b, x, self.theta)
+        lg = self.lg(y, b, x, self.theta)
+        zhat = (lg + lpb - lqb).logsumexp(0) - math.log(total)
         return zhat.detach(), zhat
 
 
@@ -265,3 +282,21 @@ def test_conditional_bernoulli_estimator():
     assert torch.allclose(zhat_exp, zhat_act)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0])
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1])
+
+
+def test_sswor_is():
+    torch.manual_seed(4)
+    tmax, nmax, mc = 7, 2, 300000
+    x = torch.randn((tmax, nmax, 1))
+    logits = torch.randn((tmax,), requires_grad=True)
+    weights = torch.randn((tmax,), requires_grad=True)
+    theta = [logits, weights]
+    y = torch.randn(nmax, tmax)
+    lmax = torch.randint(tmax + 1, size=(nmax,))
+    zhat_exp, back_exp = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
+    grad_zhat_exp = torch.autograd.grad(back_exp, theta)
+    zhat_act, back_act = StaticSsworImportanceSampler(mc, _lp, _lg, theta)(x, y, lmax)
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
+    assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)

@@ -6,6 +6,7 @@ from estimators import (
     EnumerateEstimator,
     Estimator,
     RejectionEstimator,
+    StaticSsworImportanceSampler,
     Theta,
 )
 from typing import List, Tuple
@@ -227,16 +228,16 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     tmax = param.Integer(128, bounds=(1, None))
     fmax = param.Integer(16, bounds=(1, None))
     vmax = param.Integer(16, bounds=(1, None))
-    p = param.Magnitude(0.01)
-    gamma = param.Magnitude(0.0)
+    p = param.Magnitude(None)
+    gamma = param.Magnitude(None)
     x_std = param.Number(1.0, bounds=(0, None))
     W_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-3)
-    estimator = param.ObjectSelector("rej", objects=("rej", "enum", "cb"))
+    estimator = param.ObjectSelector("sswor", objects=("rej", "enum", "sswor", "cb"))
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     )
-    num_mc_samples = param.Integer(2 ** 16, bounds=(1, None))
+    num_mc_samples = param.Integer(2 ** 8, bounds=(1, None))
 
 
 def initialize(
@@ -273,8 +274,11 @@ def initialize(
         )
     elif df_params.estimator == "enum":
         estimator = EnumerateEstimator(_lp, _lg, theta_act)
+    elif df_params.estimator == "sswor":
+        estimator = StaticSsworImportanceSampler(
+            df_params.num_mc_samples, _lp, _lg, theta_act
+        )
     elif df_params.estimator == "cb":
-
         estimator = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta_act)
     else:
         raise NotImplementedError
