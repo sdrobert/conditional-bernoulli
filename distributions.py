@@ -154,6 +154,8 @@ def extended_conditional_bernoulli(
     lmax: torch.Tensor,
     kmax: int = 1,
     r_f: Optional[torch.Tensor] = None,
+    log_space: bool = False,
+    neg_inf: float = config.EPS_INF,
 ) -> torch.Tensor:
     assert kmax == 1, "kmax > 1 not yet implemented"
     device = w_f.device
@@ -161,13 +163,19 @@ def extended_conditional_bernoulli(
         # the user passed regular odds instead of the relevant odds forward.
         nmax, tmax = w_f.size()
         # call checks lmax size
-        w_f = extract_relevant_odds_forward(w_f, lmax, True)
+        w_f = extract_relevant_odds_forward(
+            w_f, lmax, True, neg_inf if log_space else 0
+        )
     else:
         _, nmax, diffmax = w_f.size()
         tmax = diffmax + int(lmax.min()) - 1
         assert device == lmax.device and lmax.dim() == 1 and lmax.size(0) == nmax
     if r_f is None:
-        r_f = R_forward(w_f, lmax, kmax, True, True)
+        r_f = (
+            log_R_forward(w_f, lmax, kmax, True, True)
+            if log_space
+            else R_forward(w_f, lmax, kmax, True, True)
+        )
     else:
         assert (
             r_f.dim() == 3
@@ -176,7 +184,12 @@ def extended_conditional_bernoulli(
             and r_f.size(2) == diffmax
         )
     assert r_f.dim() == 3
-    return _extended_conditional_bernoulli_k_eq_1(w_f, lmax.long(), r_f, tmax)
+    if log_space:
+        return _log_extended_conditional_bernoulli_k_eq_1(
+            w_f, lmax.long(), r_f, tmax, neg_inf
+        )
+    else:
+        return _extended_conditional_bernoulli_k_eq_1(w_f, lmax.long(), r_f, tmax)
 
 
 @torch.jit.script
@@ -199,6 +212,39 @@ def _extended_conditional_bernoulli_k_eq_1(
             w_f[remainder - 1, nrange] * r_f[remainder - 1, nrange]
         ).masked_fill(mask_ell, 0)
         tau_ell = torch.multinomial(weights_ell + (~valid_ell).unsqueeze(1), 1, True)
+        remainder = (remainder - 1).clamp_min_(0)
+        b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
+        tau_ellp1 = tau_ell
+    return b[:, :tmax]
+
+
+@torch.no_grad()
+def _log_extended_conditional_bernoulli_k_eq_1(
+    logits_f: torch.Tensor,
+    lmax: torch.Tensor,
+    log_r_f: torch.Tensor,
+    tmax: int,
+    neg_inf: float = config.EPS_INF,
+) -> torch.Tensor:
+    assert neg_inf > -float("inf")
+    device = logits_f.device
+    lmax_max, nmax, diffmax = logits_f.size()
+    remainder = lmax
+    nrange = torch.arange(nmax)
+    drange = torch.arange(diffmax)
+    lmax_max = log_r_f.size(0) - 1
+    tau_ellp1 = torch.full((nmax, 1), diffmax)
+    b = torch.zeros((nmax, tmax), device=device)
+    for _ in range(lmax_max):
+        valid_ell = remainder > 0
+        mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
+        log_weights_ell = (
+            (logits_f[remainder - 1, nrange] + log_r_f[remainder - 1, nrange])
+            .masked_fill(mask_ell, -float("inf"))
+            .clamp_min_(neg_inf)
+        )
+        log_weights_ell -= log_weights_ell.max(1, keepdim=True)[0]
+        tau_ell = torch.multinomial(log_weights_ell.exp(), 1, True)
         remainder = (remainder - 1).clamp_min_(0)
         b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
         tau_ellp1 = tau_ell
@@ -409,22 +455,20 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         sample_shape = torch.Size(sample_shape)
         shape = self._extended_shape(sample_shape)
         with torch.no_grad():
-            odds_f = self.logits_f.exp()
-            r_f = self.log_r_f.exp()
-            given_count = self.given_count
+            logits_f, log_r_f, lmax = self.logits_f, self.log_r_f, self.given_count
             if sample_shape:
-                odds_f = (
-                    odds_f.unsqueeze(1)
-                    .expand(odds_f.shape[:1] + sample_shape + odds_f.shape[1:])
+                logits_f = (
+                    logits_f.unsqueeze(1)
+                    .expand(logits_f.shape[:1] + sample_shape + logits_f.shape[1:])
                     .flatten(1, 2)
                 )
-                r_f = (
-                    r_f.unsqueeze(1)
-                    .expand(r_f.shape[:1] + sample_shape + r_f.shape[1:])
+                log_r_f = (
+                    log_r_f.unsqueeze(1)
+                    .expand(log_r_f.shape[:1] + sample_shape + log_r_f.shape[1:])
                     .flatten(1, 2)
                 )
-                given_count = self.given_count.expand(shape[:-1]).flatten()
-            b = extended_conditional_bernoulli(odds_f, given_count, 1, r_f)
+                lmax = lmax.expand(shape[:-1]).flatten()
+            b = extended_conditional_bernoulli(logits_f, lmax, 1, log_r_f, True)
         return b.view(shape)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:

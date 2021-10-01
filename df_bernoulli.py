@@ -1,7 +1,13 @@
 """Sequential classification based on Drezner & Farnum 1993"""
 
+import torch
+
+torch.use_deterministic_algorithms(True)
+
+
 import config
 from estimators import (
+    CbAisImhEstimator,
     ConditionalBernoulliEstimator,
     EnumerateEstimator,
     Estimator,
@@ -10,7 +16,6 @@ from estimators import (
     Theta,
 )
 from typing import List, Tuple
-import torch
 import param
 import argparse
 import sys
@@ -19,8 +24,6 @@ from pydrobert.param.serialization import DefaultObjectSelectorSerializer
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-
-torch.use_deterministic_algorithms(True)
 
 
 @torch.jit.script
@@ -74,6 +77,7 @@ def dependent_bernoulli_logprob(
     p: torch.Tensor,
     gamma: torch.Tensor,
     b: torch.Tensor,
+    full: bool = False,
     neg_inf: float = config.EPS_INF,
 ) -> torch.Tensor:
     """Return the log-probability of sample under D & F Dependent Bernoulli model
@@ -117,7 +121,10 @@ def dependent_bernoulli_logprob(
     )
     max_t = torch.max(left_t, right_t).nan_to_num_()
     logp_t = ((left_t - max_t).exp() + (right_t - max_t).exp()).log() + max_t
-    return logp_1 + logp_t.sum(0)
+    if full:
+        return torch.cat([logp_1.unsqueeze(0), logp_t])
+    else:
+        return logp_1 + logp_t.sum(0)
 
 
 @torch.jit.script
@@ -174,7 +181,7 @@ def event_logprob(
 
 
 @torch.jit.script
-def enumerate_latent_likelihoods(
+def enumerate_latent_log_likelihoods(
     W: torch.Tensor,
     x: torch.Tensor,
     y: torch.Tensor,
@@ -233,7 +240,9 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     x_std = param.Number(1.0, bounds=(0, None))
     W_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-3)
-    estimator = param.ObjectSelector("sswor", objects=("rej", "enum", "sswor", "cb"))
+    estimator = param.ObjectSelector(
+        "ais-lp", objects=("rej", "enum", "sswor", "cb", "ais-lp")
+    )
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     )
@@ -280,6 +289,15 @@ def initialize(
         )
     elif df_params.estimator == "cb":
         estimator = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta_act)
+    elif df_params.estimator == "ais-lp":
+        estimator = CbAisImhEstimator(
+            _lie_lp_only,
+            df_params.num_mc_samples,
+            _lp,
+            _lg,
+            theta_act,
+            li_requires_norm=False,
+        )
     else:
         raise NotImplementedError
     optimizer = df_params.optimizer(optim_params, lr=df_params.learning_rate)
@@ -311,15 +329,16 @@ def train_for_trial(
     #         v.backward(g.nan_to_num(0))
     optimizer.step()
     with torch.no_grad():
-        lpb = _lp(b, x, theta_exp)
-        lpy_b = _lg(y, b, x, theta_exp)
-        lpyb = lpb + lpy_b
         lqb = _lp(b, x, estimator.theta)
         lqy_b = _lg(y, b, x, estimator.theta)
         lqyb = lqb + lqy_b
-        sample_kl = (lpyb - lqyb).mean().item()
+        ret = -lqyb.mean().item()  # sample CE
+        # lpb = _lp(b, x, theta_exp)
+        # lpy_b = _lg(y, b, x, theta_exp)
+        # lpyb = lpb + lpy_b
+        # ret = (lpyb - lqyb).mean().item()  # Sample KL-divergence
     del x, b, events, lmax, y, back
-    return sample_kl
+    return ret
 
 
 def train(
@@ -409,6 +428,19 @@ def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     return dependent_bernoulli_logprob(p, gamma, b)
 
 
+def _lie_lp_only(
+    y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
+) -> torch.Tensor:
+    # this version of the log-inclusion probability estimator is biased, simply using
+    # the conditional log probabilities when computing log P(b)
+    p = theta[0].sigmoid()
+    gamma = theta[1].sigmoid()
+    nmax = b.size(1)
+    p = p.expand(nmax)
+    gamma = gamma.expand(nmax)
+    return dependent_bernoulli_logprob(p, gamma, b, True)
+
+
 @torch.jit.script
 @torch.no_grad()
 def _pad_events(events: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
@@ -459,7 +491,7 @@ def _ilg(
         y.size(1), device=lmax.device, dtype=lmax.dtype
     )
     events = y.masked_select(len_mask)
-    return enumerate_latent_likelihoods(W, x, events, lmax)
+    return enumerate_latent_log_likelihoods(W, x, events, lmax)
 
 
 if __name__ == "__main__":
@@ -485,8 +517,8 @@ def test_dependent_bernoulli_logprob():
 
     # gamma = 0 has the same probabilities as independent Bernoulli trials
     b = dependent_bernoulli_sample(p, torch.zeros((nmax,)), tmax)
-    exp_logprob = torch.distributions.Bernoulli(probs=p).log_prob(b).sum(0)
-    act_logprob = dependent_bernoulli_logprob(p, torch.zeros((nmax,)), b)
+    exp_logprob = torch.distributions.Bernoulli(probs=p).log_prob(b)
+    act_logprob = dependent_bernoulli_logprob(p, torch.zeros((nmax,)), b, True)
     assert exp_logprob.shape == act_logprob.shape
     assert torch.allclose(exp_logprob, act_logprob)
 
@@ -537,7 +569,7 @@ def test_event_logprob():
     assert torch.allclose(exp_logprob, act_logprob)
 
 
-def test_enumerate_latent_likelihoods():
+def test_enumerate_latent_log_likelihoods():
     torch.manual_seed(5)
     nmax, fmax = 30, 50
     lens = torch.arange(nmax)
@@ -546,7 +578,7 @@ def test_enumerate_latent_likelihoods():
     events = torch.arange(vmax)
     x = torch.randn((tmax, nmax, fmax))
     W = torch.rand(fmax, vmax)
-    ilg = enumerate_latent_likelihoods(W, x, events, lens)
+    ilg = enumerate_latent_log_likelihoods(W, x, events, lens)
     assert ilg.dim() == 3
     assert ilg.size(0) == nmax - 1
     assert ilg.size(1) == tmax + 1
@@ -588,7 +620,7 @@ def test_estimator_hooks():
     l1 = event_logprob(W, x, b, events)
     l2 = _lg(y, b, x, theta)
     assert torch.allclose(l1, l2)
-    l1 = enumerate_latent_likelihoods(W, x, events, lmax)
+    l1 = enumerate_latent_log_likelihoods(W, x, events, lmax)
     l2 = _ilg(x, y, lmax, theta)
     assert torch.allclose(l1, l2)
 
@@ -604,6 +636,13 @@ def test_estimator_hooks():
     assert not torch.allclose(zhat, torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
     assert grad_zhat[1] is None  # gamma, unused
+    assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
+
+    zhat, back = CbAisImhEstimator(_lie_lp_only, mc, _lp, _lg, theta)(x, y, lmax)
+    grad_zhat = torch.autograd.grad(back, theta, allow_unused=True)
+    assert not torch.allclose(zhat, torch.tensor(0.0))
+    assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
+    assert not torch.allclose(grad_zhat[1], torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
 
 
