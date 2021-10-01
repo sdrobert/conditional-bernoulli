@@ -5,7 +5,7 @@ from forward_backward import extract_relevant_odds_forward, log_R_forward
 from typing import Callable, List, Optional, Tuple
 import torch
 import math
-from utils import enumerate_bernoulli_support
+from utils import enumerate_bernoulli_support, enumerate_gibbs_partition
 
 Theta = List[torch.Tensor]
 PSampler = IndependentLogits = Callable[[torch.Tensor, Theta], torch.Tensor]
@@ -317,6 +317,67 @@ class CbAisImhEstimator(AisImhEstimator):
         return self.cb.log_prob(b.t())
 
 
+def gibbs_log_inclusion_estimates(
+    y: torch.Tensor,
+    b: torch.Tensor,
+    x: torch.Tensor,
+    lp: LogDensity,
+    lg: LogLikelihood,
+    theta: Theta,
+    neg_inf: float = config.EPS_INF,
+) -> torch.Tensor:
+
+    device = b.device
+    tmax, nmax = b.size()
+
+    # b always contributes to pi(tau_ell = t|tau_{-ell})
+    lyb = lp(b, x, theta) + lg(y, b, x, theta)  # (nmax,)
+
+    # determine the other contributors
+    bp, lens = enumerate_gibbs_partition(b)  # (tmax, nmax*), (nmax, lmax_max)
+    lmax_max = lens.size(1)
+    lens_ = lens.sum(1)
+    y = y.repeat_interleave(lens_, 0)  # (nmax*, ...)
+    x = x.repeat_interleave(lens_, 1)  # (tmax, nmax*, fmax)
+    lybp = lp(bp, x, theta) + lg(y, bp, x, theta)  # (nmax*)
+    b = b.long()
+    bp = bp.long()
+
+    # pad bp into (nmax, lmax_max, lens_max) tensor
+    lens_max = int(lens.max().item())
+    lens_mask = lens.unsqueeze(2) > torch.arange(lens_max, device=device)
+    lybp = torch.full(
+        (nmax, lmax_max, lens_max), -float("inf"), device=device
+    ).masked_scatter(lens_mask, lybp)
+
+    # determine normalization constant (b is part of all of them)
+    norm = lybp.logsumexp(2).logaddexp(lyb.unsqueeze(1))  # (nmax, lmax_max)
+
+    # determine the contribution to the inclusions for the samples b.
+    # We add the mass to pi(b_t = 1) only when pi(tau_ell = t|tau_{-ell}), *not*
+    # necessarily whenever t is some element of tau. To do this, we use the cumulative
+    # sum on b to determine what number event a high is
+    range_ = torch.arange(1, lmax_max + 1, device=device)
+    cb = (b * b.cumsum(0)).unsqueeze(2) == range_  # (tmax, nmax, lmax_max)
+    lyb = lyb.unsqueeze(1) - norm  # (nmax, lmax_max)
+    lie_b = (cb * lyb + (~cb) * neg_inf).logsumexp(2)
+
+    # now the contribution to the inclusions by bp.
+    match = range_.view(1, lmax_max, 1).expand(nmax, lmax_max, lens_max)[lens_mask]
+    cbp = bp * bp.cumsum(0) == match
+    lybp = (lybp - norm.unsqueeze(2)).masked_select(lens_mask)  # (nmax*)
+    lie_bp = cbp * lybp + (~cbp) * neg_inf  # (tmax, nmax*)
+    lens__max = int(lens_.max().item())
+    lens_mask = lens_.unsqueeze(1) > torch.arange(lens__max, device=device)
+    lie_bp = (
+        torch.full((tmax, nmax, lens__max), -float("inf"), device=device)
+        .masked_scatter(lens_mask.unsqueeze(0), lie_bp)
+        .logsumexp(2)
+    )
+
+    return torch.logaddexp(lie_b, lie_bp)
+
+
 # TESTS
 
 # a dumb little objective to test our estimators.
@@ -504,3 +565,21 @@ def test_cb_ais_imh():
     assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
+
+
+def test_gibbs_log_inclusion_estimates():
+    torch.manual_seed(7)
+    tmax, nmax = 12, 123
+    x = torch.randn((tmax, nmax, 1))
+    logits = torch.randn((tmax,))
+    weights = torch.randn((tmax,))
+    theta = [logits, weights]
+    y = torch.randn(nmax, tmax)
+    b = torch.bernoulli(logits.sigmoid().unsqueeze(1).expand(tmax, nmax))
+    lie = gibbs_log_inclusion_estimates(y, b, x, _lp, _lg, theta)
+    assert lie.size() == torch.Size([tmax, nmax])
+
+    # P(tau_ell = t|tau_{-ell}) > 0 for at most two values of ell
+    assert (lie <= math.log(2)).all()
+
+    assert torch.allclose(lie.t().exp().sum(1), b.sum(0))
