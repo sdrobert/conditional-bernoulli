@@ -11,6 +11,7 @@ from estimators import (
     ConditionalBernoulliEstimator,
     EnumerateEstimator,
     Estimator,
+    GibbsCbAisImhEstimator,
     RejectionEstimator,
     StaticSsworImportanceSampler,
     Theta,
@@ -150,7 +151,7 @@ def event_sample(
     return y, lens
 
 
-@torch.jit.script
+# @torch.jit.script
 def event_logprob(
     W: torch.Tensor, x: torch.Tensor, b: torch.Tensor, y: torch.Tensor
 ) -> torch.Tensor:
@@ -172,12 +173,19 @@ def event_logprob(
     isize = x.size(2)
     assert isize == W.size(0)
     assert b.device == W.device == x.device == y.device
-    b_ = b.to(torch.bool)
-    x_at_b = x.transpose(0, 1).masked_select(b_.t().unsqueeze(2)).view(-1, isize)
-    assert y.numel() == x_at_b.size(0)
+    b_ = b.t() != 0
+    x_at_b = x.transpose(0, 1).masked_select(b_.unsqueeze(2)).view(-1, isize)
+    assert y.numel() == x_at_b.size(0), (
+        y.numel(),
+        x_at_b.size(),
+        b.size(),
+        b.sum(),
+        b[:, 0],
+        b_[0],
+    )
     logits = x_at_b @ W
     logprob = logits.log_softmax(1).gather(1, y.unsqueeze(1)).squeeze(1)
-    return b.t().masked_scatter(b_.t(), logprob).sum(1)
+    return b.t().masked_scatter(b_, logprob).sum(1)
 
 
 @torch.jit.script
@@ -241,12 +249,13 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     W_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-3)
     estimator = param.ObjectSelector(
-        "ais-lp", objects=("rej", "enum", "sswor", "cb", "ais-lp")
+        "ais-cb-gibbs",
+        objects=("rej", "enum", "sswor", "cb", "ais-cb-lp", "ais-cb-gibbs"),
     )
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     )
-    num_mc_samples = param.Integer(2 ** 8, bounds=(1, None))
+    num_mc_samples = param.Integer(2 ** 3, bounds=(1, None))
 
 
 def initialize(
@@ -289,7 +298,7 @@ def initialize(
         )
     elif df_params.estimator == "cb":
         estimator = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta_act)
-    elif df_params.estimator == "ais-lp":
+    elif df_params.estimator == "ais-cb-lp":
         estimator = CbAisImhEstimator(
             _lie_lp_only,
             df_params.num_mc_samples,
@@ -297,6 +306,10 @@ def initialize(
             _lg,
             theta_act,
             li_requires_norm=False,
+        )
+    elif df_params.estimator == "ais-cb-gibbs":
+        estimator = GibbsCbAisImhEstimator(
+            df_params.num_mc_samples, _lp, _lg, theta_act
         )
     else:
         raise NotImplementedError
@@ -356,6 +369,7 @@ def train(
         sses_p.append((theta_act[0].sigmoid().item() - p_exp) ** 2)
         sses_gamma.append((theta_act[1].sigmoid().item() - gamma_exp) ** 2)
         sses_W.append(((theta_exp[2] - theta_act[2]) ** 2).sum().item())
+        print(sses_p[-1], sses_gamma[-1], sses_W[-1])
     return sample_ces, sses_p, sses_gamma, sses_W
 
 

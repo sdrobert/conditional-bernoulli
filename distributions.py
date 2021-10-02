@@ -77,7 +77,7 @@ class PoissonBinomial(torch.distributions.Distribution):
         batch_shape = self.batch_shape
         batch_dims = len(batch_shape)
         if not batch_dims:
-            logits, total_count = logits.unqueeze(0), total_count.view(1)
+            logits, total_count = logits.unsqueeze(0), total_count.view(1)
         else:
             logits, total_count = (
                 logits.flatten(end_dim=batch_dims - 1),
@@ -218,6 +218,7 @@ def _extended_conditional_bernoulli_k_eq_1(
     return b[:, :tmax]
 
 
+@torch.jit.script
 @torch.no_grad()
 def _log_extended_conditional_bernoulli_k_eq_1(
     logits_f: torch.Tensor,
@@ -239,12 +240,12 @@ def _log_extended_conditional_bernoulli_k_eq_1(
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
         log_weights_ell = (
-            (logits_f[remainder - 1, nrange] + log_r_f[remainder - 1, nrange])
-            .masked_fill(mask_ell, -float("inf"))
-            .clamp_min_(neg_inf)
+            logits_f[remainder - 1, nrange] + log_r_f[remainder - 1, nrange]
+        ).masked_fill(mask_ell, -float("inf"))
+        log_weights_ell -= log_weights_ell.max(1, keepdim=True)[0].clamp_min_(neg_inf)
+        tau_ell = torch.multinomial(
+            log_weights_ell.exp() + (~valid_ell).unsqueeze(1), 1, True
         )
-        log_weights_ell -= log_weights_ell.max(1, keepdim=True)[0]
-        tau_ell = torch.multinomial(log_weights_ell.exp(), 1, True)
         remainder = (remainder - 1).clamp_min_(0)
         b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
         tau_ellp1 = tau_ell
@@ -345,7 +346,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         batch_shape = list(self.batch_shape)
         batch_dims = len(batch_shape)
         if not batch_dims:
-            logits, given_count = logits.unqueeze(0), given_count.view(1)
+            logits, given_count = logits.unsqueeze(0), given_count.view(1)
         else:
             logits, given_count = (
                 logits.flatten(end_dim=batch_dims - 1),
@@ -368,7 +369,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         batch_shape = list(self.batch_shape)
         batch_dims = len(batch_shape)
         if not batch_dims:
-            logits_f, given_count = logits_f.unqueeze(0), given_count.view(1)
+            logits_f, given_count = logits_f.unsqueeze(1), given_count.view(1)
         else:
             logits_f, given_count = (
                 logits_f.flatten(1, batch_dims),
@@ -389,7 +390,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         batch_shape = list(self.batch_shape)
         batch_dims = len(batch_shape)
         if not batch_dims:
-            log_r_f, given_count = log_r_f.unqueeze(0), given_count.view(1)
+            log_r_f, given_count = log_r_f.unsqueeze(0), given_count.view(1)
         else:
             log_r_f, given_count = (
                 log_r_f.flatten(1, batch_dims),
@@ -410,8 +411,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
     @property
     def variance(self):
-        # ah geez whatever
-        raise NotImplementedError
+        return self.mean * (1 - self.mean)
 
     @property
     def param_shape(self):
@@ -456,6 +456,9 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         shape = self._extended_shape(sample_shape)
         with torch.no_grad():
             logits_f, log_r_f, lmax = self.logits_f, self.log_r_f, self.given_count
+            if not len(self.batch_shape):
+                logits_f, log_r_f = logits_f.unsqueeze(1), log_r_f.unsqueeze(1)
+                lmax = lmax.unsqueeze(0)
             if sample_shape:
                 logits_f = (
                     logits_f.unsqueeze(1)

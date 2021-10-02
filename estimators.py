@@ -235,7 +235,7 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
                     self.lp(b_last, x, self.theta)
                     + self.lg(y, b_last, x, self.theta)
                     - self.proposal_log_prob(b_last)
-                )
+                ).clamp_min_(config.EPS_INF)
             b_prop = self.sample_proposal()
             lomega_prop = (
                 self.lp(b_prop, x, self.theta)
@@ -243,13 +243,12 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
                 - self.proposal_log_prob(b_prop)
             )
             zhat.append(lomega_prop)
-            lomega_prop = lomega_prop.detach().clamp_min(config.EPS_INF)
 
             with torch.no_grad():
                 # N.B. This is intentionally the previous sample, not the current one.
                 self.update_proposal(b_last, mc)
+                choice = torch.bernoulli((lomega_prop - lomega_last).sigmoid_())
 
-            choice = torch.bernoulli((lomega_prop - lomega_last).sigmoid_())
             not_choice = 1 - choice
             b_last = b_prop * choice + b_last * not_choice
         self.clear()
@@ -376,6 +375,24 @@ def gibbs_log_inclusion_estimates(
     )
 
     return torch.logaddexp(lie_b, lie_bp)
+
+
+class GibbsCbAisImhEstimator(CbAisImhEstimator):
+    def __init__(
+        self,
+        num_mc_samples: int,
+        lp: LogDensity,
+        lg: LogLikelihood,
+        theta: Theta,
+        alpha: float = 2,
+    ) -> None:
+        lie = self._lie
+        super().__init__(
+            lie, num_mc_samples, lp, lg, theta, alpha=alpha, li_requires_norm=True
+        )
+
+    def _lie(self, y, b, x, theta):
+        return gibbs_log_inclusion_estimates(y, b, x, self.lp, self.lg, theta)
 
 
 # TESTS
@@ -583,3 +600,21 @@ def test_gibbs_log_inclusion_estimates():
     assert (lie <= math.log(2)).all()
 
     assert torch.allclose(lie.t().exp().sum(1), b.sum(0))
+
+
+def test_gibbs_cb_ais_imh():
+    torch.manual_seed(8)
+    tmax, nmax, mc = 5, 4, 10000
+    x = torch.randn((tmax, nmax, 1))
+    logits = torch.randn((tmax,), requires_grad=True)
+    weights = torch.randn((tmax,), requires_grad=True)
+    theta = [logits, weights]
+    y = torch.randn(nmax, tmax)
+    lmax = torch.randint(tmax + 1, size=(nmax,))
+    zhat_exp, back_exp = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
+    grad_zhat_exp = torch.autograd.grad(back_exp, theta)
+    zhat_act, back_act = GibbsCbAisImhEstimator(mc, _lp, _lg, theta)(x, y, lmax)
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
+    assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)

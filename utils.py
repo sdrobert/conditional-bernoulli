@@ -55,25 +55,64 @@ def enumerate_bernoulli_support(
 @torch.jit.script
 @torch.no_grad()
 def enumerate_gibbs_partition(b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    r"""Enumerate the possible ell-th event locations given the other ones over all ell
+
+    The Gibbs-style conditional density of a single event location given the rest for
+    a fixed number of events is
+
+    .. math::
+        \pi(\tau_\ell = t|\tau_{-\ell}) = \frac{P(\tau_{-\ell}(t))G(\tau_{-\ell}(t))}
+                                      {\sum_{t'}P(\tau_{-\ell}(t'))G(\tau_{-\ell}(t'))}
+    
+    Where :math:`\tau_{-\ell}` is some configuration of event locations excluding the
+    :math:`\ell`-th and :math:`\tau_{-\ell}(t)` is the :math:`\tau` such that
+    :math:`\tau_\ell = t` and the rest are :math:`\tau_{-\ell}`.
+
+    Letting :math:`\tau` characterize the ``n``-th batched element in `b`, ``b[:, n]``,
+    this function determines all possible :math:`\tau'` (and thus :math:`b'`, `bp`),
+    which would contribute to the numerator and/or denominator of :math:`\pi(\tau_\ell =
+    t|\tau_{-\ell})` for any given :math:`\ell`.
+
+    Parameters
+    ----------
+    b : torch.Tensor
+        Of shape ``(tmax, nmax)``
+    
+    Returns
+    -------
+    bp, lens : torch.Tensor, torch.Tensor
+    
+        `lens` is a long tensor of shape ``(nmax, lmax_max)``, where
+        ``lmax_max = b.sum(0).max()`` is the maximum number of events in any batched
+        element in `b`. `bp` of shape ``(tmax, nmax*)``, where ``nmax*`` is the total
+        number of :math:`b'` contributing to any :math:`\pi(\tau_\ell = t|\tau_{-\ell})`
+        in any batch element, *except* those where :math:`b' = b`. :math:`b` has a
+        nonzero contribution to any :math:`\pi(\tau_\ell = t|\tau_{-\ell})` (assuming
+        :math:`|\tau| > 0`), but is excluded to avoid redundancy. ``lens[n, ell - 1]``
+        is the number of :math:`b'` contributiong to
+        :math:`\pi(\tau_\ell = t|\tau_{-\ell})` associated with batch element
+        ``b[:, n]``. The :math:`b'` themselves are stored in `bp`, contiguous first in
+        increasing :math:`\ell` and then in ``n``. For example, the configurations
+        for ``n = 1`` and ``ell - 1 = 1`` are stored in
+        
+            bp[:, lens[0].sum() + lens[1, 0]:lens[0].sum() + lens[1, :1].sum()]
+    """
     assert b.dim() == 2
-    dtype = b.dtype
+    device, dtype = b.device, b.dtype
     b = b.t().to(torch.bool)
     nmax, tmax = b.size()
     lmax = b.sum(1)
     lmax_max = int(lmax.max())
-    if lmax_max == 0:
-        return b, torch.ones_like(lmax, dtype=torch.long)
+    if not lmax_max:
+        return (
+            torch.empty(tmax, 0, dtype=dtype, device=device),
+            torch.empty(nmax, 0, dtype=torch.long, device=device),
+        )
 
     candidates = torch.empty(
-        lmax_max + 1, nmax, tmax, tmax, dtype=torch.bool, device=b.device
+        lmax_max, nmax, tmax, tmax, dtype=torch.bool, device=b.device
     )
-    valid = torch.empty(lmax_max + 1, nmax, tmax, dtype=torch.bool, device=b.device)
-
-    # the first candidates are the originals themselves. This way we can exclude
-    # replacing the event locations when searching for new candidates
-    candidates[0, :, 0] = b
-    valid[0] = False
-    valid[0, :, 0] = True
+    valid = torch.empty(lmax_max, nmax, tmax, dtype=torch.bool, device=b.device)
 
     # e.g. b        = [1, 0, 0, 1, 1, 0, 0, 1]
     #      c        = [5, 1, 1, 6, 7, 3, 3, 8]
@@ -87,18 +126,18 @@ def enumerate_gibbs_partition(b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tens
     #      km4      = [1, 1, 1, 1, 1, 0, 0, 0]
     c = b.cumsum(1) + b * lmax_max
     eye = torch.eye(tmax, device=b.device, dtype=torch.bool)
-    for ell in range(1, lmax_max + 1):
-        valid[ell] = (ell <= lmax).unsqueeze(1).expand(nmax, tmax)
-        chng_msk = (c >= ell - 1) & (c <= ell)  # (nmax, tmax)
-        keep_msk = (c < ell - 1) | (c > ell) & (c != ell + lmax_max)
+    for ell in range(lmax_max):
+        valid[ell] = (ell < lmax).unsqueeze(1).expand(nmax, tmax)
+        chng_msk = (c >= ell) & (c <= ell + 1)  # (nmax, tmax)
+        keep_msk = (c < ell) | (c > ell + 1) & (c != ell + lmax_max + 1)
         candidates[ell] = (chng_msk.unsqueeze(2) & eye) | (keep_msk & b).unsqueeze(1)
         a = candidates[ell].sum(2) == lmax.unsqueeze(1)
         valid[ell] = valid[ell] & a  # torchscript interpreter bug doesn't allow &=
 
     valid, candidates = valid.transpose(0, 1), candidates.transpose(0, 1)
-    lens = valid.flatten(1).sum(1)
-    chosen = candidates[valid].view(-1, tmax).t().to(dtype)
-    return chosen, lens
+    lens = valid.sum(2)  # (nmax, lmax)
+    bp = candidates[valid].view(-1, tmax).t().to(dtype)
+    return bp, lens
 
 
 # TESTS
@@ -128,33 +167,37 @@ def test_enumerate_gibbs_partition():
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ]
     ).t()
-    lens_exp = torch.tensor([9, 11, 1])
-    chosen_exp = torch.tensor(
+    lens_exp = torch.tensor([[2, 2, 2, 2], [5, 5, 0, 0], [0, 0, 0, 0]])
+    # N.B. bp excludes b itself.
+    bp_exp = torch.tensor(
         [
-            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],  # start 0
+            # n=0, ell=0
             [0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            # ell=1
             [1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
             [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            # ell=2
             [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
             [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+            # ell=3
             [1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0],  # end 0
-            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],  # start 1
+            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0],
+            # n=1, ell=0
             [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+            # n=1, ell=1
             [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],  # end 1
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # start & end 2
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         ]
     ).t()
-    chosen_act, lens_act = enumerate_gibbs_partition(b)
+    bp_act, lens_act = enumerate_gibbs_partition(b)
 
     assert torch.equal(lens_exp, lens_act)
-    assert torch.equal(chosen_exp, chosen_act)
+    assert torch.equal(bp_exp, bp_act)
