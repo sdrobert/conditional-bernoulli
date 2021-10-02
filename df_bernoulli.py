@@ -238,24 +238,23 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
         bounds=(-0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF),
         inclusive_bounds=(True, True),
     )
-    num_trials = param.Integer(4096, bounds=(1, None))
+    num_trials = param.Integer(10, bounds=(1, None))
     batch_size = param.Integer(1, bounds=(1, None))
     tmax = param.Integer(128, bounds=(1, None))
     fmax = param.Integer(16, bounds=(1, None))
     vmax = param.Integer(16, bounds=(1, None))
     p = param.Magnitude(None)
-    gamma = param.Magnitude(None)
+    gamma = param.Magnitude(0.75)
     x_std = param.Number(1.0, bounds=(0, None))
     W_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-3)
     estimator = param.ObjectSelector(
-        "ais-cb-gibbs",
-        objects=("rej", "enum", "sswor", "cb", "ais-cb-lp", "ais-cb-gibbs"),
+        "rej", objects=("rej", "enum", "sswor", "cb", "ais-cb-lp", "ais-cb-gibbs"),
     )
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     )
-    num_mc_samples = param.Integer(2 ** 3, bounds=(1, None))
+    num_mc_samples = param.Integer(2 ** 8, bounds=(1, None))
 
 
 def initialize(
@@ -264,27 +263,23 @@ def initialize(
     dtype = torch.float
     if df_params.seed is not None:
         torch.manual_seed(df_params.seed)
-    p_exp = (
-        torch.tensor(df_params.p, dtype=dtype).logit_()
-        if df_params.p is not None
-        else torch.randn(1, dtype=dtype)
-    )
-    gamma_exp = (
-        torch.tensor(df_params.gamma, dtype=dtype).logit_()
-        if df_params.gamma is not None
-        else torch.randn(1, dtype=dtype)
-    )
+    if df_params.p is None:
+        df_params.p = torch.randn(1, dtype=torch.double).sigmoid_().item()
+    lp_exp = torch.tensor(df_params.p, dtype=dtype).logit_()
+    if df_params.gamma is None:
+        df_params.gamma = torch.randn(1, dtype=torch.double).sigmoid_().item()
+    lgamma_exp = torch.tensor(df_params.gamma, dtype=dtype).logit_()
     W_exp = torch.randn((df_params.fmax, df_params.vmax), dtype=dtype) * df_params.W_std
-    theta_exp = [p_exp, gamma_exp, W_exp]
-    p_act = torch.randn(1, dtype=dtype).requires_grad_(True)
-    gamma_act = torch.randn(1, dtype=dtype).requires_grad_(True)
+    theta_exp = [lp_exp, lgamma_exp, W_exp]
+    lp_act = torch.randn(1, dtype=dtype).requires_grad_(True)
+    lgamma_act = torch.randn(1, dtype=dtype).requires_grad_(True)
     W_act = torch.randn(
         (df_params.fmax, df_params.vmax), dtype=dtype, requires_grad=True
     )
-    theta_act = [p_act, gamma_act, W_act]
+    theta_act = [lp_act, lgamma_act, W_act]
     optim_params = theta_act.copy()
     if df_params.gamma == 0.0 or df_params.estimator == "cb":
-        gamma_act.data[0] = -float("inf")
+        lgamma_act.data[0] = -float("inf")
         optim_params.pop(1)
     if df_params.estimator == "rej":
         estimator = RejectionEstimator(
@@ -369,7 +364,6 @@ def train(
         sses_p.append((theta_act[0].sigmoid().item() - p_exp) ** 2)
         sses_gamma.append((theta_act[1].sigmoid().item() - gamma_exp) ** 2)
         sses_W.append(((theta_exp[2] - theta_act[2]) ** 2).sum().item())
-        print(sses_p[-1], sses_gamma[-1], sses_W[-1])
     return sample_ces, sses_p, sses_gamma, sses_W
 
 
