@@ -238,13 +238,13 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
         bounds=(-0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF),
         inclusive_bounds=(True, True),
     )
-    num_trials = param.Integer(10, bounds=(1, None))
+    num_trials = param.Integer(1024, bounds=(1, None))
     batch_size = param.Integer(1, bounds=(1, None))
     tmax = param.Integer(128, bounds=(1, None))
     fmax = param.Integer(16, bounds=(1, None))
     vmax = param.Integer(16, bounds=(1, None))
     p = param.Magnitude(None)
-    gamma = param.Magnitude(0.75)
+    gamma = param.Magnitude(None)
     x_std = param.Number(1.0, bounds=(0, None))
     W_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-3)
