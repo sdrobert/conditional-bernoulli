@@ -5,16 +5,17 @@ res=res
 log=log
 
 mcs=( 1 256 65536 )
-gammas=( 0 0.25 0.75 )
+betas=( 0 0.25 0.75 )
 probs=( 0.01 0.25 0.75 )
 estimators=( rej sswor cb ais-cb-lp ais-cb-gibbs )
 num_seeds=10
 
 template='[DreznerFarnumBernoulliExperimentParameters]
-batch_size = 1
+train_batch_size = 1
+kl_batch_size = 128
 estimator = ESTIMATOR
 fmax = 16
-gamma = GAMMA
+beta = BETA
 learning_rate = 0.001
 num_mc_samples = MC
 num_trials = 4096
@@ -29,13 +30,13 @@ mkdir -p "$conf" "$res" "$log"
 
 num_jobs=0
 for mc in "${mcs[@]}"; do
-  for gamma in "${gammas[@]}"; do
+  for beta in "${betas[@]}"; do
     for prob in "${probs[@]}"; do
       for estimator in "${estimators[@]}"; do
         [ "$estimator" = "cb" ] && [ "$mc" != "1" ] && continue
         num_jobs=$(( $num_jobs + 1 ))
         echo "$template" | \
-          sed "s/MC/${mc}/;s/GAMMA/${gamma}/;s/PROB/${prob}/;s/ESTIMATOR/${estimator}/" \
+          sed "s/MC/${mc}/;s/BETA/${beta}/;s/PROB/${prob}/;s/ESTIMATOR/${estimator}/" \
           > "$conf/df.${num_jobs}.ini"
       done
     done
