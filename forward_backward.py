@@ -139,7 +139,7 @@ def _log_R_forward_k_eq_1(
     logits_f: torch.Tensor, neg_inf: float = config.EPS_INF
 ) -> torch.Tensor:
     assert logits_f.dim() == 3
-    logits_f = logits_f.clamp_min(neg_inf)
+    # logits_f = logits_f.clamp_min(neg_inf)
     logits_f_shape = logits_f.size()
     lr = [torch.zeros(logits_f_shape[1:], device=logits_f.device, dtype=logits_f.dtype)]
     for ell in range(logits_f_shape[0]):
