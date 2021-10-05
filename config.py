@@ -8,3 +8,7 @@ import math
 # when exponentiated, is nonzero, but only just. The division by two here ensures that
 # we can add two EPS_INF values without the result being zero.
 EPS_INF = math.log(torch.finfo(torch.float32).tiny) / 2
+
+
+# for log probabilities that we want to clamp away from 1
+EPS_0 = math.log1p(-torch.finfo(torch.float).eps)

@@ -1,5 +1,6 @@
 """Forward and backward functions"""
 
+import math
 import torch
 import config
 
@@ -139,7 +140,7 @@ def _log_R_forward_k_eq_1(
     logits_f: torch.Tensor, neg_inf: float = config.EPS_INF
 ) -> torch.Tensor:
     assert logits_f.dim() == 3
-    # logits_f = logits_f.clamp_min(neg_inf)
+    logits_f = logits_f.clamp_min(neg_inf)
     logits_f_shape = logits_f.size()
     lr = [torch.zeros(logits_f_shape[1:], device=logits_f.device, dtype=logits_f.dtype)]
     for ell in range(logits_f_shape[0]):
@@ -154,19 +155,45 @@ def _log_R_forward_k_eq_1(
 #     kmax: int = 1,
 #     return_all: bool = False,
 #     batch_first: bool = False,
+#     neg_inf: float = config.EPS_INF,
 # ) -> torch.Tensor:
-#     max_logits_f = logits_f.detach().max()
-#     logits_f = logits_f - max_logits_f
-#     w_f = logits_f.exp()
-#     lr = R_forward(w_f, lmax, kmax, return_all, batch_first).log()
+#     assert logits_f.dim() == 3 and lmax.dim() == 1
+#     if not batch_first:
+#         logits_f = logits_f.transpose(1, 2)
+#     lmax_max, nmax, diffmax = logits_f.size()
+#     tmax = diffmax + int(lmax.min().item()) - 1
+#     max_r = math.factorial(tmax) // (
+#         math.factorial(tmax - lmax_max) * math.factorial(lmax_max)
+#     )
+#     if max_r > torch.finfo(torch.double).max:
+#         assert kmax == 1, "kmax > 1 not supported"
+#         lmax = lmax.to(torch.long)
+#         lr = _log_R_forward_k_eq_1(logits_f, neg_inf)
+#         if return_all:
+#             return lr if batch_first else lr.transpose(1, 2)
+#         else:
+#             return lr[
+#                 lmax, torch.arange(nmax, device=lmax.device), tmax - lmax,
+#             ]
+#     dtype = logits_f.dtype
+#     if max_r > torch.finfo(torch.float).max:
+#         logits_f = logits_f.to(torch.double)
+#     logits_f_max = logits_f.detach().max(2, keepdim=True)[0].clamp_min_(neg_inf)
+#     logits_f = logits_f - logits_f_max
+#     logits_f_max = logits_f_max.cumsum_(0)
+#     lr = R_forward(logits_f.exp(), lmax, kmax, return_all, True).log()
 #     if return_all:
-#         max_range = max_logits_f * torch.arange(
-#             lr.size(0), device=lmax.device, dtype=lmax.dtype
-#         )
-#         lr += max_range.unsqueeze(1).unsqueeze(2)
+#         lr = torch.cat([lr[:1], lr[1:] + logits_f_max])
+#         if not batch_first:
+#             lr = lr.transpose(1, 2)
 #     else:
-#         lr += max_logits_f * lmax
-#     return lr
+#         lr = (
+#             lr
+#             + logits_f_max.squeeze(2)[
+#                 (lmax.to(torch.long) - 1).clamp_min_(0), torch.arange(nmax)
+#             ]
+#         )
+#     return lr.to(dtype)
 
 
 @torch.jit.script_if_tracing

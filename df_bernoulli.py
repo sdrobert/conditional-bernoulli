@@ -153,7 +153,7 @@ def event_sample(
     return y, lens
 
 
-# @torch.jit.script
+@torch.jit.script
 def event_logprob(
     W: torch.Tensor, x: torch.Tensor, b: torch.Tensor, y: torch.Tensor
 ) -> torch.Tensor:
@@ -298,12 +298,7 @@ def initialize(
         estimator = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta_act)
     elif df_params.estimator == "ais-cb-lp":
         estimator = CbAisImhEstimator(
-            _lie_lp_only,
-            df_params.num_mc_samples,
-            _lp,
-            _lg,
-            theta_act,
-            li_requires_norm=False,
+            _lie_lp_only, df_params.num_mc_samples, _lp, _lg, theta_act
         )
     elif df_params.estimator == "ais-cb-gibbs":
         estimator = GibbsCbAisImhEstimator(
@@ -320,7 +315,7 @@ def train_for_trial(
     theta_exp: Theta,
     estimator: Estimator,
     df_params: DreznerFarnumBernoulliExperimentParameters,
-) -> float:
+) -> Tuple[float, float]:
     optimizer.zero_grad()
     x = (
         torch.randn(
@@ -332,7 +327,7 @@ def train_for_trial(
     b = _psampler(x, theta_exp)
     events, lmax = event_sample(theta_exp[2], x, b)
     y = _pad_events(events, lmax)
-    zhat, back = estimator(x, y, lmax)
+    zhat, back, log_ess = estimator(x, y, lmax)
     (-back).backward()
     # grads_theta = torch.autograd.grad(-back, estimator.theta, allow_unused=True)
     # for v, g in zip(estimator.theta, grads_theta):
@@ -340,7 +335,7 @@ def train_for_trial(
     #         v.backward(g.nan_to_num(0))
     optimizer.step()
     del x, b, events, lmax, y, back
-    return zhat.item()
+    return zhat.item(), log_ess.item()
 
 
 def draw_kl_sample_estimate(
@@ -369,6 +364,7 @@ def train(
     optimizer, theta_exp, theta_act, estimator = initialize(df_params)
     sample_kls = []
     sample_zhats = []
+    log_esss = []
     sses_lp = []
     sses_lbeta = []
     sses_W = []
@@ -377,13 +373,15 @@ def train(
     lbeta_exp = theta_exp[1].sigmoid().log().item()
     start = datetime.now()
     for _ in tqdm(range(df_params.num_trials)):
-        sample_zhats.append(train_for_trial(optimizer, theta_exp, estimator, df_params))
+        zhat, log_ess = train_for_trial(optimizer, theta_exp, estimator, df_params)
+        log_esss.append(log_ess)
+        sample_zhats.append(zhat)
         sample_kls.append(draw_kl_sample_estimate(theta_exp, estimator, df_params))
         tdeltas.append(datetime.now() - start)
         sses_lp.append((theta_act[0].sigmoid().log().item() - lp_exp) ** 2)
         sses_lbeta.append((theta_act[1].sigmoid().log().item() - lbeta_exp) ** 2)
         sses_W.append(((theta_exp[2] - theta_act[2]) ** 2).sum().item())
-    return sample_kls, sample_zhats, sses_lp, sses_lbeta, sses_W, tdeltas
+    return sample_kls, sample_zhats, log_esss, sses_lp, sses_lbeta, sses_W, tdeltas
 
 
 def main(args=None) -> int:
@@ -412,7 +410,9 @@ def main(args=None) -> int:
     options = parser.parse_args(args)
     if options.seed is not None:
         options.params.seed = options.seed
-    sample_kls, zhats, sses_lp, sses_lbeta, sses_W, tdeltas = train(options.params)
+    sample_kls, zhats, log_esss, sses_lp, sses_lbeta, sses_W, tdeltas = train(
+        options.params
+    )
     sses_lp = pd.Series(sses_lp)
     sses_lbeta = pd.Series(sses_lbeta)
     sses_W = pd.Series(sses_W)
@@ -444,6 +444,7 @@ def main(args=None) -> int:
             "SSE W": sses_W,
             "Time Since Start": tdeltas,
             "zhat Estimate": zhats,
+            "Log ESS": log_esss,
             "KL Batch Estimate": sample_kls,
         }
     )
@@ -656,21 +657,26 @@ def test_estimator_hooks():
     l2 = _ilg(x, y, lmax, theta)
     assert torch.allclose(l1, l2)
 
-    zhat, back = RejectionEstimator(_psampler, mc, _lp, _lg, theta)(x, y, lmax)
+    zhat, back, _ = RejectionEstimator(_psampler, mc, _lp, _lg, theta)(x, y, lmax)
     grad_zhat = torch.autograd.grad(back, theta)
     assert not torch.allclose(zhat, torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[1], torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
 
-    zhat, back = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta)(x, y, lmax)
+    zhat, back, _ = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta)(
+        x, y, lmax
+    )
     grad_zhat = torch.autograd.grad(back, theta, allow_unused=True)
     assert not torch.allclose(zhat, torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
     assert grad_zhat[1] is None  # beta, unused
     assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
 
-    zhat, back = CbAisImhEstimator(_lie_lp_only, mc, _lp, _lg, theta)(x, y, lmax)
+    zhat, back, log_ess = CbAisImhEstimator(_lie_lp_only, mc, _lp, _lg, theta)(
+        x, y, lmax
+    )
+    assert not log_ess.isnan()
     grad_zhat = torch.autograd.grad(back, theta, allow_unused=True)
     assert not torch.allclose(zhat, torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
@@ -680,8 +686,12 @@ def test_estimator_hooks():
 
 def test_train():
     torch.manual_seed(7)
+    nt = 30
     df_params = DreznerFarnumBernoulliExperimentParameters(
-        num_trials=5, tmax=16, train_batch_size=32, estimator="enum"
+        num_trials=nt, tmax=16, train_batch_size=128, estimator="cb", beta=0
     )
     res = train(df_params)
-    assert res[0][0] > res[0][-1]
+    assert (
+        torch.tensor(res[0][: nt // 2]).mean() > torch.tensor(res[0][nt // 2 :]).mean()
+    )
+
