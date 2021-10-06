@@ -1,4 +1,4 @@
-from distributions import ConditionalBernoulli, SimpleSamplingWithoutReplacement
+from distributions import ConditionalBernoulli, SimpleRandomSamplingWithoutReplacement
 import config
 import abc
 from forward_backward import extract_relevant_odds_forward, log_R_forward
@@ -119,7 +119,7 @@ class RejectionEstimator(Estimator):
         )
 
 
-class ConditionalBernoulliEstimator(Estimator):
+class ExtendedConditionalBernoulliEstimator(Estimator):
 
     iw: IndependentLogits
     ig: IndependentLogLikelihoods
@@ -151,7 +151,7 @@ class ConditionalBernoulliEstimator(Estimator):
         return zhat.detach(), zhat, torch.tensor(float("nan"))
 
 
-class StaticSsworImportanceSampler(Estimator):
+class StaticSrsworIsEstimator(Estimator):
 
     num_mc_samples: int
 
@@ -166,9 +166,9 @@ class StaticSsworImportanceSampler(Estimator):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tmax, nmax, fmax = x.size()
         total = nmax * self.num_mc_samples
-        sswor = SimpleSamplingWithoutReplacement(lmax, tmax)
-        b = sswor.sample([self.num_mc_samples])
-        lqb = sswor.log_prob(b).flatten().detach()  # mc * nmax
+        srswor = SimpleRandomSamplingWithoutReplacement(lmax, tmax)
+        b = srswor.sample([self.num_mc_samples])
+        lqb = srswor.log_prob(b).flatten().detach()  # mc * nmax
         b = b.flatten(end_dim=1).t()  # tmax, mc * nmax
         x = x.unsqueeze(1).expand(tmax, self.num_mc_samples, nmax, fmax).flatten(1, 2)
         y = y.expand([self.num_mc_samples] + list(y.size())).flatten(end_dim=1)
@@ -207,14 +207,14 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
         pass
 
     def get_first_sample(self) -> torch.Tensor:
-        # use sswor until we have a sample in the support of pi
+        # use srswor until we have a sample in the support of pi
         assert self.x is not None and self.y is not None and self.lmax is not None
         tmax, nmax, _ = self.x.size()
-        sswor = SimpleSamplingWithoutReplacement(self.lmax, tmax, tmax)
+        srswor = SimpleRandomSamplingWithoutReplacement(self.lmax, tmax, tmax)
         b = torch.empty_like(self.x[..., 0])
         is_supported = torch.zeros((nmax,), device=self.x.device, dtype=torch.bool)
         while not is_supported.all():
-            b_ = sswor.sample().t()  # (tmax, lmax)
+            b_ = srswor.sample().t()  # (tmax, lmax)
             b_[:, is_supported] = b[:, is_supported]
             b = b_
             lp = self.lp(b, self.x, self.theta)
@@ -279,11 +279,23 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
         return zhat.detach(), zhat, log_ess
 
 
+class DummyAisImhEstimator(AisImhEstimator):
+    def initialize_proposal(self) -> None:
+        tmax = self.x.size(0)
+        self.srswor = SimpleRandomSamplingWithoutReplacement(self.lmax, tmax, tmax)
+
+    def sample_proposal(self) -> torch.Tensor:
+        return self.srswor.sample().t()
+
+    def proposal_log_prob(self, b: torch.Tensor) -> torch.Tensor:
+        l = self.srswor.log_prob(b.t())
+        return l
+
+
 class CbAisImhEstimator(AisImhEstimator):
 
     cb: Optional[ConditionalBernoulli]
     li: Optional[torch.Tensor]
-    alpha: float
     lie: LogInclusionEstimates
 
     def __init__(
@@ -293,9 +305,8 @@ class CbAisImhEstimator(AisImhEstimator):
         lp: LogDensity,
         lg: LogLikelihood,
         theta: Theta,
-        alpha: float = 2.0,
     ) -> None:
-        self.lie, self.alpha = lie, alpha
+        self.lie = lie
         self.cb = self.li = None
         super().__init__(num_mc_samples, lp, lg, theta)
 
@@ -308,21 +319,16 @@ class CbAisImhEstimator(AisImhEstimator):
         self.cb = ConditionalBernoulli(
             self.lmax, logits=torch.randn_like(self.x[..., 0].t())
         )
-        self.li = None
+        self.li = self.cb.probs.t().log()
 
     def update_proposal(self, b: torch.Tensor, mc_sample_num: int) -> None:
         assert self.lmax is not None and self.y is not None and self.x is not None
         li_new = self.lie(self.y, b, self.x, self.theta)
-        if mc_sample_num == 1:
-            self.li = li_new
-        else:
-            assert self.li is not None
-            self.li = (self.li + math.log(mc_sample_num - 1)).logaddexp(
-                li_new
-            ) - math.log(mc_sample_num)
-        logits = self.li
-        # logits = logits.clamp_max(math.log1p(-torch.finfo(torch.float).eps))
-        # logits = logits - torch.log1p(-logits.exp()).clamp_min_(config.EPS_0)
+        self.li = (self.li + math.log(mc_sample_num)).logaddexp(li_new) - math.log(
+            mc_sample_num + 1
+        )
+        logits = self.li.clamp(config.EPS_INF, config.EPS_0)
+        # logits = logits - torch.log1p(-logits.exp())
         self.cb = ConditionalBernoulli(self.lmax, logits=logits.t())
 
     def sample_proposal(self) -> torch.Tensor:
@@ -400,15 +406,10 @@ def gibbs_log_inclusion_estimates(
 
 class GibbsCbAisImhEstimator(CbAisImhEstimator):
     def __init__(
-        self,
-        num_mc_samples: int,
-        lp: LogDensity,
-        lg: LogLikelihood,
-        theta: Theta,
-        alpha: float = 2,
+        self, num_mc_samples: int, lp: LogDensity, lg: LogLikelihood, theta: Theta,
     ) -> None:
         lie = self._lie
-        super().__init__(lie, num_mc_samples, lp, lg, theta, alpha=alpha)
+        super().__init__(lie, num_mc_samples, lp, lg, theta)
 
     def _lie(self, y, b, x, theta):
         return gibbs_log_inclusion_estimates(y, b, x, self.lp, self.lg, theta)
@@ -516,7 +517,7 @@ def test_rejection_estimator():
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
 
 
-def test_conditional_bernoulli_estimator():
+def test_extended_conditional_bernoulli_estimator():
     torch.manual_seed(3)
     tmax, nmax = 8, 12
     x = torch.randn((tmax, nmax, 1))
@@ -527,16 +528,16 @@ def test_conditional_bernoulli_estimator():
     lmax = torch.randint(tmax + 1, size=(nmax,))
     zhat_exp, back_exp, _ = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
     grad_zhat_exp = torch.autograd.grad(back_exp, theta)
-    zhat_act, back_act, _ = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta)(
-        x, y, lmax
-    )
+    zhat_act, back_act, _ = ExtendedConditionalBernoulliEstimator(
+        _ilw, _ilg, _lp, _lg, theta
+    )(x, y, lmax)
     grad_zhat_act = torch.autograd.grad(back_act, theta)
     assert torch.allclose(zhat_exp, zhat_act)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0])
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1])
 
 
-def test_sswor_is():
+def test_static_srswor_is_estimator():
     torch.manual_seed(4)
     tmax, nmax, mc = 7, 2, 300000
     x = torch.randn((tmax, nmax, 1))
@@ -547,7 +548,7 @@ def test_sswor_is():
     lmax = torch.randint(tmax + 1, size=(nmax,))
     zhat_exp, back_exp, _ = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
     grad_zhat_exp = torch.autograd.grad(back_exp, theta)
-    zhat_act, back_act, log_ess = StaticSsworImportanceSampler(mc, _lp, _lg, theta)(
+    zhat_act, back_act, log_ess = StaticSrsworIsEstimator(mc, _lp, _lg, theta)(
         x, y, lmax
     )
     grad_zhat_act = torch.autograd.grad(back_act, theta)
@@ -555,19 +556,6 @@ def test_sswor_is():
     assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
-
-
-class _DummyAisImhEstimator(AisImhEstimator):
-    def initialize_proposal(self) -> None:
-        tmax = self.x.size(0)
-        self.sswor = SimpleSamplingWithoutReplacement(self.lmax, tmax, tmax)
-
-    def sample_proposal(self) -> torch.Tensor:
-        return self.sswor.sample().t()
-
-    def proposal_log_prob(self, b: torch.Tensor) -> torch.Tensor:
-        l = self.sswor.log_prob(b.t())
-        return l
 
 
 # def test_dummy_ais():

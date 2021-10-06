@@ -11,7 +11,7 @@ from typing import Optional, Union
 import torch
 
 import torch.distributions.constraints as constraints
-from torch.distributions.utils import lazy_property, logits_to_probs
+from torch.distributions.utils import lazy_property
 
 
 class PoissonBinomial(torch.distributions.Distribution):
@@ -241,10 +241,11 @@ def _log_extended_conditional_bernoulli_k_eq_1(
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
         log_weights_ell = (
             logits_f[remainder - 1, nrange] + log_r_f[remainder - 1, nrange]
-        ).masked_fill(mask_ell, -float("inf"))
-        log_weights_ell -= log_weights_ell.max(1, keepdim=True)[0].clamp_min_(neg_inf)
+        ).masked_fill_(mask_ell, -float("inf"))
+        norm = log_weights_ell.max(1, keepdim=True)[0]
+        log_weights_ell = (log_weights_ell - norm).masked_fill_(norm.isinf(), neg_inf)
         tau_ell = torch.multinomial(
-            log_weights_ell.exp() + (~valid_ell).unsqueeze(1), 1, True
+            log_weights_ell.exp_() + (~valid_ell).unsqueeze(1), 1, True
         )
         remainder = (remainder - 1).clamp_min_(0)
         b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
@@ -484,7 +485,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
 @torch.jit.script
 @torch.no_grad()
-def simple_sampling_without_replacement(
+def simple_random_sampling_without_replacement(
     tmax: torch.Tensor, lmax: torch.Tensor, tmax_max: Optional[int] = None
 ) -> torch.Tensor:
     if tmax_max is None:
@@ -502,7 +503,7 @@ def simple_sampling_without_replacement(
     return b.movedim(0, -1)
 
 
-class SimpleSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
+class SimpleRandomSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
 
     arg_constraints = {
         "total_count": constraints.nonnegative_integer,
@@ -525,7 +526,7 @@ class SimpleSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
         batch_shape = given_count.size()
         event_shape = torch.Size([out_size])
         self.total_count, self.given_count = total_count, given_count
-        super(SimpleSamplingWithoutReplacement, self).__init__(
+        super(SimpleRandomSamplingWithoutReplacement, self).__init__(
             batch_shape, event_shape, validate_args
         )
 
@@ -575,7 +576,7 @@ class SimpleSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
         return self.log_partition
 
     def expand(self, batch_shape, _instance=None):
-        new = self._get_checked_instance(SimpleSamplingWithoutReplacement, _instance)
+        new = self._get_checked_instance(SimpleRandomSamplingWithoutReplacement, _instance)
         batch_shape = list(batch_shape)
         new.given_count = self.given_count.expand(batch_shape)
         new.total_count = self.total_count.expand(batch_shape)
@@ -583,7 +584,7 @@ class SimpleSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
         if "log_partition" in self.__dict__:
             new.log_partition = self.log_partition.expand(batch_shape)
 
-        super(SimpleSamplingWithoutReplacement, new).__init__(
+        super(SimpleRandomSamplingWithoutReplacement, new).__init__(
             torch.Size(batch_shape), self.event_shape, validate_args=False
         )
         new._validate_args = self._validate_args
@@ -595,7 +596,7 @@ class SimpleSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
         with torch.no_grad():
             total_count = self.total_count.expand(shape[:-1])
             given_count = self.given_count.expand(shape[:-1])
-            b = simple_sampling_without_replacement(
+            b = simple_random_sampling_without_replacement(
                 total_count, given_count, self.event_shape[0]
             )
         return b
@@ -686,20 +687,20 @@ def test_conditional_bernoulli():
     assert (b.max(-1)[0] <= 1).all()
 
 
-def test_simple_sampling_without_replacement():
+def test_simple_random_sampling_without_replacement():
     torch.manual_seed(3)
     tmax_max, nmax, mmax = 16, 8, 2 ** 15
     tmax = torch.randint(tmax_max + 1, size=(nmax,), dtype=torch.float)
     lmax = (torch.rand(nmax) * (tmax + 1)).floor_()
 
-    sswor = SimpleSamplingWithoutReplacement(lmax, tmax, tmax_max, True)
-    b = sswor.sample([mmax])
+    srswor = SimpleRandomSamplingWithoutReplacement(lmax, tmax, tmax_max, True)
+    b = srswor.sample([mmax])
     assert ((b == 0.0) | (b == 1.0)).all()
     assert (b.sum(-1) == lmax).all()
     tmax_mask = tmax.unsqueeze(1) > torch.arange(tmax_max)
     b = b * tmax_mask
     assert (b.sum(-1) == lmax).all()
-    assert torch.allclose(b.mean(0), sswor.mean, atol=1e-2)
+    assert torch.allclose(b.mean(0), srswor.mean, atol=1e-2)
 
     lp_exp = []
     for n in range(nmax):
@@ -711,7 +712,7 @@ def test_simple_sampling_without_replacement():
             )
         )
     lp_exp = torch.tensor(lp_exp).expand(mmax, nmax)
-    lp_act = sswor.log_prob(b)
+    lp_act = srswor.log_prob(b)
     assert torch.allclose(lp_exp, lp_act)
 
 

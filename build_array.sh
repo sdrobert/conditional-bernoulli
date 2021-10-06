@@ -6,9 +6,10 @@ log=log
 
 mcs=( 1 256 65536 )
 betas=( 0 0.25 0.75 )
-probs=( 0.01 0.25 0.75 )
-estimators=( rej sswor cb ais-cb-lp ais-cb-gibbs )
-num_seeds=10
+probs=( 0.25 0.75 )
+estimators=( rej srswor ecb ais-cb-count ais-cb-lp ais-cb-gibbs )
+num_seeds=20
+num_trials=8192
 
 template='[DreznerFarnumBernoulliExperimentParameters]
 train_batch_size = 1
@@ -18,7 +19,7 @@ fmax = 16
 beta = BETA
 learning_rate = 0.001
 num_mc_samples = MC
-num_trials = 4096
+num_trials = NT
 optimizer = adam
 p = PROB
 tmax = 128
@@ -34,9 +35,13 @@ for mc in "${mcs[@]}"; do
     for prob in "${probs[@]}"; do
       for estimator in "${estimators[@]}"; do
         [ "$estimator" = "cb" ] && [ "$mc" != "1" ] && continue
+        cur_num_trials=$num_trials
+        if [ "$mc" == 1 ]; then
+          cur_num_trials=$(( $cur_num_trials * 2 ))
+        fi
         num_jobs=$(( $num_jobs + 1 ))
         echo "$template" | \
-          sed "s/MC/${mc}/;s/BETA/${beta}/;s/PROB/${prob}/;s/ESTIMATOR/${estimator}/" \
+          sed "s/MC/${mc}/;s/BETA/${beta}/;s/PROB/${prob}/;s/ESTIMATOR/${estimator}/;s/NT/${cur_num_trials}/" \
           > "$conf/df.${num_jobs}.ini"
       done
     done
@@ -55,7 +60,7 @@ echo '#! /usr/bin/env bash
 #SBATCH --mem=16G
 #SBATCH --job-name=df
 #SBATCH --nodes=1
-#SBATCH -c 32
+#SBATCH -c 8
 #SBATCH --export=ALL
 #SBATCH --output=LOG/df_%A_%a.out
 

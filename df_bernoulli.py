@@ -9,12 +9,13 @@ torch.use_deterministic_algorithms(True)
 import config
 from estimators import (
     CbAisImhEstimator,
-    ConditionalBernoulliEstimator,
+    ExtendedConditionalBernoulliEstimator,
+    DummyAisImhEstimator,
     EnumerateEstimator,
     Estimator,
     GibbsCbAisImhEstimator,
     RejectionEstimator,
-    StaticSsworImportanceSampler,
+    StaticSrsworIsEstimator,
     Theta,
 )
 from typing import List, Tuple
@@ -240,7 +241,7 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
         bounds=(-0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF),
         inclusive_bounds=(True, True),
     )
-    num_trials = param.Integer(1024, bounds=(1, None))
+    num_trials = param.Integer(2 ** 4, bounds=(1, None))
     train_batch_size = param.Integer(1, bounds=(1, None))
     kl_batch_size = param.Integer(128, bounds=(1, None))
     tmax = param.Integer(128, bounds=(1, None))
@@ -252,7 +253,17 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     W_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-3)
     estimator = param.ObjectSelector(
-        "rej", objects=("rej", "enum", "sswor", "cb", "ais-cb-lp", "ais-cb-gibbs"),
+        "rej",
+        objects=(
+            "rej",  # Rejection sampling.
+            "srswor",  # SRSWOR. Simple Random Sampling WithOut Replacement.
+            "ecb",  # ECB. Extended Conditional Bernoulli.
+            "ais-cb-lp",  # AIS-IMH. Conditional log P inclusion estimates.
+            "ais-cb-count",  # AIS-IMH. Count-based inclusion estimates.
+            "ais-cb-gibbs",  # AIS-IMH. Gibbs-style inclusion estimates.
+            "enum",  # Enumerate the support. Testing purposes only.
+            "dummy",  # srswor through ais-imh class. Testing purposes only.
+        ),
     )
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
@@ -290,20 +301,28 @@ def initialize(
         )
     elif df_params.estimator == "enum":
         estimator = EnumerateEstimator(_lp, _lg, theta_act)
-    elif df_params.estimator == "sswor":
-        estimator = StaticSsworImportanceSampler(
+    elif df_params.estimator == "srswor":
+        estimator = StaticSrsworIsEstimator(
             df_params.num_mc_samples, _lp, _lg, theta_act
         )
-    elif df_params.estimator == "cb":
-        estimator = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta_act)
+    elif df_params.estimator == "ecb":
+        estimator = ExtendedConditionalBernoulliEstimator(
+            _ilw, _ilg, _lp, _lg, theta_act
+        )
     elif df_params.estimator == "ais-cb-lp":
         estimator = CbAisImhEstimator(
             _lie_lp_only, df_params.num_mc_samples, _lp, _lg, theta_act
+        )
+    elif df_params.estimator == "ais-cb-count":
+        estimator = CbAisImhEstimator(
+            _lie_count, df_params.num_mc_samples, _lp, _lg, theta_act
         )
     elif df_params.estimator == "ais-cb-gibbs":
         estimator = GibbsCbAisImhEstimator(
             df_params.num_mc_samples, _lp, _lg, theta_act
         )
+    elif df_params.estimator == "dummy":
+        estimator = DummyAisImhEstimator(df_params.num_mc_samples, _lp, _lg, theta_act)
     else:
         raise NotImplementedError
     optimizer = df_params.optimizer(optim_params, lr=df_params.learning_rate)
@@ -464,14 +483,23 @@ def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
 def _lie_lp_only(
     y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
 ) -> torch.Tensor:
-    # this version of the log-inclusion probability estimator is biased, simply using
-    # the conditional log probabilities when computing log P(b)
     p = theta[0].sigmoid()
     beta = theta[1].sigmoid()
     nmax = b.size(1)
     p = p.expand(nmax)
     beta = beta.expand(nmax)
-    return dependent_bernoulli_logprob(p, beta, b, True)
+    lg = _lg(y, b, x, theta)
+    lp = dependent_bernoulli_logprob(p, beta, b, True)  # (tmax, nmax)
+    lp_bt_eq_1 = lp * b + (-lp.exp()).log1p() * (1 - b)  # log P(b_t=1|b_{<=t})
+    lp_cumsum = lp.cumsum(0)
+    lp_bt_eq_1[1:] -= lp_cumsum[1:] - lp_cumsum[:-1]
+    return lp_bt_eq_1 - lg
+
+
+def _lie_count(
+    y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
+) -> torch.Tensor:
+    return b.log()
 
 
 @torch.jit.script
@@ -664,7 +692,7 @@ def test_estimator_hooks():
     assert not torch.allclose(grad_zhat[1], torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
 
-    zhat, back, _ = ConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta)(
+    zhat, back, _ = ExtendedConditionalBernoulliEstimator(_ilw, _ilg, _lp, _lg, theta)(
         x, y, lmax
     )
     grad_zhat = torch.autograd.grad(back, theta, allow_unused=True)
@@ -686,9 +714,9 @@ def test_estimator_hooks():
 
 def test_train():
     torch.manual_seed(7)
-    nt = 30
+    nt = 100
     df_params = DreznerFarnumBernoulliExperimentParameters(
-        num_trials=nt, tmax=16, train_batch_size=128, estimator="cb", beta=0
+        num_trials=nt, tmax=16, train_batch_size=1, estimator="ecb", beta=0, p=0.5
     )
     res = train(df_params)
     assert (
