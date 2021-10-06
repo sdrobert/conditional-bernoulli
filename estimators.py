@@ -327,9 +327,9 @@ class CbAisImhEstimator(AisImhEstimator):
         self.li = (self.li + math.log(mc_sample_num)).logaddexp(li_new) - math.log(
             mc_sample_num + 1
         )
-        logits = self.li.clamp(config.EPS_INF, config.EPS_0)
-        # logits = logits - torch.log1p(-logits.exp())
-        self.cb = ConditionalBernoulli(self.lmax, logits=logits.t())
+        li = self.li.clamp(config.EPS_INF, config.EPS_0)
+        logits = li.t() - torch.log1p(-li.t().exp())
+        self.cb = ConditionalBernoulli(self.lmax, logits=logits)
 
     def sample_proposal(self) -> torch.Tensor:
         assert self.cb is not None

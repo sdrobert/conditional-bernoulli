@@ -4,6 +4,7 @@ import torch
 from torch.overrides import get_ignored_functions
 
 torch.use_deterministic_algorithms(True)
+torch.set_printoptions(precision=4, sci_mode=False)
 
 
 import config
@@ -241,19 +242,22 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
         bounds=(-0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF),
         inclusive_bounds=(True, True),
     )
-    num_trials = param.Integer(2 ** 4, bounds=(1, None))
+    num_trials = param.Integer(2 ** 10, bounds=(1, None))
     train_batch_size = param.Integer(1, bounds=(1, None))
     kl_batch_size = param.Integer(128, bounds=(1, None))
-    tmax = param.Integer(128, bounds=(1, None))
+    tmax = param.Integer(2 ** 7, bounds=(1, None))
     fmax = param.Integer(16, bounds=(1, None))
     vmax = param.Integer(16, bounds=(1, None))
     p = param.Magnitude(None)
     beta = param.Magnitude(None)
     x_std = param.Number(1.0, bounds=(0, None))
     W_std = param.Number(1.0, bounds=(0, None))
-    learning_rate = param.Magnitude(1e-3)
+    learning_rate = param.Magnitude(1e-1)
+    reduce_lr_patience = param.Integer(2 ** 6, bounds=(0, None))
+    reduce_lr_threshold = param.Number(1e-1, bounds=(0, None))
+    reduce_lr_factor = param.Magnitude(1e-1, inclusive_bounds=(True, False))
     estimator = param.ObjectSelector(
-        "rej",
+        "srswor",
         objects=(
             "rej",  # Rejection sampling.
             "srswor",  # SRSWOR. Simple Random Sampling WithOut Replacement.
@@ -273,10 +277,19 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
 
 def initialize(
     df_params: DreznerFarnumBernoulliExperimentParameters,
-) -> Tuple[torch.optim.Optimizer, Theta, Theta, Estimator]:
+) -> Tuple[
+    torch.optim.Optimizer,
+    torch.optim.lr_scheduler.ReduceLROnPlateau,
+    Theta,
+    Theta,
+    Estimator,
+]:
     dtype = torch.float
-    if df_params.seed is not None:
-        torch.manual_seed(df_params.seed)
+    if df_params.seed is None:
+        df_params.seed = torch.randint(
+            -0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF, (1,)
+        ).item()
+    torch.manual_seed(df_params.seed)
     if df_params.p is None:
         df_params.p = torch.randn(1, dtype=torch.double).sigmoid_().item()
     lp_exp = torch.tensor(df_params.p, dtype=dtype).logit_()
@@ -326,7 +339,14 @@ def initialize(
     else:
         raise NotImplementedError
     optimizer = df_params.optimizer(optim_params, lr=df_params.learning_rate)
-    return optimizer, theta_exp, theta_act, estimator
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=df_params.reduce_lr_factor,
+        patience=df_params.reduce_lr_patience,
+        threshold=df_params.reduce_lr_threshold,
+    )
+    return optimizer, scheduler, theta_exp, theta_act, estimator
 
 
 def train_for_trial(
@@ -380,7 +400,7 @@ def draw_kl_sample_estimate(
 def train(
     df_params: DreznerFarnumBernoulliExperimentParameters,
 ) -> Tuple[List[float], List[float], List[float], List[float]]:
-    optimizer, theta_exp, theta_act, estimator = initialize(df_params)
+    optimizer, scheduler, theta_exp, theta_act, estimator = initialize(df_params)
     sample_kls = []
     sample_zhats = []
     log_esss = []
@@ -390,16 +410,25 @@ def train(
     tdeltas = []
     lp_exp = theta_exp[0].sigmoid().log().item()
     lbeta_exp = theta_exp[1].sigmoid().log().item()
+    W_exp = theta_exp[2] - theta_exp[2].mean()  # W is shift-invariant due to softmax
+    seeds = torch.randint(-(2 ** 50), 2 ** 50, (df_params.num_trials,)).tolist()
     start = datetime.now()
-    for _ in tqdm(range(df_params.num_trials)):
+    for trial in tqdm(range(df_params.num_trials)):
+        # we re-seed at the start of each trial to ensure the samples are drawn in the
+        # same way, regardless of any random draws in the algorithms themselves
+        torch.manual_seed(seeds[trial])
         zhat, log_ess = train_for_trial(optimizer, theta_exp, estimator, df_params)
+        sample_kl = draw_kl_sample_estimate(theta_exp, estimator, df_params)
+        # print(sample_kl, log_ess)
+        scheduler.step(sample_kl)
         log_esss.append(log_ess)
         sample_zhats.append(zhat)
-        sample_kls.append(draw_kl_sample_estimate(theta_exp, estimator, df_params))
+        sample_kls.append(sample_kl)
         tdeltas.append(datetime.now() - start)
         sses_lp.append((theta_act[0].sigmoid().log().item() - lp_exp) ** 2)
         sses_lbeta.append((theta_act[1].sigmoid().log().item() - lbeta_exp) ** 2)
-        sses_W.append(((theta_exp[2] - theta_act[2]) ** 2).sum().item())
+        W_act = theta_act[2] - theta_act[2].mean()
+        sses_W.append(((W_exp - W_act) ** 2).sum().item())
     return sample_kls, sample_zhats, log_esss, sses_lp, sses_lbeta, sses_W, tdeltas
 
 
