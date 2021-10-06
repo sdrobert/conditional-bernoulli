@@ -34,7 +34,7 @@ from datetime import datetime
 @torch.jit.script
 @torch.no_grad()
 def dependent_bernoulli_sample(
-    p: torch.Tensor, beta: torch.Tensor, tmax: int
+    theta_1: torch.Tensor, theta_2: torch.Tensor, tmax: int
 ) -> torch.Tensor:
     r"""Sample from Drezner & Farnum's Dependent Bernoulli model
 
@@ -42,14 +42,17 @@ def dependent_bernoulli_sample(
 
     .. math::
 
-        P(b_t = 1|b_{1:t-1}) = p * (1 - \beta) + \frac{\beta\sum_{t'=1}^{t-1}b_t}{t-1}
+        P(b_t = 1|b_{1:t-1}) = \sigma(\theta_1) * (1 - \sigma(\theta_2))
+            + \frac{\sigma(\theta_2)\sum_{t'=1}^{t-1}b_t}{t-1} \\
+        \sigma(\theta) = \frac{\exp(\theta)}{1 + \exp(\theta)}
 
     Parameters
     ----------
-    p : torch.Tensor
-        Shape ``(nmax,)`` of batch's independent Bernoulli probabilities, :math:`p`
-    beta : torch.Tensor
-        Shape ``(nmax,)`` of batch's sample average mixing coefficient, :math:`\beta`
+    theta_1 : torch.Tensor
+        Shape ``(nmax,)`` of batch's independent logit, :math:`\theta_1`
+    theta_2 : torch.Tensor
+        Shape ``(nmax,)`` of batch's sample average mixing coefficient logit,
+        :math:`\theta_2`
     tmax : int
         Number of sequential Bernoulli values to sample
 
@@ -60,17 +63,18 @@ def dependent_bernoulli_sample(
         Bernoulli values with parameters ``p[n]`` and ``beta[n]``.
     """
     assert tmax >= 0
-    assert p.dim() == 1
-    nmax = p.size(0)
-    assert beta.size(0) == nmax
-    device = p.device
-    assert beta.device == device
-    b = torch.empty((tmax, nmax), device=device, dtype=p.dtype)
+    assert theta_1.dim() == 1
+    nmax = theta_1.size(0)
+    assert theta_2.dim() == 1 and theta_2.size(0) == nmax
+    device = theta_1.device
+    assert theta_1.device == device
+    b = torch.empty((tmax, nmax), device=device, dtype=theta_1.dtype)
+    p_1, p_2 = theta_1.sigmoid(), theta_2.sigmoid()
     if not tmax:
         return b
-    b[0] = S_tm1 = torch.bernoulli(p)
+    b[0] = S_tm1 = torch.bernoulli(theta_1.sigmoid())
     for tm1 in range(1, tmax):
-        p_t = (1.0 - beta) * p + beta * S_tm1 / tm1
+        p_t = (1.0 - p_2) * p_1 + p_2 * S_tm1 / tm1
         b_t = torch.bernoulli(p_t)
         b[tm1] = b_t  # 0-indexed
         S_tm1 += b_t
@@ -79,8 +83,8 @@ def dependent_bernoulli_sample(
 
 @torch.jit.script
 def dependent_bernoulli_logprob(
-    p: torch.Tensor,
-    beta: torch.Tensor,
+    theta_1: torch.Tensor,
+    theta_2: torch.Tensor,
     b: torch.Tensor,
     full: bool = False,
     neg_inf: float = config.EPS_INF,
@@ -96,60 +100,60 @@ def dependent_bernoulli_logprob(
         of the Bernoulli sequence ``b[:, n]`` under the Drezner & Farnum model.
     """
     assert b.dim() == 2
-    assert beta.size() == p.size() == b.size()[1:]
+    assert theta_1.size() == theta_2.size() == b.size()[1:]
     tmax, device = b.size(0), b.device
-    assert p.device == beta.device == device
+    assert theta_1.device == theta_2.device == device
     if not tmax:
-        return torch.empty((0, beta.size(0)), device=device, dtype=p.dtype)
+        return torch.empty((0, theta_1.size(0)), device=device, dtype=theta_1.dtype)
     b = b.detach()
-    logp, log1mp = p.log(), torch.log1p(-p)
-    logp_1 = (logp * b[0]).nan_to_num_(neginf=neg_inf) + (
-        log1mp * (1.0 - b[0])
+    logp_1, log1mp_1 = theta_1.sigmoid().log(), (-theta_1).sigmoid().log()
+    logp_1_1 = (logp_1 * b[0]).nan_to_num_(neginf=neg_inf) + (
+        log1mp_1 * (1.0 - b[0])
     ).nan_to_num_(neginf=neg_inf)
     if tmax == 1:
-        return logp_1
+        return logp_1_1
     S_tm1 = b[:-1].cumsum(0)
     t_tm1 = torch.arange(1, tmax, device=device).unsqueeze(1)
     logt_tm1 = t_tm1.log()
     logpp_t, log1mpp_t = S_tm1.log() - logt_tm1, (t_tm1 - S_tm1).log() - logt_tm1
-    logbeta, log1mbeta = beta.log(), torch.log1p(-beta)
+    logp_2, log1mp_2 = theta_2.sigmoid().log(), (-theta_2).sigmoid().log()
     b, negb = b[1:], 1.0 - b[1:]
     left_t = (
-        (logp.unsqueeze(0) * b).nan_to_num_(neginf=neg_inf)
-        + (log1mp.unsqueeze(0) * negb).nan_to_num_(neginf=neg_inf)
-        + log1mbeta
+        (logp_1.unsqueeze(0) * b).nan_to_num_(neginf=neg_inf)
+        + (log1mp_1.unsqueeze(0) * negb).nan_to_num_(neginf=neg_inf)
+        + log1mp_2
     )
     right_t = (
         (logpp_t * b).nan_to_num_(neginf=neg_inf)
         + (log1mpp_t * negb).nan_to_num_(neginf=neg_inf)
-        + logbeta
+        + logp_2
     )
     max_t = torch.max(left_t, right_t).nan_to_num_()
     logp_t = ((left_t - max_t).exp() + (right_t - max_t).exp()).log() + max_t
     if full:
-        return torch.cat([logp_1.unsqueeze(0), logp_t])
+        return torch.cat([logp_1_1.unsqueeze(0), logp_t])
     else:
-        return logp_1 + logp_t.sum(0)
+        return logp_1_1 + logp_t.sum(0)
 
 
 @torch.jit.script
 @torch.no_grad()
 def event_sample(
-    W: torch.Tensor, x: torch.Tensor, b: torch.Tensor
+    theta_3: torch.Tensor, x: torch.Tensor, b: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert b.dim() == W.dim() == 2
+    assert b.dim() == theta_3.dim() == 2
     assert x.dim() == 3
     assert x.size()[:2] == b.size()
     isize = x.size(2)
-    assert isize == W.size(0)
-    assert b.device == W.device == x.device
+    assert isize == theta_3.size(0)
+    assert b.device == theta_3.device == x.device
     lens = b.to(torch.long).sum(0)
     x_at_b = (
         x.transpose(0, 1)
         .masked_select(b.to(torch.bool).t().unsqueeze(2))
         .view(-1, isize)
     )
-    logits = x_at_b @ W
+    logits = x_at_b @ theta_3
     probs = logits.softmax(1)
     y = torch.multinomial(probs, 1, True).flatten()
     return y, lens
@@ -157,26 +161,15 @@ def event_sample(
 
 @torch.jit.script
 def event_logprob(
-    W: torch.Tensor, x: torch.Tensor, b: torch.Tensor, y: torch.Tensor
+    theta_3: torch.Tensor, x: torch.Tensor, b: torch.Tensor, y: torch.Tensor
 ) -> torch.Tensor:
-    """Return the log-probability of sample y given b and x
-
-    Counterpart to :func:`event_sample`.
-
-    Returns
-    -------
-    logprob : torch.Tensor
-        Of shape ``(nmax,)`` where ``logprob[n]`` is the joint log-probability of the
-        sequence ``y[lens[n - 1]:lens[n]]`` given ``x[..., n]``, ``b[:, n]``, and
-        parameters ``W[n]``.
-    """
-    assert b.dim() == W.dim() == 2
+    assert b.dim() == theta_3.dim() == 2
     assert x.dim() == 3
     assert y.dim() == 1
     assert x.size()[:2] == b.size()
     isize = x.size(2)
-    assert isize == W.size(0)
-    assert b.device == W.device == x.device == y.device
+    assert isize == theta_3.size(0)
+    assert b.device == theta_3.device == x.device == y.device
     b_ = b.t() != 0
     x_at_b = x.transpose(0, 1).masked_select(b_.unsqueeze(2)).view(-1, isize)
     assert y.numel() == x_at_b.size(0), (
@@ -187,23 +180,23 @@ def event_logprob(
         b[:, 0],
         b_[0],
     )
-    logits = x_at_b @ W
+    logits = x_at_b @ theta_3
     logprob = logits.log_softmax(1).gather(1, y.unsqueeze(1)).squeeze(1)
     return b.t().masked_scatter(b_, logprob).sum(1)
 
 
 @torch.jit.script
 def enumerate_latent_log_likelihoods(
-    W: torch.Tensor,
+    theta_3: torch.Tensor,
     x: torch.Tensor,
     y: torch.Tensor,
     lens: torch.Tensor,
     neg_inf: float = config.EPS_INF,
 ) -> torch.Tensor:
-    assert W.dim() == 2
+    assert theta_3.dim() == 2
     assert x.dim() == 3
     assert y.dim() == lens.dim() == 1
-    device = W.device
+    device = theta_3.device
     assert device == x.device == y.device == lens.device
     numel = torch.tensor(y.numel(), device=device)
     assert numel == lens.sum()
@@ -216,7 +209,7 @@ def enumerate_latent_log_likelihoods(
     )
     if lens_max == 0:
         return torch.zeros((0, tmax - lens_min + 1, nmax), device=device, dtype=x.dtype)
-    probs = (x @ W).log_softmax(2)
+    probs = (x @ theta_3).log_softmax(2)
     g = []
     for ell in range(lens_max):
         y_ell = y[(offsets + ell).clamp_max_(numel - 1)]
@@ -248,16 +241,16 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     tmax = param.Integer(2 ** 7, bounds=(1, None))
     fmax = param.Integer(16, bounds=(1, None))
     vmax = param.Integer(16, bounds=(1, None))
-    p = param.Magnitude(None)
-    beta = param.Magnitude(None)
+    p_1 = param.Magnitude(0.5)
+    p_2 = param.Magnitude(0.5)
     x_std = param.Number(1.0, bounds=(0, None))
-    W_std = param.Number(1.0, bounds=(0, None))
+    theta_3_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-1)
     reduce_lr_patience = param.Integer(2 ** 6, bounds=(0, None))
     reduce_lr_threshold = param.Number(1e-1, bounds=(0, None))
     reduce_lr_factor = param.Magnitude(1e-1, inclusive_bounds=(True, False))
     estimator = param.ObjectSelector(
-        "srswor",
+        "ecb",
         objects=(
             "rej",  # Rejection sampling.
             "srswor",  # SRSWOR. Simple Random Sampling WithOut Replacement.
@@ -287,26 +280,25 @@ def initialize(
     dtype = torch.float
     if df_params.seed is None:
         df_params.seed = torch.randint(
-            -0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF, (1,)
+            torch.iinfo(torch.long).min, torch.iinfo(torch.long).max, (1,)
         ).item()
     torch.manual_seed(df_params.seed)
-    if df_params.p is None:
-        df_params.p = torch.randn(1, dtype=torch.double).sigmoid_().item()
-    lp_exp = torch.tensor(df_params.p, dtype=dtype).logit_()
-    if df_params.beta is None:
-        df_params.beta = torch.randn(1, dtype=torch.double).sigmoid_().item()
-    lbeta_exp = torch.tensor(df_params.beta, dtype=dtype).logit_()
-    W_exp = torch.randn((df_params.fmax, df_params.vmax), dtype=dtype) * df_params.W_std
-    theta_exp = [lp_exp, lbeta_exp, W_exp]
-    lp_act = torch.randn(1, dtype=dtype).requires_grad_(True)
-    lbeta_act = torch.randn(1, dtype=dtype).requires_grad_(True)
-    W_act = torch.randn(
+    theta_1_exp = torch.tensor(df_params.p_1, dtype=dtype).logit_()
+    theta_2_exp = torch.tensor(df_params.p_2, dtype=dtype).logit_()
+    theta_3_exp = (
+        torch.randn((df_params.fmax, df_params.vmax), dtype=dtype)
+        * df_params.theta_3_std
+    )
+    theta_exp = [theta_1_exp, theta_2_exp, theta_3_exp]
+    theta_1_act = torch.randn(1, dtype=dtype).requires_grad_(True)
+    theta_2_act = torch.randn(1, dtype=dtype).requires_grad_(True)
+    theta_3_act = torch.randn(
         (df_params.fmax, df_params.vmax), dtype=dtype, requires_grad=True
     )
-    theta_act = [lp_act, lbeta_act, W_act]
+    theta_act = [theta_1_act, theta_2_act, theta_3_act]
     optim_params = theta_act.copy()
-    if df_params.beta == 0.0 or df_params.estimator == "cb":
-        lbeta_act.data[0] = -float("inf")
+    if df_params.p_2 == 0.0 or df_params.estimator == "cb":
+        theta_2_act.data[0] = -float("inf")
         optim_params.pop(1)
     if df_params.estimator == "rej":
         estimator = RejectionEstimator(
@@ -404,18 +396,25 @@ def train(
     sample_kls = []
     sample_zhats = []
     log_esss = []
-    sses_lp = []
-    sses_lbeta = []
-    sses_W = []
+    sses_theta_1 = []
+    sses_theta_2 = []
+    sses_theta_3 = []
     tdeltas = []
-    lp_exp = theta_exp[0].sigmoid().log().item()
-    lbeta_exp = theta_exp[1].sigmoid().log().item()
-    W_exp = theta_exp[2] - theta_exp[2].mean()  # W is shift-invariant due to softmax
-    seeds = torch.randint(-(2 ** 50), 2 ** 50, (df_params.num_trials,)).tolist()
+    theta_3_exp = (
+        theta_exp[2] - theta_exp[2].mean()
+    )  # W is shift-invariant due to softmax
+    # we re-seed at the start of each trial to ensure the samples are drawn in the same
+    # way, regardless of any random draws in the algorithms themselves. N.B. There are
+    # likely fewer seeds than elements in the domain for tmax > 64, making it impossible
+    # to draw all b eventually. However, this would involve an insane number of trials
+    # anyways.
+    seeds = torch.randint(
+        torch.iinfo(torch.long).min,
+        torch.iinfo(torch.long).max,
+        (df_params.num_trials,),
+    ).tolist()
     start = datetime.now()
     for trial in tqdm(range(df_params.num_trials)):
-        # we re-seed at the start of each trial to ensure the samples are drawn in the
-        # same way, regardless of any random draws in the algorithms themselves
         torch.manual_seed(seeds[trial])
         zhat, log_ess = train_for_trial(optimizer, theta_exp, estimator, df_params)
         sample_kl = draw_kl_sample_estimate(theta_exp, estimator, df_params)
@@ -425,11 +424,19 @@ def train(
         sample_zhats.append(zhat)
         sample_kls.append(sample_kl)
         tdeltas.append(datetime.now() - start)
-        sses_lp.append((theta_act[0].sigmoid().log().item() - lp_exp) ** 2)
-        sses_lbeta.append((theta_act[1].sigmoid().log().item() - lbeta_exp) ** 2)
-        W_act = theta_act[2] - theta_act[2].mean()
-        sses_W.append(((W_exp - W_act) ** 2).sum().item())
-    return sample_kls, sample_zhats, log_esss, sses_lp, sses_lbeta, sses_W, tdeltas
+        sses_theta_1.append(((theta_act[0] - theta_exp[0]) ** 2).item())
+        sses_theta_2.append(((theta_act[1] - theta_exp[1]) ** 2).item())
+        theta_3_act = theta_act[2] - theta_act[2].mean()
+        sses_theta_3.append(((theta_3_exp - theta_3_act) ** 2).sum().item())
+    return (
+        sample_kls,
+        sample_zhats,
+        log_esss,
+        sses_theta_1,
+        sses_theta_2,
+        sses_theta_3,
+        tdeltas,
+    )
 
 
 def main(args=None) -> int:
@@ -458,38 +465,47 @@ def main(args=None) -> int:
     options = parser.parse_args(args)
     if options.seed is not None:
         options.params.seed = options.seed
-    sample_kls, zhats, log_esss, sses_lp, sses_lbeta, sses_W, tdeltas = train(
-        options.params
-    )
-    sses_lp = pd.Series(sses_lp)
-    sses_lbeta = pd.Series(sses_lbeta)
-    sses_W = pd.Series(sses_W)
+    (
+        sample_kls,
+        zhats,
+        log_esss,
+        sses_theta_1,
+        sses_theta_2,
+        sses_theta_3,
+        tdeltas,
+    ) = train(options.params)
+    sses_theta_1 = pd.Series(sses_theta_1)
+    sses_theta_2 = pd.Series(sses_theta_2)
+    sses_theta_3 = pd.Series(sses_theta_3)
     sample_kls = pd.Series(sample_kls)
     tdeltas = pd.Series(tdeltas)
     zhats = pd.Series(zhats)
     trials = pd.Series(np.arange(1, options.params.num_trials + 1))
     df = pd.DataFrame(
         {
-            "Seed": np.nan if options.params.seed is None else options.params.seed,
+            "Seed": options.params.seed,
             "Total Number of Trials": options.params.num_trials,
             "Training Batch Size": options.params.train_batch_size,
             "KL Batch Size": options.params.kl_batch_size,
             "x Sequence Length": options.params.tmax,
             "x Vector Length": options.params.fmax,
-            "p": np.nan if options.params.p is None else options.params.p,
-            "beta": np.nan if options.params.beta is None else options.params.beta,
+            "p_1": options.params.p_1,
+            "p_2": options.params.p_2,
             "x Standard Deviation": options.params.x_std,
-            "W Standard Deviation": options.params.W_std,
+            "theta_3 Standard Deviation": options.params.theta_3_std,
             "Learning Rate": options.params.learning_rate,
+            "LR Reduction Patience": options.params.reduce_lr_patience,
+            "LR Reduction Threshold": options.params.reduce_lr_threshold,
+            "LR Reduction Factor": options.params.reduce_lr_factor,
             "Estimator": options.params.estimator,
             "Optimizer": DefaultObjectSelectorSerializer().serialize(
                 "optimizer", options.params
             ),
             "Number of Monte Carlo Samples": options.params.num_mc_samples,
             "Trial": trials,
-            "SSE Log p": sses_lp,
-            "SSE Log beta": sses_lbeta,
-            "SSE W": sses_W,
+            "SSE theta_1": sses_theta_1,
+            "SSE theta_2": sses_theta_2,
+            "SSE theta_3": sses_theta_3,
             "Time Since Start": tdeltas,
             "zhat Estimate": zhats,
             "Log ESS": log_esss,
@@ -501,24 +517,20 @@ def main(args=None) -> int:
 
 
 def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
-    p = theta[0].sigmoid()
-    beta = theta[1].sigmoid()
     nmax = b.size(1)
-    p = p.expand(nmax)
-    beta = beta.expand(nmax)
-    return dependent_bernoulli_logprob(p, beta, b)
+    theta_1 = theta[0].expand(nmax)
+    theta_2 = theta[1].expand(nmax)
+    return dependent_bernoulli_logprob(theta_1, theta_2, b)
 
 
 def _lie_lp_only(
     y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
 ) -> torch.Tensor:
-    p = theta[0].sigmoid()
-    beta = theta[1].sigmoid()
     nmax = b.size(1)
-    p = p.expand(nmax)
-    beta = beta.expand(nmax)
+    theta_1 = theta[0].expand(nmax)
+    theta_2 = theta[1].expand(nmax)
     lg = _lg(y, b, x, theta)
-    lp = dependent_bernoulli_logprob(p, beta, b, True)  # (tmax, nmax)
+    lp = dependent_bernoulli_logprob(theta_1, theta_2, b, True)  # (tmax, nmax)
     lp_bt_eq_1 = lp * b + (-lp.exp()).log1p() * (1 - b)  # log P(b_t=1|b_{<=t})
     lp_cumsum = lp.cumsum(0)
     lp_bt_eq_1[1:] -= lp_cumsum[1:] - lp_cumsum[:-1]
@@ -549,39 +561,34 @@ def _pad_events(events: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
 def _lg(
     y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
 ) -> torch.Tensor:
-    W = theta[2]
     lmax = b.sum(0)
     len_mask = lmax.unsqueeze(1) > torch.arange(
         y.size(1), device=lmax.device, dtype=lmax.dtype
     )
     events = y.masked_select(len_mask)
-    return event_logprob(W, x, b, events)
+    return event_logprob(theta[2], x, b, events)
 
 
 @torch.no_grad()
 def _psampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
-    p = theta[0].sigmoid()
-    beta = theta[1].sigmoid()
     tmax, nmax = x.size(0), x.size(1)
-    p = p.expand(nmax)
-    beta = beta.expand(nmax)
-    return dependent_bernoulli_sample(p, beta, tmax)
+    theta_1 = theta[0].expand(nmax)
+    theta_2 = theta[1].expand(nmax)
+    return dependent_bernoulli_sample(theta_1, theta_2, tmax)
 
 
 def _ilw(x: torch.Tensor, theta: Theta) -> torch.Tensor:
-    logits = theta[0]
-    return logits.expand([x.size(0), x.size(1)])
+    return theta[0].expand([x.size(0), x.size(1)])
 
 
 def _ilg(
     x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor, theta: Theta
 ) -> torch.Tensor:
-    W = theta[2]
     len_mask = lmax.unsqueeze(1) > torch.arange(
         y.size(1), device=lmax.device, dtype=lmax.dtype
     )
     events = y.masked_select(len_mask)
-    return enumerate_latent_log_likelihoods(W, x, events, lmax)
+    return enumerate_latent_log_likelihoods(theta[2], x, events, lmax)
 
 
 if __name__ == "__main__":
@@ -593,35 +600,36 @@ if __name__ == "__main__":
 def test_dependent_bernoulli_expectation():
     torch.manual_seed(1)
     nmax, tmax = 10, 10000
-    # beta close to 1 take a long time to converge
-    p, beta = torch.rand(nmax), torch.rand(nmax) * 0.5 + 0.25
-    b = dependent_bernoulli_sample(p, beta, tmax)
+    theta_1, theta_2 = torch.randn(nmax), torch.randn(nmax)
+    b = dependent_bernoulli_sample(theta_1, theta_2, tmax)
     p_act = b.mean(0)
-    assert torch.allclose(p, p_act, atol=1e-1)
+    assert torch.allclose(theta_1.sigmoid(), p_act, atol=1e-1)
 
 
 def test_dependent_bernoulli_logprob():
     torch.manual_seed(2)
     nmax, tmax = 100, 20
-    p = torch.rand(nmax)
+    theta_1 = torch.randn(nmax)
+    theta_2 = torch.full((nmax,), -float("inf"))
 
-    # beta = 0 has the same probabilities as independent Bernoulli trials
-    b = dependent_bernoulli_sample(p, torch.zeros((nmax,)), tmax)
-    exp_logprob = torch.distributions.Bernoulli(probs=p).log_prob(b)
-    act_logprob = dependent_bernoulli_logprob(p, torch.zeros((nmax,)), b, True)
+    # sigma(theta_2) = 0 has the same probabilities as independent Bernoulli trials
+    b = dependent_bernoulli_sample(theta_1, theta_2, tmax)
+    exp_logprob = torch.distributions.Bernoulli(logits=theta_1).log_prob(b)
+    act_logprob = dependent_bernoulli_logprob(theta_1, theta_2, b, True)
     assert exp_logprob.shape == act_logprob.shape
     assert torch.allclose(exp_logprob, act_logprob)
 
-    # beta = 1 duplicates the previous Bernoulli trial's value after the first trial
-    b = dependent_bernoulli_sample(p, torch.ones((nmax,)), tmax)
-    exp_logprob = torch.distributions.Bernoulli(probs=p).log_prob(b[0])
-    act_logprob = dependent_bernoulli_logprob(p, torch.ones((nmax,)), b)
+    # sigma(theta_2) = 1 duplicates the previous Bernoulli trial's value after the first
+    theta_2 = -theta_2
+    b = dependent_bernoulli_sample(theta_1, theta_2, tmax)
+    exp_logprob = torch.distributions.Bernoulli(logits=theta_1).log_prob(b[0])
+    act_logprob = dependent_bernoulli_logprob(theta_1, theta_2, b)
     assert exp_logprob.shape == act_logprob.shape
     assert torch.allclose(exp_logprob, act_logprob)
 
     # ensure 0-probability samples work too
     b[1] = 1.0 - b[0]
-    act_logprob = dependent_bernoulli_logprob(p, torch.ones((nmax,)), b)
+    act_logprob = dependent_bernoulli_logprob(theta_1, theta_2, b)
     assert torch.all(act_logprob <= config.EPS_INF)
 
 
@@ -630,9 +638,9 @@ def test_event_sample():
     nmax, tmax, vmax = 100000, 30, 3
     x = torch.randn((tmax, nmax, vmax))
     b = torch.randint(0, 2, (tmax, nmax)).float()
-    W = torch.eye(vmax)
+    theta_3 = torch.eye(vmax)
     x[..., 0] += 1.0 - b
-    events, lens = event_sample(W, x, b)
+    events, lens = event_sample(theta_3, x, b)
     assert lens.sum().item() == b.sum().long().item() == events.numel()
     freq = events.bincount() / events.numel()
     assert freq.numel() == vmax
@@ -643,18 +651,18 @@ def test_event_logprob():
     torch.manual_seed(4)
     nmax, tmax, fmax, vmax = 10000, 30, 10, 10
     x = torch.randn((tmax, nmax, vmax))
-    W = torch.rand(fmax, vmax)
+    theta_3 = torch.rand(fmax, vmax)
     b = torch.cat([torch.ones(tmax // 2, nmax), torch.zeros((tmax + 1) // 2, nmax)])
-    events, lens = event_sample(W, x, b)
+    events, lens = event_sample(theta_3, x, b)
     assert torch.all(lens == tmax // 2)
     exp_logprob = (
-        (x[: tmax // 2].transpose(0, 1) @ W)
+        (x[: tmax // 2].transpose(0, 1) @ theta_3)
         .log_softmax(2)
         .gather(2, events.view(nmax, tmax // 2, 1))
         .squeeze(2)
         .sum(1)
     )
-    act_logprob = event_logprob(W, x, b, events)
+    act_logprob = event_logprob(theta_3, x, b, events)
     assert exp_logprob.size() == act_logprob.size()
     assert torch.allclose(exp_logprob, act_logprob)
 
@@ -667,8 +675,8 @@ def test_enumerate_latent_log_likelihoods():
     vmax = lens.sum().item()
     events = torch.arange(vmax)
     x = torch.randn((tmax, nmax, fmax))
-    W = torch.rand(fmax, vmax)
-    ilg = enumerate_latent_log_likelihoods(W, x, events, lens)
+    theta_3 = torch.rand(fmax, vmax)
+    ilg = enumerate_latent_log_likelihoods(theta_3, x, events, lens)
     assert ilg.dim() == 3
     assert ilg.size(0) == nmax - 1
     assert ilg.size(1) == tmax + 1
@@ -682,7 +690,7 @@ def test_enumerate_latent_log_likelihoods():
         for ell in range(lmax_n):
             events_n_ell = events_n[ell]
             x_n_ell = x_n[ell : tmax - lmax_n + ell + 1]
-            probs_n_ell = (x_n_ell @ W).log_softmax(1)
+            probs_n_ell = (x_n_ell @ theta_3).log_softmax(1)
             ilg_n_ell_exp = probs_n_ell[:, events_n_ell]
             assert torch.allclose(
                 ilg[ell, tmax - lmax_n + 1 :, n], torch.tensor(config.EPS_INF)
@@ -696,21 +704,21 @@ def test_enumerate_latent_log_likelihoods():
 def test_estimator_hooks():
     torch.manual_seed(6)
     tmax, nmax, fmax, vmax, mc = range(7, 12)
-    p = torch.randn((1,)).sigmoid().requires_grad_(True)
-    beta = torch.randn((1,)).sigmoid().requires_grad_(True)
-    W = torch.randn((fmax, vmax), requires_grad=True)
-    theta = [p.logit(), beta.logit(), W]
+    theta_1 = torch.randn((1,), requires_grad=True)
+    theta_2 = torch.randn((1,), requires_grad=True)
+    theta_3 = torch.randn((fmax, vmax), requires_grad=True)
+    theta = [theta_1, theta_2, theta_3]
     x = torch.randn((tmax, nmax, fmax))
-    b = dependent_bernoulli_sample(p.expand(nmax), beta.expand(nmax), tmax)
-    l1 = dependent_bernoulli_logprob(p.expand(nmax), beta.expand(nmax), b)
+    b = dependent_bernoulli_sample(theta_1.expand(nmax), theta_2.expand(nmax), tmax)
+    l1 = dependent_bernoulli_logprob(theta_1.expand(nmax), theta_2.expand(nmax), b)
     l2 = _lp(b, x, theta)
     assert torch.allclose(l1, l2)
-    events, lmax = event_sample(W, x, b)
+    events, lmax = event_sample(theta_3, x, b)
     y = _pad_events(events, lmax)
-    l1 = event_logprob(W, x, b, events)
+    l1 = event_logprob(theta_3, x, b, events)
     l2 = _lg(y, b, x, theta)
     assert torch.allclose(l1, l2)
-    l1 = enumerate_latent_log_likelihoods(W, x, events, lmax)
+    l1 = enumerate_latent_log_likelihoods(theta_3, x, events, lmax)
     l2 = _ilg(x, y, lmax, theta)
     assert torch.allclose(l1, l2)
 
@@ -745,7 +753,7 @@ def test_train():
     torch.manual_seed(7)
     nt = 100
     df_params = DreznerFarnumBernoulliExperimentParameters(
-        num_trials=nt, tmax=16, train_batch_size=1, estimator="ecb", beta=0, p=0.5
+        num_trials=nt, tmax=16, train_batch_size=1, estimator="ecb", p_1=0.5, p_2=0
     )
     res = train(df_params)
     assert (

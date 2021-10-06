@@ -5,24 +5,27 @@ res=res
 log=log
 
 mcs=( 1 256 65536 )
-betas=( 0 0.25 0.75 )
-probs=( 0.25 0.75 )
+p_1s=( 0.25 0.75 )
+p_2s=( 0 0.25 0.75 )
 estimators=( rej srswor ecb ais-cb-count ais-cb-lp ais-cb-gibbs )
-num_seeds=20
-num_trials=8192
+num_seeds=100
 
 template='[DreznerFarnumBernoulliExperimentParameters]
-train_batch_size = 1
-kl_batch_size = 128
 estimator = ESTIMATOR
 fmax = 16
-beta = BETA
-learning_rate = 0.001
+kl_batch_size = 128
+learning_rate = 0.1
 num_mc_samples = MC
-num_trials = NT
+num_trials = 4096
 optimizer = adam
-p = PROB
+p_1 = P1
+p_2 = P2
+reduce_lr_factor = 0.1
+reduce_lr_patience = 64
+reduce_lr_threshold = 0.1
+theta_3_std = 1.0
 tmax = 128
+train_batch_size = 1
 vmax = 16
 x_std = 1.0
 '
@@ -31,17 +34,13 @@ mkdir -p "$conf" "$res" "$log"
 
 num_jobs=0
 for mc in "${mcs[@]}"; do
-  for beta in "${betas[@]}"; do
-    for prob in "${probs[@]}"; do
+  for p_1 in "${p_1s[@]}"; do
+    for p_2 in "${p_2s[@]}"; do
       for estimator in "${estimators[@]}"; do
-        [ "$estimator" = "cb" ] && [ "$mc" != "1" ] && continue
-        cur_num_trials=$num_trials
-        if [ "$mc" == 1 ]; then
-          cur_num_trials=$(( $cur_num_trials * 2 ))
-        fi
+        [ "$estimator" = "ecb" ] && [ "$mc" != "1" ] && continue
         num_jobs=$(( $num_jobs + 1 ))
         echo "$template" | \
-          sed "s/MC/${mc}/;s/BETA/${beta}/;s/PROB/${prob}/;s/ESTIMATOR/${estimator}/;s/NT/${cur_num_trials}/" \
+          sed "s/MC/${mc}/;s/P1/${p_1}/;s/P2/${p_2}/;s/ESTIMATOR/${estimator}/" \
           > "$conf/df.${num_jobs}.ini"
       done
     done
