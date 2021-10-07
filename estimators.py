@@ -36,6 +36,7 @@ class EnumerateEstimator(Estimator):
         self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tmax, nmax = x.size(0), x.size(1)
+        device = x.device
         b, lens = enumerate_bernoulli_support(tmax, lmax)
         b = b.t().to(x.dtype)  # (tmax, smax)
         x = x.repeat_interleave(lens, 1)
@@ -44,8 +45,12 @@ class EnumerateEstimator(Estimator):
         lp = self.lp(b, x, self.theta)
         lg = self.lg(y, b, x, self.theta)
         lp_lg = lp + lg
-        lp_lg_max = lp_lg.max().detach()
-        zhat = (lp_lg - lp_lg_max).exp().sum().log() + lp_lg_max - math.log(nmax)
+        lens_max = int(lens.max())
+        len_mask = lens.unsqueeze(1) > torch.arange(lens_max, device=device)
+        lp_lg = torch.full((nmax, lens_max), -float("inf")).masked_scatter(
+            len_mask, lp + lg
+        )
+        zhat = lp_lg.logsumexp(1).mean()
         return zhat.detach(), zhat, torch.tensor(float("nan"))
 
 
@@ -70,7 +75,7 @@ class RejectionEstimator(Estimator):
         self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tmax, nmax, fmax = x.size()
-        total = nmax * self.num_mc_samples
+        device = x.device
         x = x.repeat_interleave(self.num_mc_samples, 1)
         y = y.repeat_interleave(self.num_mc_samples, 0)
         lmax = lmax.repeat_interleave(self.num_mc_samples, 0)
@@ -82,9 +87,9 @@ class RejectionEstimator(Estimator):
             v = self.theta[0].sum()
             for x in self.theta[1:]:
                 v += x.sum()
-            v = v.masked_fill(torch.tensor(True, device=v.device), 0.0)
+            v = v.masked_fill(torch.tensor(True, device=device), 0.0)
             return (
-                torch.tensor(-float("inf"), device=v.device),
+                torch.tensor(-float("inf"), device=device),
                 v,
                 torch.tensor(float("nan")),
             )
@@ -102,19 +107,30 @@ class RejectionEstimator(Estimator):
             .masked_select(accept_mask)
             .view(y_shape)
         )
+        accept_mask = accept_mask.flatten()
         lp = self.lp(b, x, self.theta)
+        lp = (
+            torch.full((nmax * self.num_mc_samples,), -float("inf"), device=device)
+            .masked_scatter(accept_mask, lp)
+            .view(nmax, self.num_mc_samples)
+        )
         lg = self.lg(y, b, x, self.theta)
-        lg_max = lg.max().detach()
-        g = (lg - lg_max).exp()
-        zhat_ = g.sum()
-        back = zhat_ + (lp * g.detach()).sum()
+        lg = (
+            torch.full((nmax * self.num_mc_samples,), -float("inf"), device=device)
+            .masked_scatter(accept_mask, lg)
+            .view(nmax, self.num_mc_samples)
+        )
+        lg_max = lg.detach().max(1)[0].clamp_min_(config.EPS_INF)
+        g = (lg - lg_max.unsqueeze(1)).exp()
+        zhat_ = g.sum(1)  # (nmax,)
+        back = zhat_ + (lp.clamp_min(config.EPS_INF) * g.detach()).sum(1)
         # the back / zhat_ is the derivative of the log without actually using the log
         # (which isn't defined for negative values). Since the numerator and denominator
-        # would both be multiplied by 'exp(lg_max) / total', we cancel them for
-        # numerical stability
+        # would both be multiplied by 'exp(lg_max)/self.num_mc_samples', we cancel them
+        # out for numerical stability
         return (
-            zhat_.detach().log() + lg_max - math.log(total),
-            (back / zhat_.detach()).masked_fill(zhat_ == 0, 0.0),
+            (zhat_.detach().log() + lg_max).mean() - math.log(self.num_mc_samples),
+            (back / zhat_.detach()).masked_fill(zhat_ == 0, 0.0).mean(),
             torch.tensor(float("nan")),
         )
 
@@ -147,7 +163,7 @@ class ExtendedConditionalBernoulliEstimator(Estimator):
         iwg_f = ilw_f + ilg.transpose(1, 2)  # (l, nmax, d)
         log_r = log_R_forward(iwg_f, lmax, batch_first=True)  # (nmax)
         log_denom = ilw.t().exp().log1p().sum(1)  # (nmax)
-        zhat = (log_r - log_denom).logsumexp(0) - math.log(log_r.size(0))
+        zhat = (log_r - log_denom).mean()
         return zhat.detach(), zhat, torch.tensor(float("nan"))
 
 
@@ -165,7 +181,6 @@ class StaticSrsworIsEstimator(Estimator):
         self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tmax, nmax, fmax = x.size()
-        total = nmax * self.num_mc_samples
         srswor = SimpleRandomSamplingWithoutReplacement(lmax, tmax)
         b = srswor.sample([self.num_mc_samples])
         lqb = srswor.log_prob(b).flatten().detach()  # mc * nmax
@@ -175,14 +190,12 @@ class StaticSrsworIsEstimator(Estimator):
         lpb = self.lp(b, x, self.theta)
         lg = self.lg(y, b, x, self.theta)
         lomega = lg + lpb - lqb
-        zhat = lomega.logsumexp(0) - math.log(total)
+        lomega = lomega.reshape(self.num_mc_samples, nmax)
+        norm = lomega.logsumexp(0)
+        zhat = norm.mean() - math.log(self.num_mc_samples)
         with torch.no_grad():
-            lomega = lomega.reshape(self.num_mc_samples, nmax)
-            norm = lomega.logsumexp(0)
             lomega = lomega - norm
-            log_ess = (
-                2 * math.log(self.num_mc_samples) - (2 * lomega).logsumexp(0).mean()
-            )
+            log_ess = -(2 * lomega).logsumexp(0).mean()
         return zhat.detach(), zhat, log_ess
 
 
@@ -260,22 +273,16 @@ class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
             with torch.no_grad():
                 # N.B. This is intentionally the previous sample, not the current one.
                 self.update_proposal(b_last, mc)
-                choice = torch.bernoulli(
-                    (lomega_prop - lomega_last).clamp_min_(config.EPS_INF).sigmoid_()
-                )
-
+                choice = torch.bernoulli((lomega_prop - lomega_last).exp().clamp_max(1))
             not_choice = 1 - choice
             b_last = b_prop * choice + b_last * not_choice
         self.clear()
         lomegas = torch.stack(lomegas)
-        zhat = lomegas.flatten().logsumexp(0) - math.log(total)
+        norm = lomegas.logsumexp(0)
+        zhat = norm.mean() - math.log(self.num_mc_samples)
         with torch.no_grad():
-            lomegas = lomegas.reshape(self.num_mc_samples, nmax)
-            norm = lomegas.logsumexp(0)
             lomegas = lomegas - norm
-            log_ess = (
-                2 * math.log(self.num_mc_samples) - (2 * lomegas).logsumexp(0).mean()
-            )
+            log_ess = -(2 * lomegas).logsumexp(0).mean()
         return zhat.detach(), zhat, log_ess
 
 
@@ -316,20 +323,23 @@ class CbAisImhEstimator(AisImhEstimator):
 
     def initialize_proposal(self) -> None:
         assert self.x is not None and self.lmax is not None
-        self.cb = ConditionalBernoulli(
-            self.lmax, logits=torch.randn_like(self.x[..., 0].t())
+        self.li = (
+            (self.lmax.to(self.x.dtype).log() - math.log(self.x.size(0)))
+            .expand_as(self.x[..., 0])
+            .clamp(config.EPS_INF, config.EPS_0)
         )
-        self.li = self.cb.probs.t().log()
+        # doesn't matter what you put in. What's important is that they're all equal
+        self.cb = ConditionalBernoulli(self.lmax, logits=self.li.t())
 
     def update_proposal(self, b: torch.Tensor, mc_sample_num: int) -> None:
         assert self.lmax is not None and self.y is not None and self.x is not None
+        av_coeff = torch.as_tensor(mc_sample_num, device=b.device, dtype=b.dtype,)
         li_new = self.lie(self.y, b, self.x, self.theta)
-        self.li = (self.li + math.log(mc_sample_num)).logaddexp(li_new) - math.log(
-            mc_sample_num + 1
-        )
-        li = self.li.clamp(config.EPS_INF, config.EPS_0)
-        logits = li.t() - torch.log1p(-li.t().exp())
-        self.cb = ConditionalBernoulli(self.lmax, logits=logits)
+        self.li = (self.li + av_coeff.log()).logaddexp(li_new) - (av_coeff + 1).log()
+        li = self.li.t().clamp(config.EPS_INF, config.EPS_0)
+        # if mc_sample_num % 200 == 1:
+        #     print(li.exp().t())
+        self.cb = ConditionalBernoulli(self.lmax, logits=li - (-li.exp()).log1p())
 
     def sample_proposal(self) -> torch.Tensor:
         assert self.cb is not None
@@ -482,8 +492,8 @@ def test_enumerate_estimator():
         b_n = b_n.t().float()
         lp_n = _lp(b_n, x_n, theta)
         lg_n = _lg(y_n, b_n, x_n, theta)
-        zhat_exp += (lp_n + lg_n).exp().sum()
-    zhat_exp = (zhat_exp / nmax).log()
+        zhat_exp += (lp_n + lg_n).flatten().logsumexp(0)
+    zhat_exp = zhat_exp / nmax
     grad_zhat_exp = torch.autograd.grad(zhat_exp, theta)
     zhat_act, back_act, _ = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
     grad_zhat_act = torch.autograd.grad(back_act, theta)
@@ -578,7 +588,7 @@ def test_static_srswor_is_estimator():
 
 def test_cb_ais_imh():
     torch.manual_seed(6)
-    tmax, nmax, mc = 5, 4, 1024
+    tmax, nmax, mc = 5, 4, 2048
     x = torch.randn((tmax, nmax, 1))
     logits = torch.randn((tmax,), requires_grad=True)
     weights = torch.randn((tmax,), requires_grad=True)
