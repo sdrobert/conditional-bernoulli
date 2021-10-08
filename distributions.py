@@ -576,7 +576,9 @@ class SimpleRandomSamplingWithoutReplacement(torch.distributions.ExponentialFami
         return self.log_partition
 
     def expand(self, batch_shape, _instance=None):
-        new = self._get_checked_instance(SimpleRandomSamplingWithoutReplacement, _instance)
+        new = self._get_checked_instance(
+            SimpleRandomSamplingWithoutReplacement, _instance
+        )
         batch_shape = list(batch_shape)
         new.given_count = self.given_count.expand(batch_shape)
         new.total_count = self.total_count.expand(batch_shape)

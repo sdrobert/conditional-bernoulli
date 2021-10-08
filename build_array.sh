@@ -4,28 +4,30 @@ conf=conf
 res=res
 log=log
 
-mcs=( 1 256 65536 )
+mcs=( 1 128 256 512 1024 )
 p_1s=( 0.25 0.75 )
 p_2s=( 0 0.25 0.75 )
-estimators=( rej srswor ecb ais-cb-count ais-cb-lp ais-cb-gibbs )
+estimators=( rej srswor ecb ais-cb-count ais-cb-gibbs )
 num_seeds=100
 
 template='[DreznerFarnumBernoulliExperimentParameters]
+ais_burn_in = 32
 estimator = ESTIMATOR
 fmax = 16
-kl_batch_size = 128
+kl_batch_size = 256
 learning_rate = 0.1
 num_mc_samples = MC
-num_trials = 4096
+num_trials = 1024
 optimizer = adam
 p_1 = P1
 p_2 = P2
 reduce_lr_factor = 0.1
-reduce_lr_patience = 64
-reduce_lr_threshold = 0.1
+reduce_lr_patience = 16
+reduce_lr_threshold = 1
+reduce_lr_min = 0.01
 theta_3_std = 1.0
-tmax = 128
-train_batch_size = 1
+tmax = 32
+train_batch_size = 64
 vmax = 16
 x_std = 1.0
 '
@@ -37,7 +39,10 @@ for mc in "${mcs[@]}"; do
   for p_1 in "${p_1s[@]}"; do
     for p_2 in "${p_2s[@]}"; do
       for estimator in "${estimators[@]}"; do
+        # no point in more than one mc sample (?) for ecb and fewer than 1
+        # for ais algorithms
         [ "$estimator" = "ecb" ] && [ "$mc" != "1" ] && continue
+        [ "$mc" = 1 ] && [[ "$estimator" =~ ^ais-* ]] && continue
         num_jobs=$(( $num_jobs + 1 ))
         echo "$template" | \
           sed "s/MC/${mc}/;s/P1/${p_1}/;s/P2/${p_2}/;s/ESTIMATOR/${estimator}/" \

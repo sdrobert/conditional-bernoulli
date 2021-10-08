@@ -11,4 +11,4 @@ EPS_INF = math.log(torch.finfo(torch.float32).tiny) / 2
 
 
 # for log probabilities that we want to clamp away from 1
-EPS_0 = math.log1p(-torch.finfo(torch.float).eps)
+EPS_0 = math.log1p(-2 * torch.finfo(torch.float32).eps)

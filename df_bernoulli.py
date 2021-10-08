@@ -1,17 +1,15 @@
 """Sequential classification based on Drezner & Farnum 1993"""
 
 import torch
-from torch.overrides import get_ignored_functions
 
 torch.use_deterministic_algorithms(True)
-torch.set_printoptions(precision=4, sci_mode=False)
+torch.set_printoptions(precision=2, sci_mode=False)
 
 
 import config
 from estimators import (
     CbAisImhEstimator,
     ExtendedConditionalBernoulliEstimator,
-    DummyAisImhEstimator,
     EnumerateEstimator,
     Estimator,
     GibbsCbAisImhEstimator,
@@ -150,7 +148,7 @@ def event_sample(
     lens = b.to(torch.long).sum(0)
     x_at_b = (
         x.transpose(0, 1)
-        .masked_select(b.to(torch.bool).t().unsqueeze(2))
+        .masked_select(b.t().to(torch.bool).unsqueeze(2))
         .view(-1, isize)
     )
     logits = x_at_b @ theta_3
@@ -170,7 +168,7 @@ def event_logprob(
     isize = x.size(2)
     assert isize == theta_3.size(0)
     assert b.device == theta_3.device == x.device == y.device
-    b_ = b.t() != 0
+    b_ = b.t().to(torch.bool)
     x_at_b = x.transpose(0, 1).masked_select(b_.unsqueeze(2)).view(-1, isize)
     assert y.numel() == x_at_b.size(0), (
         y.numel(),
@@ -236,36 +234,36 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
         inclusive_bounds=(True, True),
     )
     num_trials = param.Integer(2 ** 10, bounds=(1, None))
-    train_batch_size = param.Integer(1, bounds=(1, None))
-    kl_batch_size = param.Integer(128, bounds=(1, None))
-    tmax = param.Integer(2 ** 7, bounds=(1, None))
-    fmax = param.Integer(16, bounds=(1, None))
-    vmax = param.Integer(16, bounds=(1, None))
+    train_batch_size = param.Integer(2 ** 6, bounds=(1, None))
+    kl_batch_size = param.Integer(2 ** 8, bounds=(1, None))
+    tmax = param.Integer(2 ** 5, bounds=(1, None))
+    fmax = param.Integer(2 ** 4, bounds=(1, None))
+    vmax = param.Integer(2 ** 4, bounds=(1, None))
     p_1 = param.Magnitude(0.5)
     p_2 = param.Magnitude(0.5)
     x_std = param.Number(1.0, bounds=(0, None))
     theta_3_std = param.Number(1.0, bounds=(0, None))
     learning_rate = param.Magnitude(1e-1)
-    reduce_lr_patience = param.Integer(2 ** 6, bounds=(0, None))
-    reduce_lr_threshold = param.Number(1e-1, bounds=(0, None))
+    reduce_lr_patience = param.Integer(2 ** 4, bounds=(0, None))
+    reduce_lr_threshold = param.Number(1, bounds=(0, None))
     reduce_lr_factor = param.Magnitude(1e-1, inclusive_bounds=(True, False))
+    reduce_lr_min = param.Magnitude(1e-3)
+    ais_burn_in = param.Integer(2 ** 5, bounds=(0, None))
     estimator = param.ObjectSelector(
-        "ecb",
+        "srswor",
         objects=(
             "rej",  # Rejection sampling.
             "srswor",  # SRSWOR. Simple Random Sampling WithOut Replacement.
             "ecb",  # ECB. Extended Conditional Bernoulli.
-            "ais-cb-lp",  # AIS-IMH. Conditional log P inclusion estimates.
             "ais-cb-count",  # AIS-IMH. Count-based inclusion estimates.
             "ais-cb-gibbs",  # AIS-IMH. Gibbs-style inclusion estimates.
             "enum",  # Enumerate the support. Testing purposes only.
-            "dummy",  # srswor through ais-imh class. Testing purposes only.
         ),
     )
     optimizer = param.ObjectSelector(
         torch.optim.Adam, objects={"adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     )
-    num_mc_samples = param.Integer(2 ** 8, bounds=(1, None))
+    num_mc_samples = param.Integer(2 ** 10, bounds=(1, None))
 
 
 def initialize(
@@ -314,20 +312,19 @@ def initialize(
         estimator = ExtendedConditionalBernoulliEstimator(
             _ilw, _ilg, _lp, _lg, theta_act
         )
-    elif df_params.estimator == "ais-cb-lp":
-        estimator = CbAisImhEstimator(
-            _lie_lp_only, df_params.num_mc_samples, _lp, _lg, theta_act
-        )
     elif df_params.estimator == "ais-cb-count":
         estimator = CbAisImhEstimator(
-            _lie_count, df_params.num_mc_samples, _lp, _lg, theta_act
+            _lie_count,
+            df_params.num_mc_samples,
+            _lp,
+            _lg,
+            theta_act,
+            df_params.ais_burn_in,
         )
     elif df_params.estimator == "ais-cb-gibbs":
         estimator = GibbsCbAisImhEstimator(
-            df_params.num_mc_samples, _lp, _lg, theta_act
+            df_params.num_mc_samples, _lp, _lg, theta_act, df_params.ais_burn_in
         )
-    elif df_params.estimator == "dummy":
-        estimator = DummyAisImhEstimator(df_params.num_mc_samples, _lp, _lg, theta_act)
     else:
         raise NotImplementedError
     optimizer = df_params.optimizer(optim_params, lr=df_params.learning_rate)
@@ -337,6 +334,8 @@ def initialize(
         factor=df_params.reduce_lr_factor,
         patience=df_params.reduce_lr_patience,
         threshold=df_params.reduce_lr_threshold,
+        min_lr=df_params.reduce_lr_min,
+        verbose=True,
     )
     return optimizer, scheduler, theta_exp, theta_act, estimator
 
@@ -356,6 +355,7 @@ def train_for_trial(
         * df_params.x_std
     )
     b = _psampler(x, theta_exp)
+    # print(b[:10, 0])
     events, lmax = event_sample(theta_exp[2], x, b)
     y = _pad_events(events, lmax)
     zhat, back, log_ess = estimator(x, y, lmax)
@@ -418,7 +418,6 @@ def train(
         torch.manual_seed(seeds[trial])
         zhat, log_ess = train_for_trial(optimizer, theta_exp, estimator, df_params)
         sample_kl = draw_kl_sample_estimate(theta_exp, estimator, df_params)
-        # print(sample_kl, log_ess)
         scheduler.step(sample_kl)
         log_esss.append(log_ess)
         sample_zhats.append(zhat)
@@ -428,6 +427,8 @@ def train(
         sses_theta_2.append(((theta_act[1] - theta_exp[1]) ** 2).item())
         theta_3_act = theta_act[2] - theta_act[2].mean()
         sses_theta_3.append(((theta_3_exp - theta_3_act) ** 2).sum().item())
+        # if not trial % 10:
+        #     print(log_ess, sses_theta_1[-1], sses_theta_2[-1], sses_theta_3[-1])
     return (
         sample_kls,
         sample_zhats,
@@ -497,11 +498,13 @@ def main(args=None) -> int:
             "LR Reduction Patience": options.params.reduce_lr_patience,
             "LR Reduction Threshold": options.params.reduce_lr_threshold,
             "LR Reduction Factor": options.params.reduce_lr_factor,
+            "LR Reduction min": options.params.reduce_lr_min,
             "Estimator": options.params.estimator,
             "Optimizer": DefaultObjectSelectorSerializer().serialize(
                 "optimizer", options.params
             ),
             "Number of Monte Carlo Samples": options.params.num_mc_samples,
+            "AIS Burn-in": options.params.ais_burn_in,
             "Trial": trials,
             "SSE theta_1": sses_theta_1,
             "SSE theta_2": sses_theta_2,
@@ -521,20 +524,6 @@ def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     theta_1 = theta[0].expand(nmax)
     theta_2 = theta[1].expand(nmax)
     return dependent_bernoulli_logprob(theta_1, theta_2, b)
-
-
-def _lie_lp_only(
-    y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
-) -> torch.Tensor:
-    nmax = b.size(1)
-    theta_1 = theta[0].expand(nmax)
-    theta_2 = theta[1].expand(nmax)
-    lg = _lg(y, b, x, theta)
-    lp = dependent_bernoulli_logprob(theta_1, theta_2, b, True)  # (tmax, nmax)
-    lp_bt_eq_1 = lp * b + (-lp.exp()).log1p() * (1 - b)  # log P(b_t=1|b_{<=t})
-    lp_cumsum = lp.cumsum(0)
-    lp_bt_eq_1[1:] -= lp_cumsum[1:] - lp_cumsum[:-1]
-    return lp_bt_eq_1 - lg
 
 
 def _lie_count(
@@ -736,16 +725,6 @@ def test_estimator_hooks():
     assert not torch.allclose(zhat, torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
     assert grad_zhat[1] is None  # beta, unused
-    assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
-
-    zhat, back, log_ess = CbAisImhEstimator(_lie_lp_only, mc, _lp, _lg, theta)(
-        x, y, lmax
-    )
-    assert not log_ess.isnan()
-    grad_zhat = torch.autograd.grad(back, theta, allow_unused=True)
-    assert not torch.allclose(zhat, torch.tensor(0.0))
-    assert not torch.allclose(grad_zhat[0], torch.tensor(0.0))
-    assert not torch.allclose(grad_zhat[1], torch.tensor(0.0))
     assert not torch.allclose(grad_zhat[2], torch.tensor(0.0))
 
 
