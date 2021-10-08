@@ -64,12 +64,12 @@ class RejectionEstimator(Estimator):
         psampler: PSampler,
         num_mc_samples: int,
         lp: LogDensity,
-        g: LogLikelihood,
+        lg: LogLikelihood,
         theta: Theta,
     ) -> None:
         self.psampler = psampler
         self.num_mc_samples = num_mc_samples
-        super().__init__(lp, g, theta)
+        super().__init__(lp, lg, theta)
 
     def __call__(
         self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
@@ -120,7 +120,7 @@ class RejectionEstimator(Estimator):
             .masked_scatter(accept_mask, lg)
             .view(nmax, self.num_mc_samples)
         )
-        lg_max = lg.detach().max(1)[0].clamp_min_(config.EPS_INF)
+        lg_max = lg.detach().max(1)[0]
         g = (lg - lg_max.unsqueeze(1)).exp()
         zhat_ = g.sum(1)  # (nmax,)
         back = zhat_ + (lp.clamp_min(config.EPS_INF) * g.detach()).sum(1)
@@ -172,10 +172,10 @@ class StaticSrsworIsEstimator(Estimator):
     num_mc_samples: int
 
     def __init__(
-        self, num_mc_samples: int, lp: LogDensity, g: LogLikelihood, theta: Theta,
+        self, num_mc_samples: int, lp: LogDensity, lg: LogLikelihood, theta: Theta,
     ) -> None:
         self.num_mc_samples = num_mc_samples
-        super().__init__(lp, g, theta)
+        super().__init__(lp, lg, theta)
 
     def __call__(
         self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor
