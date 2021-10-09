@@ -9,6 +9,7 @@ torch.set_printoptions(precision=2, sci_mode=False)
 import config
 from estimators import (
     CbAisImhEstimator,
+    ForcedSuffixIsEstimator,
     ExtendedConditionalBernoulliEstimator,
     EnumerateEstimator,
     Estimator,
@@ -253,6 +254,7 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
         "srswor",
         objects=(
             "rej",  # Rejection sampling.
+            "fs",  # FS. Forced Suffix.
             "srswor",  # SRSWOR. Simple Random Sampling WithOut Replacement.
             "ecb",  # ECB. Extended Conditional Bernoulli.
             "ais-cb-count",  # AIS-IMH. Count-based inclusion estimates.
@@ -295,12 +297,16 @@ def initialize(
     )
     theta_act = [theta_1_act, theta_2_act, theta_3_act]
     optim_params = theta_act.copy()
-    if df_params.p_2 == 0.0 or df_params.estimator == "cb":
+    if df_params.p_2 == 0.0 or df_params.estimator == "ecb":
         theta_2_act.data[0] = -float("inf")
         optim_params.pop(1)
     if df_params.estimator == "rej":
         estimator = RejectionEstimator(
             _psampler, df_params.num_mc_samples, _lp, _lg, theta_act
+        )
+    elif df_params.estimator == "fs":
+        estimator = ForcedSuffixIsEstimator(
+            _psampler, df_params.num_mc_samples, _lp_full, _lg, theta_act
         )
     elif df_params.estimator == "enum":
         estimator = EnumerateEstimator(_lp, _lg, theta_act)
@@ -335,7 +341,6 @@ def initialize(
         patience=df_params.reduce_lr_patience,
         threshold=df_params.reduce_lr_threshold,
         min_lr=df_params.reduce_lr_min,
-        verbose=True,
     )
     return optimizer, scheduler, theta_exp, theta_act, estimator
 
@@ -524,6 +529,13 @@ def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
     theta_1 = theta[0].expand(nmax)
     theta_2 = theta[1].expand(nmax)
     return dependent_bernoulli_logprob(theta_1, theta_2, b)
+
+
+def _lp_full(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
+    nmax = b.size(1)
+    theta_1 = theta[0].expand(nmax)
+    theta_2 = theta[1].expand(nmax)
+    return dependent_bernoulli_logprob(theta_1, theta_2, b, True)
 
 
 def _lie_count(

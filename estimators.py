@@ -199,6 +199,58 @@ class StaticSrsworIsEstimator(Estimator):
         return zhat.detach(), zhat, log_ess
 
 
+class ForcedSuffixIsEstimator(Estimator):
+
+    psampler: PSampler
+    num_mc_samples: int
+
+    def __init__(
+        self,
+        psampler: PSampler,
+        num_mc_samples: int,
+        lp_full: LogDensity,
+        lg: LogLikelihood,
+        theta: Theta,
+    ) -> None:
+        self.psampler = psampler
+        self.num_mc_samples = num_mc_samples
+        super().__init__(lp_full, lg, theta)
+
+    def __call__(
+        self, x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tmax, nmax, fmax = x.size()
+        device = x.device
+        x = x.repeat_interleave(self.num_mc_samples, 1)
+        y = y.repeat_interleave(self.num_mc_samples, 0)
+        lmax = lmax.repeat_interleave(self.num_mc_samples, 0)
+        b = self.psampler(x, self.theta).t()
+
+        # force suffix to whatever value makes the correct number of highs
+        cb = b.cumsum(1)
+        remove_mask = lmax.unsqueeze(1) > cb - b
+        add_mask = lmax.unsqueeze(1) - cb + b > torch.arange(
+            tmax - 1, -1, -1, device=device
+        )
+        b = b * remove_mask + add_mask * (1 - b)
+        assert torch.equal(b.long().sum(1), lmax)
+        # N.B. the last element is always forced
+        assert (~remove_mask[:, -1] | add_mask[:, -1]).all()
+
+        lpb_full = self.lp(b.t(), x, self.theta)  # (tmax, nmax * mc)
+        lp = lpb_full.sum(0)
+        lg = self.lg(y, b.t(), x, self.theta)
+        lqb = lpb_full.detach().t().masked_fill((~remove_mask) | add_mask, 0.0).sum(1)
+
+        lomega = (lp + lg - lqb).view(nmax, self.num_mc_samples)
+        norm = lomega.logsumexp(1)
+        zhat = norm.mean() - math.log(self.num_mc_samples)
+        with torch.no_grad():
+            lomega = lomega - norm.unsqueeze(1)
+            log_ess = -(2 * lomega).logsumexp(1).mean()
+        return zhat.detach(), zhat, log_ess
+
+
 class AisImhEstimator(Estimator, metaclass=abc.ABCMeta):
 
     num_mc_samples: int
@@ -450,34 +502,35 @@ class GibbsCbAisImhEstimator(CbAisImhEstimator):
 # theta = (logits, weights)
 # y_act = sum_t weights_t * x_t * b_t
 # try to match some target y by maximizing exp(-||y - y_act||^2)
-def _lp(b: torch.Tensor, x: torch.Tensor, theta: Theta) -> torch.Tensor:
-    logits = theta[0]
-    return torch.distributions.Bernoulli(logits=logits).log_prob(b.t()).sum(1)
+def _lp(
+    b: torch.Tensor, x: torch.Tensor, theta: Theta, full: bool = False
+) -> torch.Tensor:
+    lp = torch.distributions.Bernoulli(logits=theta[0]).log_prob(b.t())
+    if full:
+        return lp.t()
+    else:
+        return lp.sum(1)
 
 
 def _psampler(x: torch.Tensor, theta: Theta) -> torch.Tensor:
-    logits = theta[0]
-    return torch.distributions.Bernoulli(logits=logits).sample([x.size(1)]).t()
+    return torch.distributions.Bernoulli(logits=theta[0]).sample([x.size(1)]).t()
 
 
 def _lg(
     y: torch.Tensor, b: torch.Tensor, x: torch.Tensor, theta: Theta
 ) -> torch.Tensor:
-    weights = theta[1]
-    y_act = x.squeeze(2).t() * weights  # (nmax, tmax)
+    y_act = x.squeeze(2).t() * theta[1]  # (nmax, tmax)
     return (-((y - y_act) ** 2) * b.t()).sum(1)
 
 
 def _ilw(x: torch.Tensor, theta: Theta) -> torch.Tensor:
-    logits = theta[0]
-    return logits.unsqueeze(1).expand_as(x.squeeze(2))
+    return theta[0].unsqueeze(1).expand_as(x.squeeze(2))
 
 
 def _ilg(
     x: torch.Tensor, y: torch.Tensor, lmax: torch.Tensor, theta: Theta
 ) -> torch.Tensor:
-    weights = theta[1]
-    y_act = x.squeeze(2).t() * weights  # (nmax, tmax)
+    y_act = x.squeeze(2).t() * theta[1]  # (nmax, tmax)
     nse = -((y - y_act) ** 2)
     return extract_relevant_odds_forward(nse, lmax, True, config.EPS_INF).transpose(
         1, 2
@@ -670,3 +723,24 @@ def test_gibbs_cb_ais_imh():
     assert torch.allclose(zhat_exp, zhat_act, atol=1e-2)
     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-2)
     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-2)
+
+
+def test_forced_suffix_is_estimator():
+    torch.manual_seed(9)
+    tmax, nmax, mc = 10, 100, 2 ** 10
+    x = torch.randn((tmax, nmax, 1))
+    logits = torch.randn((tmax,), requires_grad=True)
+    weights = torch.randn((tmax,), requires_grad=True)
+    theta = [logits, weights]
+    y = torch.randn(nmax, tmax)
+    lmax = torch.randint(tmax + 1, size=(nmax,))
+    zhat_exp, back_exp, _ = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
+    grad_zhat_exp = torch.autograd.grad(back_exp, theta)
+    zhat_act, back_act, log_ess = ForcedSuffixIsEstimator(
+        _psampler, mc, lambda *z: _lp(*z, full=True), _lg, theta
+    )(x, y, lmax)
+    assert not log_ess.isnan()
+    grad_zhat_act = torch.autograd.grad(back_act, theta)
+    assert torch.allclose(zhat_exp, zhat_act, atol=1e-1)
+    assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0], atol=1e-1)
+    assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1], atol=1e-1)

@@ -7,7 +7,7 @@ log=log
 mcs=( 1 128 256 512 1024 )
 p_1s=( 0.25 0.75 )
 p_2s=( 0 0.25 0.75 )
-estimators=( rej srswor ecb ais-cb-count ais-cb-gibbs )
+estimators=( rej fs srswor ecb ais-cb-count ais-cb-gibbs )
 num_seeds=100
 
 template='[DreznerFarnumBernoulliExperimentParameters]
@@ -24,7 +24,7 @@ p_2 = P2
 reduce_lr_factor = 0.1
 reduce_lr_patience = 16
 reduce_lr_threshold = 1
-reduce_lr_min = 0.01
+reduce_lr_min = 0.001
 theta_3_std = 1.0
 tmax = 32
 train_batch_size = 64
