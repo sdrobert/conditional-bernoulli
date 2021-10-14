@@ -125,8 +125,8 @@ class PoissonBinomial(torch.distributions.Distribution):
         return self._param.size()
 
     def expand(self, batch_shape, _instance=None):
-        # FIXME(sdrobert): I dunnae ken to do this without using the
-        # method _get_checked_instance and _validate_args
+        # FIXME(anon): I dunnae ken to do this without using the method
+        # _get_checked_instance and _validate_args
         new = self._get_checked_instance(PoissonBinomial, _instance)
         batch_shape = list(batch_shape)
         if "total_count" in self.__dict__:
@@ -732,7 +732,7 @@ def test_simple_random_sampling_without_replacement():
     assert torch.allclose(lp_exp, lp_act)
 
 
-# XXX(sdrobert): The following did not work. I've had difficulty with algorithms based
+# XXX(anon): The following did not work. I've had difficulty with algorithms based
 # on subtraction/division.
 # @torch.no_grad()
 # def extended_conditional_bernoulli(

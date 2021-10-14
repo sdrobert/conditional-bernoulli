@@ -68,7 +68,7 @@ def extract_relevant_odds_forward(
         w = w.t()
     tmax, nmax = w.size()
     assert lmax.dim() == 1 and lmax.size(0) == nmax
-    # FIXME(sdrobert): I believe the logic is the same regardless of kmax, but check
+    # FIXME(anon): I believe the logic is the same regardless of kmax, but check
     lmax_min, lmax_max = int(lmax.min().long().item()), int(lmax.max().item())
     if not lmax_max:
         out_shape = torch.Size(
@@ -94,7 +94,7 @@ def extract_relevant_odds_forward(
 
 # @torch.jit.script
 # def flip_relevant_odds(w_f: torch.Tensor, lmax: torch.Tensor) -> torch.Tensor:
-#     # FIXME(sdrobert): Once again, check higher-order kmax
+#     # FIXME(anon): Once again, check higher-order kmax
 #     device = w_f.device
 #     assert device == lmax.device
 #     assert w_f.dim() == 3
