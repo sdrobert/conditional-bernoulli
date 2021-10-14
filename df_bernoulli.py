@@ -236,7 +236,7 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     )
     num_trials = param.Integer(2 ** 10, bounds=(1, None))
     train_batch_size = param.Integer(2 ** 6, bounds=(1, None))
-    kl_batch_size = param.Integer(2 ** 8, bounds=(1, None))
+    kl_batch_size = param.Integer(2 ** 9, bounds=(1, None))
     tmax = param.Integer(2 ** 5, bounds=(1, None))
     fmax = param.Integer(2 ** 4, bounds=(1, None))
     vmax = param.Integer(2 ** 4, bounds=(1, None))
@@ -248,7 +248,7 @@ class DreznerFarnumBernoulliExperimentParameters(param.Parameterized):
     reduce_lr_patience = param.Integer(2 ** 4, bounds=(0, None))
     reduce_lr_threshold = param.Number(1, bounds=(0, None))
     reduce_lr_factor = param.Magnitude(1e-1, inclusive_bounds=(True, False))
-    reduce_lr_min = param.Magnitude(1e-3)
+    reduce_lr_min = param.Magnitude(1e-2)
     ais_burn_in = param.Integer(2 ** 5, bounds=(0, None))
     estimator = param.ObjectSelector(
         "srswor",
@@ -433,7 +433,7 @@ def train(
         theta_3_act = theta_act[2] - theta_act[2].mean()
         sses_theta_3.append(((theta_3_exp - theta_3_act) ** 2).sum().item())
         # if not trial % 10:
-        #     print(log_ess, sses_theta_1[-1], sses_theta_2[-1], sses_theta_3[-1])
+        #     print(sses_theta_1[-1], sses_theta_2[-1], sses_theta_3[-1], sample_kl)
     return (
         sample_kls,
         sample_zhats,
