@@ -12,3 +12,4 @@ dependencies:
   - pydrobert-param
   - seaborn
   - tqdm
+  - jupyter
