@@ -14,7 +14,6 @@
 
 """Forward and backward functions"""
 
-import math
 import torch
 import config
 
