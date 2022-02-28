@@ -5,7 +5,7 @@ channels:
   - pytorch
 dependencies:
   - python=3.7
-  - pytorch=1.9.0
+  - pytorch=1.10.1
   - ipython
   - pytest
   - cpuonly
