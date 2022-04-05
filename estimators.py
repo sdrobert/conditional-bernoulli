@@ -35,8 +35,45 @@ import pydrobert.torch.estimators as _e
 import pydrobert.torch.distributions as _d
 import pydrobert.torch.functional as _f
 
+import distributions
+
 ProposalMaker = Callable[[torch.Tensor, int], torch.distributions.Distribution]
 # in: sufficient statistic and iteration #, out: adapted proposal
+
+
+class FixedCardinalityGibbsStatistic(object):
+
+    func: _e.FunctionOnSample
+    density: _d.Density
+    is_log: bool
+
+    def __init__(
+        self, func: _e.FunctionOnSample, density: _d.Density, is_log=False
+    ) -> None:
+        self.func = func
+        self.density = density
+        self.is_log = is_log
+
+    def __call__(self, b: torch.Tensor) -> torch.Tensor:
+        T, device = b.size(-1), b.device
+        reps = torch.eye(T, device=device)
+        reps = reps.unsqueeze(0) - reps.unsqueeze(1)
+        reps = reps.view((T ** 2,) + (1,) * (b.dim() - 1) + (T,))
+        b_ = reps + b
+        keep_mask = (b_ != 2).all(-1) & (b_ != -1).all(-1)
+        keep_mask[T + 1 :: T + 1] = False  # only calculate the original values once
+        b_ = b_[keep_mask]
+        ll_ = self.func(b_).detach()
+        if not self.is_log:
+            ll_ = ll_.abs_().log_()
+        ll_ += self.density.log_prob(b_).detach()
+        ll = torch.full(keep_mask.shape, -float("inf"), dtype=b.dtype, device=device)
+        ll.masked_scatter_(keep_mask, ll_)
+        # the likelihood of the original value only applies when the binary value
+        # was high in the original sample
+        ll[:: T + 1] = ll[0].masked_fill(~(b.bool()), -float("inf"))
+        h = ll.movedim(0, -1).unflatten(-1, (T, T)).softmax(-1).nan_to_num_(0)
+        return h.sum(-2)
 
 
 class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
@@ -194,7 +231,7 @@ class DummyGibbs(object):
     def __call__(self, b: torch.Tensor) -> torch.Tensor:
         T = self.density.event_shape[0]
         b_ = b.unsqueeze(0)
-        ones_mask = torch.nn.functional.one_hot(torch.arange(T, device=b.device)).view(
+        ones_mask = torch.eye(T, device=b.device).view(
             (T,) + (1,) * len(self.density.batch_shape) + (T,)
         )
         pos_instances = (b_ + ones_mask).clamp_max_(1)
@@ -206,39 +243,6 @@ class DummyGibbs(object):
             neg_instances
         )
         return (pos_likelihoods - neg_likelihoods).movedim(0, -1).sigmoid()
-
-
-# def test_enumerate_estimator():
-#     torch.manual_seed(1)
-#     tmax, nmax = 10, 5
-#     x = torch.randn((tmax, nmax, 1))
-#     logits = torch.randn((tmax,), requires_grad=True)
-#     weights = torch.randn((tmax,), requires_grad=True)
-#     theta = [logits, weights]
-#     optimizer = torch.optim.Adam(theta)
-#     y = torch.randn(nmax, tmax)
-#     lmax = torch.randint(tmax + 1, size=(nmax,))
-#     zhat_exp = torch.zeros((1,))
-#     for n in range(nmax):
-#         x_n = x[:, n : n + 1]
-#         y_n = y[n : n + 1]
-#         b_n, _ = enumerate_bernoulli_support(tmax, lmax[n : n + 1])
-#         b_n = b_n.t().float()
-#         lp_n = _lp(b_n, x_n, theta)
-#         lg_n = _lg(y_n, b_n, x_n, theta)
-#         zhat_exp += (lp_n + lg_n).flatten().logsumexp(0)
-#     zhat_exp = zhat_exp / nmax
-#     grad_zhat_exp = torch.autograd.grad(zhat_exp, theta)
-#     zhat_act, back_act, _ = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
-#     grad_zhat_act = torch.autograd.grad(back_act, theta)
-#     assert torch.allclose(zhat_exp, zhat_act)
-#     assert torch.allclose(grad_zhat_exp[0], grad_zhat_act[0])
-#     assert torch.allclose(grad_zhat_exp[1], grad_zhat_act[1])
-#     theta[0].backward(-grad_zhat_act[0])
-#     theta[1].backward(-grad_zhat_act[1])
-#     optimizer.step()
-#     zhat_act_2, _, _ = EnumerateEstimator(_lp, _lg, theta)(x, y, lmax)
-#     assert zhat_act_2 > zhat_act
 
 
 def _test_estimator_boilerplate(T, N):
@@ -299,6 +303,24 @@ def test_ais_imh():
         (g_exp_logits - g_act_logits).abs().max().item()
     )
     assert torch.allclose(g_exp_theta, g_act_theta, atol=1e-3)
+
+
+def test_fixed_cardinality_gibbs_statistic():
+    torch.manual_seed(2)
+    T, L = 6, 3
+    logits = torch.randn(T)
+    func = lambda x: torch.zeros_like(x)[..., 0]
+    density = distributions.ConditionalBernoulli(L, logits=logits)
+    gibbs = FixedCardinalityGibbsStatistic(func, density, True)
+    b = _f.enumerate_binary_sequences_with_cardinality(T, L)
+    probs = density.log_prob(b).exp()
+    act = 0
+    for b_, prob in zip(b, probs):
+        act += gibbs(b_) * prob
+    indicator_mask = (b.unsqueeze(0) * torch.eye(T).unsqueeze(1)).sum(2)
+    exp = (probs.expand(T, *probs.shape) * indicator_mask).sum(1)
+    assert exp.shape == act.shape
+    assert torch.allclose(exp, act)
 
 
 # # a dumb little objective to test our estimators.

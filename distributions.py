@@ -405,7 +405,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         batch_shape = list(self.batch_shape)
         batch_dims = len(batch_shape)
         if not batch_dims:
-            log_r_f, given_count = log_r_f.unsqueeze(0), given_count.view(1)
+            log_r_f, given_count = log_r_f.unsqueeze(1), given_count.view(1)
         else:
             log_r_f, given_count = (
                 log_r_f.flatten(1, batch_dims),
