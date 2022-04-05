@@ -13,3 +13,4 @@ dependencies:
   - seaborn
   - tqdm
   - jupyter
+  - pydrobert-pytorch

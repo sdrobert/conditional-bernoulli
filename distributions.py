@@ -497,130 +497,96 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         return num - denom
 
 
-@torch.jit.script
-@torch.no_grad()
-def simple_random_sampling_without_replacement(
-    tmax: torch.Tensor, lmax: torch.Tensor, tmax_max: Optional[int] = None
-) -> torch.Tensor:
-    if tmax_max is None:
-        tmax_max = int(tmax.max().item())
-    tmax, lmax = torch.broadcast_tensors(tmax, lmax)
-    b = torch.empty(torch.Size([tmax_max]) + tmax.shape)
-    remainder_ell = lmax
-    remainder_t = tmax
-    for t in range(tmax_max):
-        p = remainder_ell / remainder_t
-        b_t = torch.bernoulli(p)
-        b[t] = b_t
-        remainder_ell = remainder_ell - b_t
-        remainder_t = (remainder_t - 1).clamp_min_(1)
-    return b.movedim(0, -1)
+class DreznerFarnumBernoulli(torch.distributions.Distribution):
+    r"""Drezner-Farnum dependent Bernoulli sequences
 
+    .. math::
 
-class SimpleRandomSamplingWithoutReplacement(torch.distributions.ExponentialFamily):
+        P(b_t=1|b_{1:t-1}; \theta_{1,2}) = \begin{cases}
+            \sigma(\theta_{1,t}) & t = 1 \\
+            (1 - \sigma(\theta_{2,t}))\sigma(\theta_{1,t}) +
+                \sigma(\theta_{2,t})\frac{\sum_{t'=1}^{t - 1}b_t}{t - 1} & t > 1
+        \end{cases} \\
+        \sigma(x) = \frac{1}{1 + \exp(-x)}
+    
+    Parameters
+    ----------
+    theta_1
+        :math:`\theta_1`. At least 1-dimensional with final dimension :math:`t`.
+    theta_2
+        :math:`\theta_2`. Broadcasts with `theta_1`.
+    """
+
+    theta_1: torch.Tensor
+    theta_2: torch.Tensor
+    T: int
 
     arg_constraints = {
-        "total_count": constraints.nonnegative_integer,
-        "given_count": constraints.nonnegative_integer,
+        "theta_1": constraints.real,
+        "theta_2": constraints.real,
+        "T": constraints.positive_integer,
     }
-    _mean_carrier_measure = 0
+
+    support = constraints.independent(constraints.boolean, 1)
 
     def __init__(
-        self,
-        given_count: Union[int, torch.Tensor],
-        total_count: Union[int, torch.Tensor],
-        out_size: Optional[int] = None,
-        validate_args=None,
+        self, theta_1: torch.Tensor, theta_2: torch.Tensor, T: int, validate_args=None
     ):
-        given_count = torch.as_tensor(given_count)
-        total_count = torch.as_tensor(total_count)
-        if out_size is None:
-            out_size = total_count.max()
-        given_count, total_count = torch.broadcast_tensors(given_count, total_count)
-        batch_shape = given_count.size()
-        event_shape = torch.Size([out_size])
-        self.total_count, self.given_count = total_count, given_count
-        super(SimpleRandomSamplingWithoutReplacement, self).__init__(
-            batch_shape, event_shape, validate_args
-        )
-
-    @constraints.dependent_property
-    def support(self) -> torch.Tensor:
-        return ConditionalBernoulliConstraint(
-            self.total_count, self.given_count, self.event_shape[0]
-        )
+        self.theta_1 = torch.as_tensor(theta_1)
+        self.theta_2 = torch.as_tensor(theta_2)
+        self.T = torch.as_tensor(T)
+        super().__init__(self.theta_1.shape, torch.Size([T]), validate_args)
 
     @lazy_property
-    def log_partition(self) -> torch.Tensor:
-        # log total_count choose given_count
-        log_factorial = (
-            torch.arange(
-                1,
-                self.event_shape[0] + 1,
-                device=self.total_count.device,
-                dtype=torch.float,
-            )
-            .log()
-            .cumsum(0)
-        )
-        t_idx = (self.total_count.long() - 1).clamp_min(0)
-        g_idx = (self.given_count.long() - 1).clamp_min(0)
-        tmg_idx = (self.total_count.long() - self.given_count.long() - 1).clamp_min(0)
-        return log_factorial[t_idx] - log_factorial[g_idx] - log_factorial[tmg_idx]
+    def probs(self) -> torch.Tensor:
+        return self.theta_1.sigmoid().unsqueeze(-1).expand(self._extended_shape())
+
+    @lazy_property
+    def mixture(self) -> torch.Tensor:
+        return self.theta_2.sigmoid().unsqueeze(-1).expand(self._extended_shape())
 
     @property
-    def mean(self):
-        len_mask = self.total_count.unsqueeze(-1) <= torch.arange(self.event_shape[0])
-        return (
-            (self.given_count / self.total_count.clamp_min(1.0))
-            .unsqueeze(-1)
-            .expand(self.batch_shape + self.event_shape)
-        ).masked_fill(len_mask, 0.0)
+    def mean(self) -> torch.Tensor:
+        return self.probs
 
-    @property
-    def variance(self):
-        return self.mean * (1 - self.mean)
-
-    @property
-    def _natural_params(self):
-        return self.zeros(self.batch_shape + self.event_shape)
-
-    def _log_normalizer(self, logits):
-        assert torch.allclose(logits, torch.tensor(0))
-        return self.log_partition
-
-    def expand(self, batch_shape, _instance=None):
-        new = self._get_checked_instance(
-            SimpleRandomSamplingWithoutReplacement, _instance
-        )
-        batch_shape = list(batch_shape)
-        new.given_count = self.given_count.expand(batch_shape)
-        new.total_count = self.total_count.expand(batch_shape)
-
-        if "log_partition" in self.__dict__:
-            new.log_partition = self.log_partition.expand(batch_shape)
-
-        super(SimpleRandomSamplingWithoutReplacement, new).__init__(
-            torch.Size(batch_shape), self.event_shape, validate_args=False
-        )
-        new._validate_args = self._validate_args
-        return new
-
-    def sample(self, sample_shape=torch.Size([])):
-        sample_shape = torch.Size(sample_shape)
+    def sample(self, sample_shape: torch.Size = torch.Size([])) -> torch.Tensor:
         shape = self._extended_shape(sample_shape)
-        with torch.no_grad():
-            total_count = self.total_count.expand(shape[:-1])
-            given_count = self.given_count.expand(shape[:-1])
-            b = simple_random_sampling_without_replacement(
-                total_count, given_count, self.event_shape[0]
-            )
+        T, device = self.event_shape[0], self.theta_1.device
+        b = torch.empty(shape, device=device)
+        u = torch.rand(shape, device=device)
+        probs = self.probs.expand(shape)
+        mixture = self.mixture.expand(shape)
+        b[..., 0] = sum_ = (u[..., 0] < probs[..., 0]).float()
+        for tm1 in range(1, T):
+            b_t = (
+                u[..., tm1]
+                < (
+                    probs[..., tm1] * (1 - mixture[..., tm1])
+                    + mixture[..., tm1] * sum_ / tm1
+                )
+            ).float()
+            sum_ += b_t
+            b[..., tm1] = b_t
         return b
 
-    def log_prob(self, value):
+    def log_prob(self, b: torch.Tensor) -> torch.Tensor:
         if self._validate_args:
-            self._validate_sample(value)
-        return (-self.log_partition).expand(value.shape[:-1])
+            self._validate_sample(b)
+        T, device = b.size(-1), self.theta_1.device
+        lp_1 = -torch.nn.functional.binary_cross_entropy_with_logits(
+            self.theta_1.unsqueeze(-1).expand_as(b), b, reduction="none"
+        )
+        lp_11, lp_1 = lp_1[..., 0], lp_1[..., 1:]
+        if T == 1:
+            return lp_11 + self.theta_2 - self.theta_2.detach()
+        lm_2, lm_1 = self.theta_2.sigmoid().log(), (-self.theta_2).sigmoid().log()
+        lp_1 = lp_1 + lm_1.unsqueeze(-1)
+        p_2 = b[..., :-1].cumsum(-1) / torch.arange(1, T, device=device, dtype=b.dtype)
+        p_2 = b[..., 1:] * p_2 + (1 - b[..., 1:]) * (1 - p_2)
+        lp_2 = p_2.log() + lm_2.unsqueeze(-1)
+        max_, min_ = torch.max(lp_1, lp_2), torch.min(lp_1, lp_2)
+        lp = max_ + (min_ - max_).exp().log1p()
+        return lp_11 + lp.sum(-1)
 
 
 # TESTS
@@ -703,33 +669,48 @@ def test_conditional_bernoulli():
     assert (b.max(-1)[0] <= 1).all()
 
 
-def test_simple_random_sampling_without_replacement():
+def test_drezner_farnum():
     torch.manual_seed(3)
-    tmax_max, nmax, mmax = 16, 8, 2 ** 15
-    tmax = torch.randint(tmax_max + 1, size=(nmax,), dtype=torch.float)
-    lmax = (torch.rand(nmax) * (tmax + 1)).floor_()
+    mmax, tmax = 2 ** 15, 5
+    theta_1 = torch.randn(1, requires_grad=True)
+    theta_2 = torch.randn(1, requires_grad=True)
+    zero = torch.zeros(1)
+    dist = DreznerFarnumBernoulli(theta_1, theta_2, tmax)
+    sample = dist.sample([mmax])
+    assert torch.allclose(sample.mean(0), dist.mean, atol=1e-2)
+    lp_act = dist.log_prob(sample)
+    Elp_act = lp_act.mean() / tmax
+    assert torch.isfinite(Elp_act)
+    g_theta_1_act, g_theta_2_act = torch.autograd.grad(Elp_act, [theta_1, theta_2])
+    assert torch.isclose(g_theta_1_act, zero, atol=1e-2)
+    assert torch.isclose(g_theta_2_act, zero, atol=1e-2)
 
-    srswor = SimpleRandomSamplingWithoutReplacement(lmax, tmax, tmax_max, True)
-    b = srswor.sample([mmax])
-    assert ((b == 0.0) | (b == 1.0)).all()
-    assert (b.sum(-1) == lmax).all()
-    tmax_mask = tmax.unsqueeze(1) > torch.arange(tmax_max)
-    b = b * tmax_mask
-    assert (b.sum(-1) == lmax).all()
-    assert torch.allclose(b.mean(0), srswor.mean, atol=1e-2)
+    # make bernoulli draws entirely independent
+    theta_2 = -float("inf")
+    dist = DreznerFarnumBernoulli(theta_1, theta_2, tmax)
+    sample = dist.sample([mmax])
+    assert torch.allclose(sample.mean(0), dist.mean, atol=1e-2)
+    lp_act = dist.log_prob(sample)
+    Elp_act = lp_act.mean() / tmax
+    (g_theta_1,) = torch.autograd.grad(Elp_act, [theta_1])
+    assert torch.isclose(g_theta_1, zero, atol=1e-2)
+    p, omp = theta_1.sigmoid(), (-theta_1).sigmoid()
+    Elp_exp = p.detach() * p.log() + omp.detach() * omp.log()
+    assert torch.isclose(Elp_exp, Elp_act, atol=1e-2)
+    (g_theta_1,) = torch.autograd.grad(Elp_exp, [theta_1])
+    assert torch.isclose(g_theta_1, zero, atol=1e-2)
 
-    lp_exp = []
-    for n in range(nmax):
-        tmax_n, lmax_n = int(tmax[n].item()), int(lmax[n].item())
-        lp_exp.append(
-            math.log(
-                (math.factorial(tmax_n - lmax_n) * math.factorial(lmax_n))
-                / math.factorial(tmax_n)
-            )
-        )
-    lp_exp = torch.tensor(lp_exp).expand(mmax, nmax)
-    lp_act = srswor.log_prob(b)
-    assert torch.allclose(lp_exp, lp_act)
+    # now make them entirely dependent
+    theta_2 = float("inf")
+    dist = DreznerFarnumBernoulli(theta_1, theta_2, tmax)
+    sample = dist.sample([mmax])
+    assert torch.allclose(sample.mean(0), dist.mean, atol=1e-2)
+    assert (sample[..., :1] == sample[..., 1:]).all()
+    lp_act = dist.log_prob(sample)
+    Elp_act = lp_act.mean()
+    (g_theta_1,) = torch.autograd.grad(Elp_act, [theta_1])
+    assert torch.isclose(g_theta_1, zero, atol=1e-2)
+    assert torch.isclose(Elp_exp, Elp_act, atol=1e-2)
 
 
 # XXX(anon): The following did not work. I've had difficulty with algorithms based
