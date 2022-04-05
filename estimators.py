@@ -82,7 +82,10 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
         if not self.is_log:
             laf = laf.abs().log()
         last_density = laf + self.density.log_prob(last_sample)
-        v = 0
+        if self.is_log:
+            lomegas = []
+        else:
+            omegas = []
         h_last = self.adaptation_func(last_sample.squeeze(0))
         h_last_last = None
         # a = 1.0
@@ -90,21 +93,19 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
             if n <= self.burn_in:
                 Q = self.proposal
             else:
-                assert h_last_last is not None
                 Q = self.proposal_maker(h_last_last, n - 2)
             sample = Q.sample([1])
             laf = self.func(sample)
             lpd = self.density.log_prob(sample)
-            lpp = Q.log_prob(sample)
-            if not self.is_log:
-                omega = laf * (lpd - lpp).exp()
+            lpp = Q.log_prob(sample).detach()
+            if self.is_log:
+                density = laf + lpd
+                lomegas.append(density - lpp)
+            else:
+                omegas.append(laf * (lpd - lpp).exp())
                 laf = laf.abs().log()
                 density = laf + lpd
-            else:
-                density = laf + lpd
-                omega = (density - lpp).exp()
-            v = v * ((n - 1) / n) + omega / n
-            lpp_last = Q.log_prob(last_sample)
+            lpp_last = Q.log_prob(last_sample).detach()
             accept_ratio = (density - last_density - lpp + lpp_last).exp()
             u = torch.rand_like(accept_ratio)
             accept = u < accept_ratio
@@ -118,6 +119,11 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
             )
             # if n % 1024 == 0:
             #     print(n, h_last, a)
+        # cat not stack b/c 0 dim is sample dim
+        if self.is_log:
+            v = torch.cat(lomegas).exp().mean(0)
+        else:
+            v = torch.cat(omegas).mean(0)
         return v
 
 
@@ -146,7 +152,7 @@ class DummyLogFunc(torch.nn.Module):
         assert b.shape[1:] == self.y.shape
         y_act = self.x * self.weights.unsqueeze(0)  # (N, T)
         sse = (self.y - y_act) ** 2
-        return -(b * sse).sum(2) - (b.sum(2) - self.L) ** 2
+        return -(b * sse).sum(2) - 0.01 * (b.sum(2) - self.L) ** 2
 
 
 class DummyBernoulliSequence(torch.distributions.distribution.Distribution):
@@ -174,6 +180,32 @@ class DummyBernoulliSequence(torch.distributions.distribution.Distribution):
         if expand:
             support = support.expand((-1,) + self.batch_shape + self.event_shape)
         return support
+
+
+class DummyGibbs(object):
+
+    log_func: DummyLogFunc
+    density: DummyBernoulliSequence
+
+    def __init__(self, log_func, density) -> None:
+        self.log_func = log_func
+        self.density = density
+
+    def __call__(self, b: torch.Tensor) -> torch.Tensor:
+        T = self.density.event_shape[0]
+        b_ = b.unsqueeze(0)
+        ones_mask = torch.nn.functional.one_hot(torch.arange(T, device=b.device)).view(
+            (T,) + (1,) * len(self.density.batch_shape) + (T,)
+        )
+        pos_instances = (b_ + ones_mask).clamp_max_(1)
+        neg_instances = (b_ - ones_mask).clamp_min_(0)
+        pos_likelihoods = self.log_func(pos_instances) + self.density.log_prob(
+            pos_instances
+        )
+        neg_likelihoods = self.log_func(neg_instances) + self.density.log_prob(
+            neg_instances
+        )
+        return (pos_likelihoods - neg_likelihoods).movedim(0, -1).sigmoid()
 
 
 # def test_enumerate_estimator():
@@ -226,7 +258,7 @@ def _test_estimator_boilerplate(T, N):
 
 def test_dummy():
     torch.manual_seed(1)
-    T, N, M = 5, 10, 2 ** 20
+    T, N, M = 5, 10, 2 ** 19
     logits, func, z_exp, g_exp_logits, g_exp_theta = _test_estimator_boilerplate(T, N)
     dist = DummyBernoulliSequence(logits)
     estimator = _e.DirectEstimator(dist, func, M, is_log=True)
@@ -240,40 +272,33 @@ def test_dummy():
 
 
 def test_ais_imh():
-    torch.manual_seed(2)
-    T, N, M = 5, 1, 2 ** 16
+    torch.manual_seed(1)
+    T, N, M = 5, 10, 2 ** 16
     logits, func, z_exp, g_exp_logits, g_exp_theta = _test_estimator_boilerplate(T, N)
     density = DummyBernoulliSequence(logits)
     proposal = DummyBernoulliSequence(torch.zeros_like(logits))
+    adapt = DummyGibbs(func, density)
     estimator = AisImhEstimator(
         proposal,
         func,
         M,
         density,
-        lambda x: x,
-        lambda h, n: DummyBernoulliSequence(torch.logit(h, 1e-5)),
-        M // 2,
+        adapt,
+        lambda h, n: DummyBernoulliSequence(
+            torch.logit(h, torch.finfo(torch.float).tiny)
+        ),
+        2 ** 7,
         is_log=True,
     )
     z_act = estimator()
     g_act_logits, g_act_theta = torch.autograd.grad(
         z_act, [logits, func.weights], torch.ones_like(z_act)
     )
-    assert torch.allclose(z_exp, z_act, atol=1e-3)
-    assert torch.allclose(g_exp_logits, g_act_logits, atol=1e-3)
+    assert torch.allclose(z_exp, z_act, atol=1e-3), (z_exp - z_act).abs().max().item()
+    assert torch.allclose(g_exp_logits, g_act_logits, atol=1e-3), (
+        (g_exp_logits - g_act_logits).abs().max().item()
+    )
     assert torch.allclose(g_exp_theta, g_act_theta, atol=1e-3)
-
-    # self,
-    # proposal: torch.distributions.Distribution,
-    # func: _e.FunctionOnSample,
-    # mc_samples: int,
-    # density: torch.distributions.Distribution,
-    # adaptation_func: _e.FunctionOnSample,
-    # proposal_maker: ProposalMaker,
-    # burn_in: int = 1,
-    # initial_sample: Optional[torch.Tensor] = None,
-    # initial_sample_tries: int = 1000,
-    # is_log: bool = False,
 
 
 # # a dumb little objective to test our estimators.
