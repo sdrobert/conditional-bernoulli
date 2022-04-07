@@ -57,8 +57,8 @@ def extract_relevant_odds_forward(
         Of shape ``(lmax.max(), binom(tmax - lmax.min() + 1, kmax), nmax)``, where
         ``w_[:lmax[n], :binom(tmax - lmax[n] + 1, kmax), n]`` contain the odds relevant
         to batch index ``n``. For ``kmax == 1`` and ``t < tmax - lmax[n] + ell + 1``,
-        ``w_[ell, t, n] == w[t + ell, n]``. The values for indices
-        ``t >= tmax - lmax[n] + ell + 1`` and ``ell >= lmax[n]`` are all set to zero.
+        ``w_f[ell, t, n] == w[t + ell, n]``. The values for indices
+        ``t >= tmax - lmax[n] + ell + 1`` and ``ell >= lmax[n]`` are all set to `zero`.
     """
     device = w.device
     assert device == lmax.device
@@ -68,48 +68,24 @@ def extract_relevant_odds_forward(
     tmax, nmax = w.size()
     assert lmax.dim() == 1 and lmax.size(0) == nmax
     # FIXME(anon): I believe the logic is the same regardless of kmax, but check
-    lmax_min, lmax_max = int(lmax.min().long().item()), int(lmax.max().item())
+    lmax_min, lmax_max = int(lmax.min().item()), int(lmax.max().item())
     if not lmax_max:
         out_shape = torch.Size(
             [0, nmax, tmax + 1] if batch_first else [0, tmax + 1, nmax]
         )
         return torch.empty(out_shape, device=device, dtype=w.dtype)
-    w = torch.cat(
-        [w, torch.zeros((tmax - lmax_min + lmax_max + 1, nmax), device=device)]
-    )
+    diffdim = tmax - lmax_min + 1
+    padding = max(0, diffdim + lmax_max - tmax)
+    if padding:
+        w = torch.cat([w, torch.full((padding, nmax), fill, device=device)])
     w_f_ = []
     for ell in range(lmax_max):
-        w_f_.append(w[ell : tmax - lmax_min + ell + 1].t())
+        w_f_.append(w[ell : diffdim + ell].t())
     # some weirdness here. We're probably going to call R_forward on this later, and the
     # cumulative sum is more efficient on the rightmost axis, so we prefer contiguous on
     # batch_first = True (though we prefer w input to be contiguous the other way)
-    mask = (tmax - lmax + 1).unsqueeze(1) <= torch.arange(
-        tmax - lmax_min + 1, device=device
-    )
-    mask = (torch.arange(lmax_max).unsqueeze(1) >= lmax).unsqueeze(2) | mask
-    w_f = torch.stack(w_f_, 0).masked_fill(mask, fill)
+    w_f = torch.stack(w_f_, 0)  # .masked_fill(mask, -float("inf"))
     return w_f if batch_first else w_f.transpose(1, 2)
-
-
-# @torch.jit.script
-# def flip_relevant_odds(w_f: torch.Tensor, lmax: torch.Tensor) -> torch.Tensor:
-#     # FIXME(anon): Once again, check higher-order kmax
-#     device = w_f.device
-#     assert device == lmax.device
-#     assert w_f.dim() == 3
-#     lmax_max, diffmax, nmax = w_f.size()
-#     assert lmax.dim() == 1 and lmax.size(0) == nmax
-#     if not lmax_max:
-#         return w_f
-#     tmax = diffmax + lmax.min() - 1
-#     ldim_flip = (
-#         -torch.arange(1, lmax_max + 1, device=device).unsqueeze(1) + lmax
-#     ).clamp_min_(0)
-#     diffdim_flip = (
-#         -torch.arange(1, diffmax + 1, device=device).unsqueeze(1) + tmax - lmax + 1
-#     ).clamp_min_(0)
-#     flip_idx = ((ldim_flip * diffmax).unsqueeze(1) + diffdim_flip).flatten(end_dim=1)
-#     return w_f.flatten(end_dim=1).gather(0, flip_idx).view_as(w_f)
 
 
 @torch.jit.script
@@ -246,8 +222,8 @@ def test_extract_relevant_odds_forward():
     assert w_f.size() == torch.Size([nmax - 1, tmax + 1, nmax])
     for n in range(nmax):
         w_f_n = w_f[..., n]
-        assert (w_f_n[:, tmax - lmax[n] + 1 :] == 0).all()
-        assert (w_f_n[lmax[n] :] == 0).all()
+        # assert (w_f_n[:, tmax - lmax[n] + 1 :] == 0).all()
+        # assert (w_f_n[lmax[n] :] == 0).all()
         w_f_n = w_f_n[: lmax[n], : tmax - lmax[n] + 1]
         w_f_n_exp = torch.arange(w_f_n.size(1)) + n * tmax
         for ell in range(lmax[n].item()):

@@ -14,7 +14,6 @@
 
 """Distributions, in particular the Conditional Bernoulli"""
 
-import math
 from forward_backward import (
     R_forward,
     extract_relevant_odds_forward,
@@ -22,8 +21,11 @@ from forward_backward import (
 )
 import config
 from typing import Optional, Union
+
 import torch
 
+import pydrobert.torch.distributions as _d
+import pydrobert.torch.functional as _f
 import torch.distributions.constraints as constraints
 from torch.distributions.utils import lazy_property
 
@@ -267,27 +269,6 @@ def _log_extended_conditional_bernoulli_k_eq_1(
     return b[:, :tmax]
 
 
-class ConditionalBernoulliConstraint(constraints.Constraint):
-    is_discrete = True
-    event_dim = 1
-
-    def __init__(
-        self, total_count: torch.Tensor, given_count: torch.Tensor, tmax: int
-    ) -> None:
-        self.given_count = given_count
-        self.total_count_mask = total_count.unsqueeze(-1) <= torch.arange(
-            tmax, device=total_count.device
-        )
-        super().__init__()
-
-    def check(self, value: torch.Tensor) -> torch.Tensor:
-        is_bool = ((value == 0) | (value == 1)).all(-1)
-        isnt_gte_tc = (self.total_count_mask.expand_as(value) * value).sum(-1) == 0
-        value_sum = value.sum(-1)
-        matches_count = value_sum == self.given_count.expand_as(value_sum)
-        return is_bool & isnt_gte_tc & matches_count
-
-
 class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
     arg_constraints = {
@@ -337,15 +318,32 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
             batch_size, param_size[-1:], validate_args
         )
 
+    @property
+    def has_enumerate_support(self) -> bool:
+        return (self.given_count == self.given_count.flatten()[0]).all().item()
+
     @lazy_property
     def total_count(self):
-        return torch.full(self.batch_shape, self._param.size(-1)).type_as(self._param)
+        return torch.full(self.batch_shape, self._event_shape[0]).type_as(self._param)
 
     @constraints.dependent_property
     def support(self) -> torch.Tensor:
-        return ConditionalBernoulliConstraint(
+        return _d.BinaryCardinalityConstraint(
             self.total_count, self.given_count, self._event_shape[0]
         )
+
+    def enumerate_support(self, expand=True) -> torch.Tensor:
+        if not self.has_enumerate_support:
+            raise NotImplementedError(
+                "given_count must all be equal to enumerate support"
+            )
+        total = self._event_shape[0]
+        given = int(self.given_count.flatten()[0].item())
+        support = _f.enumerate_binary_sequences_with_cardinality(total, given)
+        support = support.view((-1,) + (1,) * len(self.batch_shape) + (total,))
+        if expand:
+            support = support.expand((-1,) + self.batch_shape + (total,))
+        return support
 
     @lazy_property
     def probs(self):
@@ -358,71 +356,102 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
     @lazy_property
     def logits_f(self):
         logits, given_count = self.logits, self.given_count
-        batch_shape = list(self.batch_shape)
-        batch_dims = len(batch_shape)
+        batch_dims = len(self.batch_shape)
         if not batch_dims:
             logits, given_count = logits.unsqueeze(0), given_count.view(1)
         else:
-            logits, given_count = (
-                logits.flatten(end_dim=batch_dims - 1),
-                given_count.flatten(),
-            )
+            logits = logits.flatten(end_dim=-2)
+            given_count = given_count.flatten()
         logits_f = extract_relevant_odds_forward(
             logits, given_count, True, -float("inf")
         )
         if not batch_dims:
             logits_f = logits_f.squeeze(1)
         else:
-            logits_f = logits_f.reshape(
-                [logits_f.size(0)] + batch_shape + [logits_f.size(-1)]
-            )
+            logits_f = logits_f.unflatten(1, self.batch_shape)
         return logits_f
 
     @lazy_property
     def log_r_f(self):
         logits_f, given_count = self.logits_f, self.given_count
-        batch_shape = list(self.batch_shape)
-        batch_dims = len(batch_shape)
+        batch_dims = len(self.batch_shape)
         if not batch_dims:
             logits_f, given_count = logits_f.unsqueeze(1), given_count.view(1)
         else:
-            logits_f, given_count = (
-                logits_f.flatten(1, batch_dims),
-                given_count.flatten(),
-            )
+            logits_f = logits_f.flatten(1, batch_dims)
+            given_count = given_count.flatten()
         log_r_f = log_R_forward(logits_f, given_count, 1, True, True)
         if not batch_dims:
             log_r_f = log_r_f.squeeze(1)
         else:
-            log_r_f = log_r_f.reshape(
-                [log_r_f.size(0)] + batch_shape + [log_r_f.size(-1)]
-            )
+            log_r_f = log_r_f.unflatten(1, self.batch_shape)
         return log_r_f
 
     @property
     def log_partition(self):
-        log_r_f, given_count = self.log_r_f, self.given_count
-        batch_shape = list(self.batch_shape)
-        batch_dims = len(batch_shape)
-        if not batch_dims:
-            log_r_f, given_count = log_r_f.unsqueeze(1), given_count.view(1)
-        else:
-            log_r_f, given_count = (
-                log_r_f.flatten(1, batch_dims),
-                given_count.flatten(),
-            )
-        given_count = given_count.long()
-        _, nmax, diffdim = log_r_f.size()
-        return log_r_f[
-            given_count,
-            torch.arange(nmax),
-            diffdim + given_count.min() - given_count - 1,
-        ].view(batch_shape)
+        log_r_f = self.log_r_f[..., -1]
+        given_count = self.given_count.long()
+        given_count = given_count.unsqueeze(0)
+        given_count = given_count.expand((1,) + log_r_f.shape[1:])
+        return log_r_f.gather(0, given_count).squeeze(0)
 
     @property
+    @torch.no_grad()
     def mean(self):
         # inclusion probabilities
-        raise NotImplementedError
+        log_r_f, logits_f, logits = self.log_r_f, self.logits_f, self.logits
+        device = log_r_f.device
+        given_count = self.given_count
+        batch_dims = len(self.batch_shape)
+        if not batch_dims:
+            log_r_f, given_count = log_r_f.unsqueeze(1), given_count.view(1)
+            logits, logits_f = logits.unsqueeze(0), logits_f.unsqueeze(1)
+        else:
+            log_r_f = log_r_f.flatten(1, batch_dims)
+            logits_f = logits_f.flatten(1, batch_dims)
+            given_count = given_count.flatten()
+        given_count = given_count.long()
+        lmax_max_p1, nmax, diffdim = log_r_f.shape
+        lmax_max = lmax_max_p1 - 1
+        tmax = self.event_shape[0]
+        assert logits_f.shape == (lmax_max, nmax, diffdim)
+        li = torch.full((lmax_max, nmax, tmax), -float("inf"), device=device)
+        keep = torch.full((lmax_max, tmax), 0, device=device, dtype=torch.bool)
+        li_ = []
+        logits = logits.flip([1])
+        nrange = torch.arange(nmax, device=device)
+        for ell in range(lmax_max):
+            remainder = given_count - ell - 1
+            invalid = remainder < 0
+            right = min(ell + diffdim, tmax)
+            keep[ell, ell:right] = True
+            li_.append(
+                (
+                    logits_f[ell, :, : right - ell] + log_r_f[ell, :, : right - ell]
+                ).flatten()
+            )
+            if ell:
+                cur_r_b = torch.cat(
+                    [
+                        torch.full((nmax, ell), -float("inf"), device=device),
+                        logits[:, ell:],
+                    ],
+                    1,
+                )
+                cur_r_b[:, 1:] += last_r_b[:, :-1]
+                cur_r_b = cur_r_b.logcumsumexp(1)
+            else:
+                cur_r_b = torch.zeros_like(logits)
+            cur_r_b.masked_fill_(invalid.unsqueeze(1), -float("inf"))
+            li[remainder.clamp_min_(-1), nrange] = cur_r_b.flip([1])
+            last_r_b = cur_r_b
+        li_ = torch.cat(li_)
+        li2 = torch.full_like(li, -float("inf")).masked_scatter_(keep.unsqueeze(1), li_)
+        li2[..., :-1] += li[..., 1:]
+        li = li2
+        li = li.logsumexp(0) - self.log_partition.view(-1, 1)
+        assert (li <= 0).all(), (li > 0).nonzero()
+        return li.exp().view(self.batch_shape + (tmax,))
 
     @property
     def variance(self):
@@ -457,7 +486,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
                 [self.w_f.size(0)] + batch_shape + [self.w_f.size(-1)]
             )
         if "log_r_f" in self.__dict__:
-            new.log_r_f = self.r.expand(
+            new.log_r_f = self.log_r_f.expand(
                 [self.log_r_f.size(0)] + batch_shape + [self.log_r_f.size(-1)]
             )
         super(ConditionalBernoulli, new).__init__(
@@ -619,7 +648,7 @@ def test_poisson_binomial():
 
 def test_conditional_bernoulli():
     torch.manual_seed(2)
-    tmax, nmax, mmax = 32, 8, 2 ** 15
+    tmax, nmax, mmax = 10, 10, 2 ** 15
     logits = torch.randn(nmax, tmax, requires_grad=True)
     idx_1_first = []
     idx_1_second = []
@@ -637,6 +666,9 @@ def test_conditional_bernoulli():
     assert torch.allclose(inclusions_exp.sum(1), torch.tensor(2.0))
     conditional_bernoulli = ConditionalBernoulli(2, logits=logits)
 
+    # assert torch.allclose(conditional_bernoulli.mean.sum(1), torch.tensor(2.0))
+    # assert torch.allclose(inclusions_exp, conditional_bernoulli.mean)
+
     b = conditional_bernoulli.sample([mmax])
     assert b.shape == torch.Size([mmax, nmax, tmax])
     assert (b.sum(-1) == 2).all()
@@ -646,7 +678,7 @@ def test_conditional_bernoulli():
 
     poisson_binomial = PoissonBinomial(tmax, logits=logits)
     log_prob_act = conditional_bernoulli.log_prob(b) + poisson_binomial.log_prob(
-        torch.full((nmax,), 2)
+        torch.tensor(2.0).expand((nmax,))
     )
     (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [logits])
 
@@ -657,8 +689,9 @@ def test_conditional_bernoulli():
     (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [logits])
     assert torch.allclose(grad_log_prob_exp, grad_log_prob_act)
 
-    total_count = torch.randint(tmax, (nmax,), dtype=torch.float)
+    total_count = torch.randint(1, tmax + 1, (nmax,), dtype=torch.float)
     given_count = (torch.rand((nmax,)) * (total_count + 1)).floor_()
+    assert (given_count <= total_count).all()
     conditional_bernoulli = ConditionalBernoulli(
         given_count, logits=logits, total_count=total_count, validate_args=True
     )
@@ -667,6 +700,23 @@ def test_conditional_bernoulli():
     assert (b.sum(-1) == given_count.unsqueeze(0)).all()
     assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
     assert (b.max(-1)[0] <= 1).all()
+    inclusions_act = conditional_bernoulli.mean
+    assert torch.allclose(inclusions_act.sum(1), given_count)
+    for n in range(nmax):
+        total_count_n = int(total_count[n].item())
+        given_count_n = int(given_count[n].item())
+        print(total_count_n, given_count_n)
+        inclusions_act_n = inclusions_act[n]
+        assert (inclusions_act_n[total_count_n:] == 0).all()
+        logits_n = logits[n, :total_count_n]
+        conditional_bernoulli_n = ConditionalBernoulli(
+            given_count_n, logits=logits_n, validate_args=True
+        )
+        assert conditional_bernoulli_n.has_enumerate_support
+        b = conditional_bernoulli_n.enumerate_support()
+        pb = conditional_bernoulli_n.log_prob(b).exp()
+        inclusions_exp_n = (pb.unsqueeze(1) * b).sum(0)
+        assert torch.allclose(inclusions_exp_n, inclusions_act_n[:total_count_n])
 
 
 def test_drezner_farnum():

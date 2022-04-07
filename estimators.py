@@ -307,7 +307,7 @@ def test_ais_imh():
 
 def test_fixed_cardinality_gibbs_statistic():
     torch.manual_seed(2)
-    T, L = 6, 3
+    T, L = 10, 3
     logits = torch.randn(T)
     func = lambda x: torch.zeros_like(x)[..., 0]
     density = distributions.ConditionalBernoulli(L, logits=logits)
