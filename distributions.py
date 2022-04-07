@@ -700,21 +700,28 @@ def test_conditional_bernoulli():
     assert (b.sum(-1) == given_count.unsqueeze(0)).all()
     assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
     assert (b.max(-1)[0] <= 1).all()
+    
     inclusions_act = conditional_bernoulli.mean
     assert torch.allclose(inclusions_act.sum(1), given_count)
     for n in range(nmax):
         total_count_n = int(total_count[n].item())
         given_count_n = int(given_count[n].item())
-        print(total_count_n, given_count_n)
         inclusions_act_n = inclusions_act[n]
         assert (inclusions_act_n[total_count_n:] == 0).all()
         logits_n = logits[n, :total_count_n]
         conditional_bernoulli_n = ConditionalBernoulli(
             given_count_n, logits=logits_n, validate_args=True
         )
+
         assert conditional_bernoulli_n.has_enumerate_support
         b = conditional_bernoulli_n.enumerate_support()
-        pb = conditional_bernoulli_n.log_prob(b).exp()
+        lpb_exp = torch.distributions.Bernoulli(logits=logits_n).log_prob(b).sum(1)
+        lpb_exp -= lpb_exp.logsumexp(0)
+        lpb_act = conditional_bernoulli_n.log_prob(b)
+        assert torch.allclose(lpb_exp, lpb_act)
+
+        pb = lpb_act.exp()
+        assert torch.allclose(pb.sum(), torch.tensor(1.0))
         inclusions_exp_n = (pb.unsqueeze(1) * b).sum(0)
         assert torch.allclose(inclusions_exp_n, inclusions_act_n[:total_count_n])
 
