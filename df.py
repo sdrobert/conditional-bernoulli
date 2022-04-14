@@ -115,11 +115,14 @@ class DreznerFarnumBernoulli(MixableSequentialLanguageModel):
         lp_0 = torch.cat([(1 - p1).log(), p1.log()])
         lpind = lp_0 + (1 - p2).log()
         lp_0, lpind = lp_0.expand(N, 2), lpind.expand(N, 2)
+        if T == 0:
+            return lp_0, prev
         denom = idx.clamp_min(1)
         idx = idx.expand(N)
         mean = (
-            hist.T.bool() & (torch.arange(T, device=hist.device) < idx.unsqueeze(1))
-        ).float().sum(1) / denom
+            hist.cumsum(0).gather(0, (idx - 1).clamp_min_(0).unsqueeze(0)).squeeze(0)
+            / denom
+        )
         mean = clamp_probs(mean)
         lpdep = torch.stack([(p2 * (1 - mean)).log(), (p2 * mean).log()], 1)
         max_, min_ = torch.max(lpind, lpdep), torch.min(lpind, lpdep)
@@ -151,7 +154,7 @@ class DreznerFarnumBernoulli(MixableSequentialLanguageModel):
 
 def test_drezner_farnum_bernoulli():
     torch.manual_seed(1)
-    T, N, M = 5, 1, 2 ** 15
+    T, N, M = 5, 10, 2 ** 15
     df_bernoulli = DreznerFarnumBernoulli()
     zero = torch.tensor(0.0)
     one = 1 - zero
