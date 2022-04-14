@@ -526,98 +526,6 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         return num - denom
 
 
-class DreznerFarnumBernoulli(torch.distributions.Distribution):
-    r"""Drezner-Farnum dependent Bernoulli sequences
-
-    .. math::
-
-        P(b_t=1|b_{1:t-1}; \theta_{1,2}) = \begin{cases}
-            \sigma(\theta_{1,t}) & t = 1 \\
-            (1 - \sigma(\theta_{2,t}))\sigma(\theta_{1,t}) +
-                \sigma(\theta_{2,t})\frac{\sum_{t'=1}^{t - 1}b_t}{t - 1} & t > 1
-        \end{cases} \\
-        \sigma(x) = \frac{1}{1 + \exp(-x)}
-    
-    Parameters
-    ----------
-    theta_1
-        :math:`\theta_1`. At least 1-dimensional with final dimension :math:`t`.
-    theta_2
-        :math:`\theta_2`. Broadcasts with `theta_1`.
-    """
-
-    theta_1: torch.Tensor
-    theta_2: torch.Tensor
-    T: int
-
-    arg_constraints = {
-        "theta_1": constraints.real,
-        "theta_2": constraints.real,
-        "T": constraints.positive_integer,
-    }
-
-    support = constraints.independent(constraints.boolean, 1)
-
-    def __init__(
-        self, theta_1: torch.Tensor, theta_2: torch.Tensor, T: int, validate_args=None
-    ):
-        self.theta_1 = torch.as_tensor(theta_1)
-        self.theta_2 = torch.as_tensor(theta_2)
-        self.T = torch.as_tensor(T)
-        super().__init__(self.theta_1.shape, torch.Size([T]), validate_args)
-
-    @lazy_property
-    def probs(self) -> torch.Tensor:
-        return self.theta_1.sigmoid().unsqueeze(-1).expand(self._extended_shape())
-
-    @lazy_property
-    def mixture(self) -> torch.Tensor:
-        return self.theta_2.sigmoid().unsqueeze(-1).expand(self._extended_shape())
-
-    @property
-    def mean(self) -> torch.Tensor:
-        return self.probs
-
-    def sample(self, sample_shape: torch.Size = torch.Size([])) -> torch.Tensor:
-        shape = self._extended_shape(sample_shape)
-        T, device = self.event_shape[0], self.theta_1.device
-        b = torch.empty(shape, device=device)
-        u = torch.rand(shape, device=device)
-        probs = self.probs.expand(shape)
-        mixture = self.mixture.expand(shape)
-        b[..., 0] = sum_ = (u[..., 0] < probs[..., 0]).float()
-        for tm1 in range(1, T):
-            b_t = (
-                u[..., tm1]
-                < (
-                    probs[..., tm1] * (1 - mixture[..., tm1])
-                    + mixture[..., tm1] * sum_ / tm1
-                )
-            ).float()
-            sum_ += b_t
-            b[..., tm1] = b_t
-        return b
-
-    def log_prob(self, b: torch.Tensor) -> torch.Tensor:
-        if self._validate_args:
-            self._validate_sample(b)
-        T, device = b.size(-1), self.theta_1.device
-        lp_1 = -torch.nn.functional.binary_cross_entropy_with_logits(
-            self.theta_1.unsqueeze(-1).expand_as(b), b, reduction="none"
-        )
-        lp_11, lp_1 = lp_1[..., 0], lp_1[..., 1:]
-        if T == 1:
-            return lp_11 + self.theta_2 - self.theta_2.detach()
-        lm_2, lm_1 = self.theta_2.sigmoid().log(), (-self.theta_2).sigmoid().log()
-        lp_1 = lp_1 + lm_1.unsqueeze(-1)
-        p_2 = b[..., :-1].cumsum(-1) / torch.arange(1, T, device=device, dtype=b.dtype)
-        p_2 = b[..., 1:] * p_2 + (1 - b[..., 1:]) * (1 - p_2)
-        lp_2 = p_2.log() + lm_2.unsqueeze(-1)
-        max_, min_ = torch.max(lp_1, lp_2), torch.min(lp_1, lp_2)
-        lp = max_ + (min_ - max_).exp().log1p()
-        return lp_11 + lp.sum(-1)
-
-
 # TESTS
 
 
@@ -700,7 +608,7 @@ def test_conditional_bernoulli():
     assert (b.sum(-1) == given_count.unsqueeze(0)).all()
     assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
     assert (b.max(-1)[0] <= 1).all()
-    
+
     inclusions_act = conditional_bernoulli.mean
     assert torch.allclose(inclusions_act.sum(1), given_count)
     for n in range(nmax):
@@ -724,50 +632,6 @@ def test_conditional_bernoulli():
         assert torch.allclose(pb.sum(), torch.tensor(1.0))
         inclusions_exp_n = (pb.unsqueeze(1) * b).sum(0)
         assert torch.allclose(inclusions_exp_n, inclusions_act_n[:total_count_n])
-
-
-def test_drezner_farnum():
-    torch.manual_seed(3)
-    mmax, tmax = 2 ** 15, 5
-    theta_1 = torch.randn(1, requires_grad=True)
-    theta_2 = torch.randn(1, requires_grad=True)
-    zero = torch.zeros(1)
-    dist = DreznerFarnumBernoulli(theta_1, theta_2, tmax)
-    sample = dist.sample([mmax])
-    assert torch.allclose(sample.mean(0), dist.mean, atol=1e-2)
-    lp_act = dist.log_prob(sample)
-    Elp_act = lp_act.mean() / tmax
-    assert torch.isfinite(Elp_act)
-    g_theta_1_act, g_theta_2_act = torch.autograd.grad(Elp_act, [theta_1, theta_2])
-    assert torch.isclose(g_theta_1_act, zero, atol=1e-2)
-    assert torch.isclose(g_theta_2_act, zero, atol=1e-2)
-
-    # make bernoulli draws entirely independent
-    theta_2 = -float("inf")
-    dist = DreznerFarnumBernoulli(theta_1, theta_2, tmax)
-    sample = dist.sample([mmax])
-    assert torch.allclose(sample.mean(0), dist.mean, atol=1e-2)
-    lp_act = dist.log_prob(sample)
-    Elp_act = lp_act.mean() / tmax
-    (g_theta_1,) = torch.autograd.grad(Elp_act, [theta_1])
-    assert torch.isclose(g_theta_1, zero, atol=1e-2)
-    p, omp = theta_1.sigmoid(), (-theta_1).sigmoid()
-    Elp_exp = p.detach() * p.log() + omp.detach() * omp.log()
-    assert torch.isclose(Elp_exp, Elp_act, atol=1e-2)
-    (g_theta_1,) = torch.autograd.grad(Elp_exp, [theta_1])
-    assert torch.isclose(g_theta_1, zero, atol=1e-2)
-
-    # now make them entirely dependent
-    theta_2 = float("inf")
-    dist = DreznerFarnumBernoulli(theta_1, theta_2, tmax)
-    sample = dist.sample([mmax])
-    assert torch.allclose(sample.mean(0), dist.mean, atol=1e-2)
-    assert (sample[..., :1] == sample[..., 1:]).all()
-    lp_act = dist.log_prob(sample)
-    Elp_act = lp_act.mean()
-    (g_theta_1,) = torch.autograd.grad(Elp_act, [theta_1])
-    assert torch.isclose(g_theta_1, zero, atol=1e-2)
-    assert torch.isclose(Elp_exp, Elp_act, atol=1e-2)
 
 
 # XXX(anon): The following did not work. I've had difficulty with algorithms based
