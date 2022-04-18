@@ -16,7 +16,7 @@
 
 import itertools
 
-from typing import Dict, Type, Tuple
+from typing import Dict, Optional, Type, Tuple
 
 import torch
 
@@ -253,6 +253,188 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         return logits, cur
 
 
+class LSTMLM(MixableSequentialLanguageModel):
+
+    hidden_size: int
+    input_size: int
+    input_name: str
+    num_layers: int
+    embedding_size: int
+    hidden_name: str
+    cell_name: str
+
+    def __init__(
+        self,
+        vocab_size: int,
+        input_size: int = 0,
+        embedding_size: int = 0,
+        hidden_size: int = 300,
+        num_layers: int = 3,
+        hidden_name: str = "hidden",
+        input_name: str = "input",
+        cell_name: str = "cell",
+    ):
+        if input_size < 0:
+            raise ValueError(
+                f"Expected input_size to be non-negative, got {input_size}"
+            )
+        if embedding_size < 0:
+            raise ValueError(
+                f"Expected embedding_size to be non-negative, got {embedding_size}"
+            )
+        if num_layers < 1:
+            raise ValueError(f"Expected num_layers to be positive, got {num_layers}")
+        ipe = input_size + embedding_size
+        if ipe == 0:
+            raise ValueError("At least one of input_size, embedding_size must be set")
+        using_names = [hidden_name, cell_name]
+        if input_size > 0:
+            using_names.append(input_name)
+        for a, b in itertools.permutations(using_names, 2):
+            if not a:
+                raise ValueError("No state names can be empty")
+            if a == b:
+                raise ValueError(f"State name '{a}' matches state name '{b}'.")
+        super().__init__(vocab_size)
+        self.input_size = input_size
+        self.input_name = input_name
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.embedding_size = embedding_size
+        self.hidden_name = hidden_name
+        self.cell_name = cell_name
+        if embedding_size > 0:
+            self.embedder = torch.nn.Embedding(
+                vocab_size + 1, embedding_size, vocab_size
+            )
+        else:
+            self.add_module("embedder", None)
+        self.lstm = torch.nn.LSTM(ipe, hidden_size, num_layers)
+        self.ff = torch.nn.Linear(hidden_size, vocab_size)
+        cell_list = []
+        in_size = ipe
+        for idx in range(num_layers):
+            cell = torch.nn.LSTMCell(in_size, hidden_size)
+            cell.weight_ih = getattr(self.lstm, f"weight_ih_l{idx}")
+            cell.weight_hh = getattr(self.lstm, f"weight_hh_l{idx}")
+            cell.bias_ih = getattr(self.lstm, f"bias_ih_l{idx}")
+            cell.bias_hh = getattr(self.lstm, f"bias_hh_l{idx}")
+            cell_list.append(cell)
+            in_size = hidden_size
+        self.cells = torch.nn.ModuleList(cell_list)
+
+    def reset_parameters(self) -> None:
+        if self.embedder is not None:
+            self.embedder.reset_parameters()
+        self.lstm.reset_parameters()
+        self.ff.reset_parameters()
+        # don't reset cells b/c they share parameters w/ LSTM
+
+    def update_input(self, prev: StateDict, hist: torch.Tensor) -> StateDict:
+        N = hist.size(1)
+        if self.hidden_name not in prev:
+            prev[self.hidden_name] = self.lstm.weight_ih_l0.new_zeros(
+                (self.num_layers, N, self.hidden_size)
+            )
+        if self.cell_name not in prev:
+            prev[self.cell_name] = self.lstm.weight_ih_l0.new_zeros(
+                (self.num_layers, N, self.hidden_size)
+            )
+        return prev
+
+    def extract_by_src(self, prev: StateDict, src: torch.Tensor) -> StateDict:
+        new_prev = {
+            self.hidden_name: prev[self.hidden_name].index_select(1, src),
+            self.cell_name: prev[self.cell_name].index_select(1, src),
+        }
+        if self.input_size > 0:
+            x = prev[self.input_name]
+            new_prev[self.input_name] = x.index_select(0 if x.ndim == 2 else 1, src)
+        return new_prev
+
+    def mix_by_mask(
+        self, prev_true: StateDict, prev_false: StateDict, mask: torch.Tensor
+    ) -> StateDict:
+        mask = mask.view(1, -1, 1)
+        prev = {
+            self.hidden_name: mask * prev_true[self.hidden_name]
+            + ~mask * prev_false[self.hidden_name],
+            self.cell_name: mask * prev_true[self.cell_name]
+            + ~mask * prev_false[self.cell_name],
+        }
+        if self.input_size > 0:
+            x = prev_true[self.input_name]
+            if x.dim() == 2:
+                mask = mask.squeeze(0)
+            prev[self.input_name] = (
+                mask * prev_true[self.input_name] + ~mask * prev_false[self.input_name]
+            )
+        return prev
+
+    def calc_idx_log_probs(
+        self, hist: torch.Tensor, prev: StateDict, idx: torch.Tensor
+    ) -> Tuple[torch.Tensor, StateDict]:
+        T, N = hist.shape
+        in_ = []
+        idx = idx.expand(1, N)
+        cur = dict()
+        if self.embedding_size > 0:
+            if T == 0:
+                tok = hist.new_full((N,), self.vocab_size)  # vocab_size is our sos
+            else:
+                idx_ = (idx - 1).clamp_min_(0)
+                tok = hist.gather(0, idx_).masked_fill_(idx == 0, self.vocab_size)
+                tok = tok.squeeze(0)
+            in_.append(self.embedder(tok))
+        if self.input_size > 0:
+            x = prev[self.input_name]
+            if x.dim() != 2:  # we got all input at once rather than a slice
+                cur[self.input_name] = x  # make sure next step gets it too
+                x = x.gather(0, idx.unsqueeze(2).expand(1, N, self.vocab_size)).squeeze(
+                    0
+                )
+            in_.append(x)
+        x = torch.cat(in_, 1)
+        prev_hidden, prev_cell = prev[self.hidden_name], prev[self.cell_name]
+        cur_hidden, cur_cell = [], []
+        for lidx in range(self.num_layers):
+            hidden, cell = self.cells[lidx](x, (prev_hidden[lidx], prev_cell[lidx]))
+            cur_hidden.append(hidden)
+            cur_cell.append(cell)
+            x = hidden
+        cur[self.hidden_name] = torch.stack(cur_hidden)
+        cur[self.cell_name] = torch.stack(cur_cell)
+        logits = self.ff(x)
+        return logits, cur
+
+    def calc_all_hidden(
+        self, prev: Dict[str, torch.Tensor], hist: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        N = -1
+        in_ = []
+        if self.embedding_size > 0:
+            if hist is None:
+                raise RuntimeError("lm is autoregressive; hist needed")
+            N = hist.size(1)
+            hist = torch.cat([hist.new_full((1, N), self.vocab_size), hist])
+            in_.append(self.embedder(hist))
+        if self.input_size > 0:
+            x = prev[self.input_name]
+            if x.dim() != 3:
+                raise RuntimeError(f"full input ('{self.input_name}') must be provided")
+            in_.append(x)
+        x = torch.cat(in_, 2)
+        return self.lstm(x, (prev[self.hidden_name], prev[self.cell_name]))[0]
+
+    def calc_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.ff(hidden)
+
+    def calc_full_log_probs(
+        self, hist: torch.Tensor, prev: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        return self.calc_logits(self.calc_all_hidden(prev, hist))
+
+
 ## TESTS
 
 
@@ -437,4 +619,34 @@ def test_joint_latent_model():
     assert support.shape == ((V + 1) ** T, T)
     log_probs = dist.log_prob(support)
     assert torch.allclose(log_probs.logsumexp(0), torch.tensor(0.0))
+
+
+def test_lstmlm():
+    torch.manual_seed(3)
+
+    T, N, V = 10, 3, 5
+    loss_fn = torch.nn.CrossEntropyLoss()
+    for embedding_size, input_size in itertools.permutations(range(0, 10, 5), 2):
+        if embedding_size == input_size == 0:
+            continue
+        hist = torch.randint(V, (T, N))
+        in_ = torch.rand(T, N, input_size)
+        prev = {"input": in_}
+        lm = LSTMLM(V, input_size, embedding_size)
+        logits_exp = lm(hist[:-1], prev)
+        loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
+        g_exp = torch.autograd.grad(loss_exp, lm.parameters())
+
+        logits_act = []
+        for t in range(T):
+            logits_act_t, prev = lm(hist[:t], prev, t)
+            logits_act.append(logits_act_t)
+        logits_act = torch.stack(logits_act)
+        assert logits_act.shape == logits_exp.shape
+        assert torch.allclose(logits_exp, logits_act)
+        loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
+        assert torch.allclose(loss_exp, loss_act)
+        g_act = torch.autograd.grad(loss_act, lm.parameters())
+        for g_exp_p, g_act_p in zip(g_exp, g_act):
+            assert torch.allclose(g_exp_p, g_act_p)
 
