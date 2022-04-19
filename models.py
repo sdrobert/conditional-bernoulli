@@ -224,7 +224,7 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         idx = idx.expand(N)
         if (idx == 0).all():
             cond_idx = idx
-            cond_hist = torch.empty((T, N), dtype=torch.long, device=device)
+            cond_hist = torch.empty((1, N), dtype=torch.long, device=device)
         else:
             range_ = torch.arange(T, device=device)
             cond_hist = hist.T[latent_hist.T & (idx.unsqueeze(1) > range_)]
@@ -253,7 +253,7 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         return logits, cur
 
 
-class LSTMLM(MixableSequentialLanguageModel):
+class LstmLm(MixableSequentialLanguageModel):
 
     hidden_size: int
     input_size: int
@@ -262,6 +262,7 @@ class LSTMLM(MixableSequentialLanguageModel):
     embedding_size: int
     hidden_name: str
     cell_name: str
+    last_hidden_name: Optional[str]
 
     def __init__(
         self,
@@ -273,6 +274,7 @@ class LSTMLM(MixableSequentialLanguageModel):
         hidden_name: str = "hidden",
         input_name: str = "input",
         cell_name: str = "cell",
+        last_hidden_name: Optional[str] = None,
     ):
         if input_size < 0:
             raise ValueError(
@@ -290,6 +292,8 @@ class LSTMLM(MixableSequentialLanguageModel):
         using_names = [hidden_name, cell_name]
         if input_size > 0:
             using_names.append(input_name)
+        if last_hidden_name is not None:
+            using_names.append(last_hidden_name)
         for a, b in itertools.permutations(using_names, 2):
             if not a:
                 raise ValueError("No state names can be empty")
@@ -302,6 +306,7 @@ class LSTMLM(MixableSequentialLanguageModel):
         self.num_layers = num_layers
         self.embedding_size = embedding_size
         self.hidden_name = hidden_name
+        self.last_hidden_name = last_hidden_name
         self.cell_name = cell_name
         if embedding_size > 0:
             self.embedder = torch.nn.Embedding(
@@ -340,6 +345,10 @@ class LSTMLM(MixableSequentialLanguageModel):
             prev[self.cell_name] = self.lstm.weight_ih_l0.new_zeros(
                 (self.num_layers, N, self.hidden_size)
             )
+        if self.last_hidden_name is not None and self.last_hidden_name not in prev:
+            prev[self.last_hidden_name] = self.lstm.weight_ih_l0.new_zeros(
+                (N, self.hidden_size)
+            )
         return prev
 
     def extract_by_src(self, prev: StateDict, src: torch.Tensor) -> StateDict:
@@ -347,9 +356,12 @@ class LSTMLM(MixableSequentialLanguageModel):
             self.hidden_name: prev[self.hidden_name].index_select(1, src),
             self.cell_name: prev[self.cell_name].index_select(1, src),
         }
-        if self.input_size > 0:
+        if self.input_name in prev:
             x = prev[self.input_name]
             new_prev[self.input_name] = x.index_select(0 if x.ndim == 2 else 1, src)
+        if self.last_hidden_name in prev:
+            x = prev[self.last_hidden_name]
+            new_prev[self.last_hidden_name] = x.index_select(0, src)
         return new_prev
 
     def mix_by_mask(
@@ -362,13 +374,14 @@ class LSTMLM(MixableSequentialLanguageModel):
             self.cell_name: mask * prev_true[self.cell_name]
             + ~mask * prev_false[self.cell_name],
         }
-        if self.input_size > 0:
-            x = prev_true[self.input_name]
-            if x.dim() == 2:
-                mask = mask.squeeze(0)
-            prev[self.input_name] = (
-                mask * prev_true[self.input_name] + ~mask * prev_false[self.input_name]
+        if self.last_hidden_name is not None:
+            mask = mask.squeeze(0)
+            prev[self.last_hidden_name] = (
+                mask * prev_true[self.last_hidden_name]
+                + ~mask * prev_false[self.last_hidden_name]
             )
+        if self.input_name in prev_true:
+            prev[self.input_name] = prev_true[self.input_name]
         return prev
 
     def calc_idx_log_probs(
@@ -390,7 +403,7 @@ class LSTMLM(MixableSequentialLanguageModel):
             x = prev[self.input_name]
             if x.dim() != 2:  # we got all input at once rather than a slice
                 cur[self.input_name] = x  # make sure next step gets it too
-                x = x.gather(0, idx.unsqueeze(2).expand(1, N, self.vocab_size)).squeeze(
+                x = x.gather(0, idx.unsqueeze(2).expand(1, N, self.input_size)).squeeze(
                     0
                 )
             in_.append(x)
@@ -404,6 +417,8 @@ class LSTMLM(MixableSequentialLanguageModel):
             x = hidden
         cur[self.hidden_name] = torch.stack(cur_hidden)
         cur[self.cell_name] = torch.stack(cur_cell)
+        if self.last_hidden_name is not None:
+            cur[self.last_hidden_name] = x
         logits = self.ff(x)
         return logits, cur
 
@@ -433,6 +448,66 @@ class LSTMLM(MixableSequentialLanguageModel):
         self, hist: torch.Tensor, prev: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
         return self.calc_logits(self.calc_all_hidden(prev, hist))
+
+
+class JointLatentLstmLm(JointLatentLanguageModel):
+
+    latent: LstmLm
+    conditional: LstmLm
+
+    def __init__(
+        self,
+        latent: LstmLm,
+        conditional: LstmLm,
+        latent_prefix: str = "latent_",
+        conditional_prefix: str = "conditional_",
+        old_conditional_prefix: str = "old_",
+    ):
+        if latent.last_hidden_name is None:
+            raise ValueError("the latent model must specify last_hidden_name")
+        if conditional.input_name != latent_prefix + latent.last_hidden_name:
+            raise ValueError(
+                "latent hidden state must be input to conditional! Expected "
+                f"conditional.input_name to be '{latent_prefix + latent.last_hidden_name}', "
+                f"got '{conditional.input_name}'"
+            )
+        if conditional.input_size != latent.hidden_size:
+            raise ValueError(
+                "latent hidden state must be input to conditional! Expected "
+                f"conditional.input_size to be {latent.hidden_size}, got "
+                f"{conditional.input_size}"
+            )
+        super().__init__(
+            latent,
+            conditional,
+            latent_prefix,
+            conditional_prefix,
+            old_conditional_prefix,
+        )
+
+    def calc_full_log_probs(self, hist: torch.Tensor, prev: StateDict) -> torch.Tensor:
+        prev_latent, prev_cond, _, _ = self.split_dicts(prev)
+        hidden = self.latent.calc_all_hidden(prev_latent, hist)
+        llogits = self.latent.calc_logits(hidden)
+        T, N = hist.shape
+        device, V = hist.device, self.conditional.vocab_size
+        prev_cond[self.conditional.input_name] = hidden
+        if T > 0:
+            hist = hist.T
+            latent_hist = hist != V
+            range_ = torch.arange(T, device=device)
+            cond_hist = hist[latent_hist]
+            cond_idx = latent_hist.long().cumsum(1)
+            cond_mask = cond_idx[..., -1:] > range_
+            hist = hist.masked_scatter(cond_mask, cond_hist).T
+            cond_idx = torch.cat([cond_idx.new_zeros(1, N), cond_idx.T], 0).unsqueeze(2)
+        else:
+            cond_idx = hist.new_zeros((1,))
+        clogits = self.conditional(hist, prev_cond)
+        clogits = clogits.gather(0, cond_idx.expand(T + 1, N, V))
+        clogits = clogits.log_softmax(2)
+        logits = torch.cat([llogits[..., 1:] + clogits, llogits[..., :1]], 2)
+        return logits
 
 
 ## TESTS
@@ -621,7 +696,7 @@ def test_joint_latent_model():
     assert torch.allclose(log_probs.logsumexp(0), torch.tensor(0.0))
 
 
-def test_lstmlm():
+def test_lstm_lm():
     torch.manual_seed(3)
 
     T, N, V = 10, 3, 5
@@ -632,7 +707,7 @@ def test_lstmlm():
         hist = torch.randint(V, (T, N))
         in_ = torch.rand(T, N, input_size)
         prev = {"input": in_}
-        lm = LSTMLM(V, input_size, embedding_size)
+        lm = LstmLm(V, input_size, embedding_size)
         logits_exp = lm(hist[:-1], prev)
         loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
         g_exp = torch.autograd.grad(loss_exp, lm.parameters())
@@ -649,4 +724,29 @@ def test_lstmlm():
         g_act = torch.autograd.grad(loss_act, lm.parameters())
         for g_exp_p, g_act_p in zip(g_exp, g_act):
             assert torch.allclose(g_exp_p, g_act_p)
+
+
+def test_joint_latent_lstm_lm():
+    torch.manual_seed(4)
+
+    T, N, V, H, I, E = 6, 4, 3, 10, 5, 2
+    loss_fn = torch.nn.CrossEntropyLoss()
+    latent = LstmLm(2, I, 0, H, last_hidden_name="last")
+    conditional = LstmLm(V, H, E, input_name="latent_last")
+    lm = JointLatentLanguageModel(latent, conditional)
+    hist = torch.randint(V + 1, (T, N))
+    in_ = torch.rand(T, N, I)
+    logits_exp = lm(hist[:-1], {"latent_input": in_})
+    assert logits_exp.shape == (T, N, V + 1)
+    loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
+    g_exp = torch.autograd.grad(loss_exp, lm.parameters())
+
+    lm = JointLatentLstmLm(latent, conditional)
+    logits_act = lm(hist[:-1], {"latent_input": in_})
+    assert logits_act.shape == (T, N, V + 1)
+    assert torch.allclose(logits_exp, logits_act, atol=1e-4)
+    loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
+    g_act = torch.autograd.grad(loss_act, lm.parameters())
+    for g_exp_p, g_act_p in zip(g_exp, g_act):
+        assert torch.allclose(g_exp_p, g_act_p, atol=1e-4)
 
