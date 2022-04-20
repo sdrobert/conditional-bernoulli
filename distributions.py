@@ -55,14 +55,14 @@ class PoissonBinomial(torch.distributions.Distribution):
             raise ValueError("parameter must be at least 1-dimensional")
         param_size = param.size()
         batch_size = param_size[:-1]
-        tmax = param_size[-1]
+        T = param_size[-1]
         if total_count is None:
             mask = None
         else:
             self.total_count = (
                 torch.as_tensor(total_count).expand(batch_size).type_as(param)
             )
-            mask = self.total_count.unsqueeze(-1) <= torch.arange(tmax)
+            mask = self.total_count.unsqueeze(-1) <= torch.arange(T)
         if probs is not None:
             self.probs = self._param = (
                 probs if mask is None else probs.masked_fill(mask, 0.0)
@@ -153,8 +153,8 @@ class PoissonBinomial(torch.distributions.Distribution):
         shape = self._extended_shape(sample_shape)
         with torch.no_grad():
             probs = self.probs.expand(shape + self.probs.size()[-1:])
-            lmax = torch.bernoulli(probs).sum(-1)
-        return lmax
+            sample = torch.bernoulli(probs).sum(-1)
+        return sample
 
     def log_prob(self, value: torch.Tensor):
         if self._validate_args:
@@ -169,7 +169,7 @@ class PoissonBinomial(torch.distributions.Distribution):
 @torch.no_grad()
 def extended_conditional_bernoulli(
     w_f: torch.Tensor,
-    lmax: torch.Tensor,
+    given_count: torch.Tensor,
     r_f: Optional[torch.Tensor] = None,
     log_space: bool = False,
     neg_inf: float = config.EPS_NINF,
@@ -177,50 +177,54 @@ def extended_conditional_bernoulli(
     device = w_f.device
     if w_f.dim() == 2:
         # the user passed regular odds instead of the relevant odds forward.
-        nmax, tmax = w_f.size()
-        # call checks lmax size
+        N, T = w_f.size()
+        # call checks given_count size
         w_f = extract_relevant_odds_forward(
-            w_f, lmax, True, neg_inf if log_space else 0
+            w_f, given_count, True, neg_inf if log_space else 0
         )
     else:
-        _, nmax, diffmax = w_f.size()
-        tmax = diffmax + int(lmax.min()) - 1
-        assert device == lmax.device and lmax.dim() == 1 and lmax.size(0) == nmax
+        _, N, diffmax = w_f.size()
+        T = diffmax + int(given_count.min()) - 1
+        assert (
+            device == given_count.device
+            and given_count.dim() == 1
+            and given_count.size(0) == N
+        )
     if r_f is None:
         r_f = (
-            log_R_forward(w_f, lmax, True, True, neg_inf)
+            log_R_forward(w_f, given_count, True, True, neg_inf)
             if log_space
-            else R_forward(w_f, lmax, True, True)
+            else R_forward(w_f, given_count, True, True)
         )
     else:
         assert (
             r_f.dim() == 3
             and r_f.size(0) == w_f.size(0) + 1
-            and r_f.size(1) == nmax
+            and r_f.size(1) == N
             and r_f.size(2) == diffmax
         )
     assert r_f.dim() == 3
     if log_space:
-        return _log_extended_conditional_bernoulli_k_eq_1(
-            w_f, lmax.long(), r_f, tmax, neg_inf
+        return _log_extended_conditional_bernoulli(
+            w_f, given_count.long(), r_f, T, neg_inf
         )
     else:
-        return _extended_conditional_bernoulli_k_eq_1(w_f, lmax.long(), r_f, tmax)
+        return _extended_conditional_bernoulli(w_f, given_count.long(), r_f, T)
 
 
 @torch.jit.script_if_tracing
 @torch.no_grad()
-def _extended_conditional_bernoulli_k_eq_1(
-    w_f: torch.Tensor, lmax: torch.Tensor, r_f: torch.Tensor, tmax: int
+def _extended_conditional_bernoulli(
+    w_f: torch.Tensor, given_count: torch.Tensor, r_f: torch.Tensor, T: int
 ) -> torch.Tensor:
     device = w_f.device
-    lmax_max, nmax, diffmax = w_f.size()
-    remainder = lmax
-    nrange = torch.arange(nmax)
+    lmax_max, N, diffmax = w_f.size()
+    remainder = given_count
+    nrange = torch.arange(N)
     drange = torch.arange(diffmax)
     lmax_max = r_f.size(0) - 1
-    tau_ellp1 = torch.full((nmax, 1), diffmax)
-    b = torch.zeros((nmax, tmax), device=device, dtype=torch.long)
+    tau_ellp1 = torch.full((N, 1), diffmax)
+    b = torch.zeros((N, T), device=device, dtype=torch.long)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -229,28 +233,28 @@ def _extended_conditional_bernoulli_k_eq_1(
         ).masked_fill(mask_ell, 0)
         tau_ell = torch.multinomial(weights_ell + (~valid_ell).unsqueeze(1), 1, True)
         remainder = (remainder - 1).clamp_min_(0)
-        b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
+        b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(T - 1)] += valid_ell
         tau_ellp1 = tau_ell
-    return b[:, :tmax]
+    return b[:, :T]
 
 
 @torch.jit.script_if_tracing
 @torch.no_grad()
-def _log_extended_conditional_bernoulli_k_eq_1(
+def _log_extended_conditional_bernoulli(
     logits_f: torch.Tensor,
-    lmax: torch.Tensor,
+    given_count: torch.Tensor,
     log_r_f: torch.Tensor,
-    tmax: int,
+    T: int,
     neg_inf: float = config.EPS_NINF,
 ) -> torch.Tensor:
     device = logits_f.device
-    lmax_max, nmax, diffmax = logits_f.size()
-    remainder = lmax
-    nrange = torch.arange(nmax)
+    lmax_max, N, diffmax = logits_f.size()
+    remainder = given_count
+    nrange = torch.arange(N)
     drange = torch.arange(diffmax)
     lmax_max = log_r_f.size(0) - 1
-    tau_ellp1 = torch.full((nmax, 1), diffmax)
-    b = torch.zeros((nmax, tmax), device=device, dtype=torch.long)
+    tau_ellp1 = torch.full((N, 1), diffmax)
+    b = torch.zeros((N, T), device=device, dtype=torch.long)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -263,9 +267,9 @@ def _log_extended_conditional_bernoulli_k_eq_1(
             log_weights_ell.exp_() + (~valid_ell).unsqueeze(1), 1, True
         )
         remainder = (remainder - 1).clamp_min_(0)
-        b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(tmax - 1)] += valid_ell
+        b[nrange, (tau_ell.squeeze(1) + remainder).clamp_max_(T - 1)] += valid_ell
         tau_ellp1 = tau_ell
-    return b[:, :tmax]
+    return b[:, :T]
 
 
 class ConditionalBernoulli(torch.distributions.ExponentialFamily):
@@ -294,14 +298,14 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
             raise ValueError("parameter must be at least 1-dimensional")
         param_size = param.size()
         batch_size = param_size[:-1]
-        tmax = param_size[-1]
+        T = param_size[-1]
         if total_count is None:
             mask = None
         else:
             self.total_count = (
                 torch.as_tensor(total_count).expand(batch_size).type_as(param)
             )
-            mask = self.total_count.unsqueeze(-1) <= torch.arange(tmax)
+            mask = self.total_count.unsqueeze(-1) <= torch.arange(T)
         if probs is not None:
             self.probs = self._param = (
                 probs if mask is None else probs.masked_fill(mask, 0.0)
@@ -403,16 +407,12 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
             logits = logits.flatten(end_dim=-2)
         N, T = logits.shape
         mask = torch.eye(T, device=logits.device, dtype=torch.bool).expand(N, T, T)
-        mask = mask | (
-            self.total_count.flatten().unsqueeze(1)
-            <= torch.arange(T, device=logits.device)
-        ).unsqueeze(2)
         x = logits.unsqueeze(1).expand(N, T, T)
-        x = x.masked_fill(mask.unsqueeze(0), -float("inf"))
+        x = x.masked_fill(mask, -float("inf"))
         x = x.view(N * T, T)
-        lmax = self.given_count.flatten()
-        empty = lmax == 0
-        lmax_m1 = (lmax - 1).clamp_min_(0).repeat_interleave(T)
+        L = self.given_count.flatten()
+        empty = L == 0
+        lmax_m1 = (L - 1).clamp_min_(0).repeat_interleave(T)
         x = extract_relevant_odds_forward(x, lmax_m1, True, -float("inf"))
         x = log_R_forward(x, lmax_m1, False, True).view(N, T)
         x = (x + logits).masked_fill(empty.unsqueeze(1), -float("inf"))
@@ -468,10 +468,10 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         sample_shape = torch.Size(sample_shape)
         shape = self._extended_shape(sample_shape)
         with torch.no_grad():
-            logits_f, log_r_f, lmax = self.logits_f, self.log_r_f, self.given_count
+            logits_f, log_r_f, L = self.logits_f, self.log_r_f, self.given_count
             if not len(self.batch_shape):
                 logits_f, log_r_f = logits_f.unsqueeze(1), log_r_f.unsqueeze(1)
-                lmax = lmax.unsqueeze(0)
+                L = L.unsqueeze(0)
             if sample_shape:
                 logits_f = (
                     logits_f.unsqueeze(1)
@@ -483,8 +483,8 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
                     .expand(log_r_f.shape[:1] + sample_shape + log_r_f.shape[1:])
                     .flatten(1, 2)
                 )
-                lmax = lmax.expand(shape[:-1]).flatten()
-            b = extended_conditional_bernoulli(logits_f, lmax, log_r_f, True)
+                L = L.expand(shape[:-1]).flatten()
+            b = extended_conditional_bernoulli(logits_f, L, log_r_f, True)
         return b.view(shape)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
@@ -494,6 +494,9 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         denom = self.log_partition.expand_as(num)
         return num - denom
 
+    def log_joint_likelihoods(self, lcond: torch.Tensor) -> torch.Tensor:
+        pass
+
 
 # TESTS
 
@@ -501,23 +504,23 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 def test_poisson_binomial():
     # The Poisson Binomial equals the Binomial distribution when all probs are equal
     torch.manual_seed(1)
-    tmax, nmax, mmax = 5, 16, 2 ** 15
-    p = torch.rand(nmax, requires_grad=True)
-    total_count = torch.randint(tmax + 1, (nmax,))
+    T, N, M = 5, 16, 2 ** 15
+    p = torch.rand(N, requires_grad=True)
+    total_count = torch.randint(T + 1, (N,))
 
     binom = torch.distributions.Binomial(total_count, probs=p)
 
-    p_ = p.unsqueeze(1).expand(nmax, tmax)
+    p_ = p.unsqueeze(1).expand(N, T)
     poisson_binom = PoissonBinomial(total_count, probs=p_)
-    lmax = poisson_binom.sample([mmax])
-    mean = lmax.mean(0)
+    L = poisson_binom.sample([M])
+    mean = L.mean(0)
     assert torch.allclose(mean, p * total_count, atol=1e-2)
 
-    log_prob_act = poisson_binom.log_prob(lmax).t()
+    log_prob_act = poisson_binom.log_prob(L).t()
     (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [p])
 
     binom = torch.distributions.Binomial(total_count, probs=p.requires_grad_(True))
-    log_prob_exp = binom.log_prob(lmax).t()
+    log_prob_exp = binom.log_prob(L).t()
     assert torch.allclose(log_prob_exp, log_prob_act, atol=1e-3)
     (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [p])
     assert torch.allclose(grad_log_prob_exp, grad_log_prob_act, atol=1e-3)
@@ -525,34 +528,34 @@ def test_poisson_binomial():
 
 def test_conditional_bernoulli():
     torch.manual_seed(2)
-    tmax, nmax, mmax = 10, 10, 2 ** 15
-    logits = torch.randn(nmax, tmax, requires_grad=True)
+    T, N, M = 10, 10, 2 ** 15
+    logits = torch.randn(N, T, requires_grad=True)
     idx_1_first = []
     idx_1_second = []
-    for first in range(tmax - 1):
-        for second in range(first + 1, tmax):
+    for first in range(T - 1):
+        for second in range(first + 1, T):
             idx_1_first.append(first)
             idx_1_second.append(second)
     idx_1_first = torch.tensor(idx_1_first)
     idx_1_second = torch.tensor(idx_1_second)
     logits_ = logits[:, idx_1_first] + logits[:, idx_1_second]
-    probs_ = logits_.softmax(1)  # (nmax, s)
-    first_matches = torch.arange(tmax).unsqueeze(1) == idx_1_first  # (tmax, s)
-    second_matches = torch.arange(tmax).unsqueeze(1) == idx_1_second  # (tmax, s)
+    probs_ = logits_.softmax(1)  # (N, s)
+    first_matches = torch.arange(T).unsqueeze(1) == idx_1_first  # (T, s)
+    second_matches = torch.arange(T).unsqueeze(1) == idx_1_second  # (T, s)
     inclusions_exp = (probs_.unsqueeze(1) * (first_matches | second_matches)).sum(2)
     assert torch.allclose(inclusions_exp.sum(1), torch.tensor(2.0))
     conditional_bernoulli = ConditionalBernoulli(2, logits=logits)
 
-    b = conditional_bernoulli.sample([mmax]).float()
-    assert b.shape == torch.Size([mmax, nmax, tmax])
+    b = conditional_bernoulli.sample([M]).float()
+    assert b.shape == torch.Size([M, N, T])
     assert (b.sum(-1) == 2).all()
     assert ((b == 0.0) | (b == 1.0)).all()
     inclusions_act = b.mean(0)
     assert torch.allclose(inclusions_exp, inclusions_act, atol=1e-2)
 
-    poisson_binomial = PoissonBinomial(tmax, logits=logits)
+    poisson_binomial = PoissonBinomial(T, logits=logits)
     log_prob_act = conditional_bernoulli.log_prob(b) + poisson_binomial.log_prob(
-        torch.tensor(2.0).expand((nmax,))
+        torch.tensor(2.0).expand((N,))
     )
     (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [logits])
 
@@ -563,14 +566,14 @@ def test_conditional_bernoulli():
     (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [logits])
     assert torch.allclose(grad_log_prob_exp, grad_log_prob_act)
 
-    total_count = torch.randint(1, tmax + 1, (nmax,), dtype=torch.float)
-    given_count = (torch.rand((nmax,)) * (total_count + 1)).floor_()
+    total_count = torch.randint(1, T + 1, (N,), dtype=torch.float)
+    given_count = (torch.rand((N,)) * (total_count + 1)).floor_()
     assert (given_count <= total_count).all()
     conditional_bernoulli = ConditionalBernoulli(
         given_count, logits=logits, total_count=total_count, validate_args=True
     )
-    b = conditional_bernoulli.sample([mmax]).float()
-    total_count_mask = total_count.unsqueeze(1) > torch.arange(tmax)
+    b = conditional_bernoulli.sample([M]).float()
+    total_count_mask = total_count.unsqueeze(1) > torch.arange(T)
     assert (b.sum(-1) == given_count.unsqueeze(0)).all()
     assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
     assert (b.max(-1)[0] <= 1).all()
@@ -578,7 +581,7 @@ def test_conditional_bernoulli():
     inclusions_act = conditional_bernoulli.mean
     assert torch.allclose(inclusions_act.sum(1), given_count)
     assert torch.allclose(b.mean(0), inclusions_act, atol=1e-2)
-    for n in range(nmax):
+    for n in range(N):
         total_count_n = int(total_count[n].item())
         given_count_n = int(given_count[n].item())
         inclusions_act_n = inclusions_act[n]
@@ -606,7 +609,7 @@ def test_conditional_bernoulli():
 # @torch.no_grad()
 # def extended_conditional_bernoulli(
 #     w_f: torch.Tensor,
-#     lmax: torch.Tensor,
+#     L: torch.Tensor,
 #     kmax: int = 1,
 #     r_f: Optional[torch.Tensor] = None,
 # ) -> torch.Tensor:
@@ -614,20 +617,20 @@ def test_conditional_bernoulli():
 #     device = w_f.device
 #     if w_f.dim() == 2:
 #         # the user passed regular odds instead of the relevant odds forward.
-#         nmax, tmax = w_f.size()
-#         # call checks lmax size
-#         w_f = extract_relevant_odds_forward(w_f, lmax, True)
+#         N, T = w_f.size()
+#         # call checks L size
+#         w_f = extract_relevant_odds_forward(w_f, L, True)
 #     else:
-#         _, nmax, diffmax = w_f.size()
-#         tmax = diffmax + int(lmax.min()) - 1
-#         assert device == lmax.device and lmax.dim() == 1 and lmax.size(0) == nmax
+#         _, N, diffmax = w_f.size()
+#         T = diffmax + int(L.min()) - 1
+#         assert device == L.device and L.dim() == 1 and L.size(0) == N
 #     if r_f is None:
-#         r_f = R_forward(w_f, lmax, kmax, True, True)
+#         r_f = R_forward(w_f, L, kmax, True, True)
 #     else:
 #         assert (
 #             r_f.dim() == 3
 #             and r_f.size(0) == w_f.size(0) + 1
-#             and r_f.size(1) == nmax
+#             and r_f.size(1) == N
 #             and r_f.size(2) == diffmax
 #         )
 #     # "Direct Sampling" (Procedure 5) from Chen and Liu '97, modified for the
@@ -640,12 +643,12 @@ def test_conditional_bernoulli():
 #     # window on idx_2. Effectively, a movement up in the relevant-only w_f and r_f
 #     # corresponds to an up-left movement on the full table. Hence, we move either up
 #     # or left (not up-left) in the below loop over relevant values.
-#     b = torch.empty((tmax, nmax), device=device)
-#     idx_0 = lmax.long()  # a.k.a. how many samples left to draw, ell
-#     idx_1 = torch.arange(nmax, device=device)  # batch dim
-#     idx_2 = tmax - idx_0  # a.k.a. (prefix size - ell)
-#     u_k = torch.rand((nmax,), device=device) * r_f[idx_0, idx_1, idx_2]
-#     for t in range(tmax - 1, -1, -1):
+#     b = torch.empty((T, N), device=device)
+#     idx_0 = L.long()  # a.k.a. how many samples left to draw, ell
+#     idx_1 = torch.arange(N, device=device)  # batch dim
+#     idx_2 = T - idx_0  # a.k.a. (prefix size - ell)
+#     u_k = torch.rand((N,), device=device) * r_f[idx_0, idx_1, idx_2]
+#     for t in range(T - 1, -1, -1):
 #         w_k = w_f[(idx_0 - 1).clamp_min_(0), idx_1, idx_2]
 #         r_k = r_f[idx_0, idx_1, (idx_2 - 1).clamp_min_(0)]
 #         b_t = u_k >= r_k

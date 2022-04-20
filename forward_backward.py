@@ -21,67 +21,30 @@ import pydrobert.torch.config as config
 
 @torch.jit.script_if_tracing
 def extract_relevant_odds_forward(
-    w: torch.Tensor, lmax: torch.Tensor, batch_first: bool = False, fill: float = 0.0
+    w: torch.Tensor,
+    given_count: torch.Tensor,
+    batch_first: bool = False,
+    fill: float = 0.0,
 ) -> torch.Tensor:
-    r"""Transforms a tensor of odds into a shape usable for forward comps
-
-    In the forward algorithm, only a subset of odds with index :math:`t` will be
-    relevant when determining the :math:`\ell`-th event location when the total number
-    of events are fixed:
-
-    * :math:`t \geq \ell`, since it is impossible to have seen :math`\ell - 1` events
-      prior to the :math:`\ell`-th possible event location
-    * :math:`t \leq tmax - lmax + \ell`, since it is impossible to see
-      :math:`\lmax - \ell + 1` events in the future with only :math:`\lmax - \ell`
-      upcoming event locations.
-
-    This function rearranges `w` to index only the relevant odds for a given event
-    location :math:`\ell`.
-
-    Parameters
-    ----------
-    w : torch.Tensor
-        Of shape ``(binom(tmax, kmax), nmax)``. ``w[:, n]`` are the weights for batch
-        element ``n``. For ``kmax == 1``, the first index specifies the ``t``-th
-        independent odds. Otherwise, the first index is a flattened, column-major
-        multi-index of length ``kmax``, ``bart[1:kmax]``, such that
-        ``0 <= bart[0] < bart[1] < ... < bart[kmax] < tmax`` and ``w[bart, n]`` are
-        the odds of the next event location being ``bart[kmax]`` given
-        prior event locations ``bart[:kmax - 1]``.
-    lmax : torch.Tensor
-        Of shape ``(nmax,)`` where ``lmax[n]`` is the target number of events for
-        batch element ``n``.
-
-    Returns
-    -------
-    w_f : torch.Tensor
-        Of shape ``(lmax.max(), binom(tmax - lmax.min() + 1, kmax), nmax)``, where
-        ``w_[:lmax[n], :binom(tmax - lmax[n] + 1, kmax), n]`` contain the odds relevant
-        to batch index ``n``. For ``kmax == 1`` and ``t < tmax - lmax[n] + ell + 1``,
-        ``w_f[ell, t, n] == w[t + ell, n]``. The values for indices
-        ``t >= tmax - lmax[n] + ell + 1`` and ``ell >= lmax[n]`` are all set to `zero`.
-    """
     device = w.device
-    assert device == lmax.device
+    assert device == given_count.device
     assert w.dim() == 2
     if batch_first:
         w = w.t()
-    tmax, nmax = w.size()
-    assert lmax.dim() == 1 and lmax.size(0) == nmax
+    T, N = w.size()
+    assert given_count.dim() == 1 and given_count.size(0) == N
     # FIXME(anon): I believe the logic is the same regardless of kmax, but check
-    lmax_min, lmax_max = int(lmax.min().item()), int(lmax.max().item())
-    if not lmax_max:
-        out_shape = torch.Size(
-            [0, nmax, tmax + 1] if batch_first else [0, tmax + 1, nmax]
-        )
+    Lmin, Lmax = int(given_count.min().item()), int(given_count.max().item())
+    if not Lmax:
+        out_shape = torch.Size([0, N, T + 1] if batch_first else [0, T + 1, N])
         return torch.empty(out_shape, device=device, dtype=w.dtype)
-    diffdim = tmax - lmax_min + 1
-    padding = max(0, diffdim + lmax_max - tmax)
+    D = T - Lmin + 1
+    padding = max(0, D + Lmax - T)
     if padding:
-        w = torch.cat([w, torch.full((padding, nmax), fill, device=device)])
+        w = torch.cat([w, torch.full((padding, N), fill, device=device)])
     w_f_ = []
-    for ell in range(lmax_max):
-        w_f_.append(w[ell : diffdim + ell].t())
+    for ell in range(Lmax):
+        w_f_.append(w[ell : D + ell].t())
     # some weirdness here. We're probably going to call R_forward on this later, and the
     # cumulative sum is more efficient on the rightmost axis, so we prefer contiguous on
     # batch_first = True (though we prefer w input to be contiguous the other way)
@@ -92,13 +55,13 @@ def extract_relevant_odds_forward(
 @torch.jit.script_if_tracing
 def R_forward(
     w_f: torch.Tensor,
-    lmax: torch.Tensor,
+    given_count: torch.Tensor,
     return_all: bool = False,
     batch_first: bool = False,
 ) -> torch.Tensor:
     if not batch_first:
         w_f = w_f.transpose(1, 2)
-    lmax = lmax.long()
+    given_count = given_count.long()
     L, N, D = w_f.shape
     r = [w_f.new_ones(N, D)]
     for ell in range(L):
@@ -108,21 +71,21 @@ def R_forward(
         return r if batch_first else r.transpose(1, 2)
     else:
         r = r[..., -1]
-        return r.gather(0, lmax.unsqueeze(0)).squeeze(0)
+        return r.gather(0, given_count.unsqueeze(0)).squeeze(0)
 
 
 @torch.jit.script_if_tracing
 def log_R_forward(
     logits_f: torch.Tensor,
-    lmax: torch.Tensor,
+    given_count: torch.Tensor,
     return_all: bool = False,
     batch_first: bool = False,
     eps_ninf: float = config.EPS_NINF,
 ) -> torch.Tensor:
-    assert logits_f.dim() == 3 and lmax.dim() == 1
+    assert logits_f.dim() == 3 and given_count.dim() == 1
     if not batch_first:
         logits_f = logits_f.transpose(1, 2)
-    lmax = lmax.long()
+    given_count = given_count.long()
     L, N, D = logits_f.shape
     logits_f = logits_f.clamp_min(eps_ninf)
     lr = [logits_f.new_zeros(N, D)]
@@ -133,24 +96,24 @@ def log_R_forward(
         return lr if batch_first else lr.transpose(1, 2)
     else:
         lr = lr[..., -1]
-        return lr.gather(0, lmax.unsqueeze(0)).squeeze(0)
+        return lr.gather(0, given_count.unsqueeze(0)).squeeze(0)
 
 
 # TESTS
 
 
 def test_extract_relevant_odds_forward():
-    tmax, nmax = 123, 45
-    lmax = torch.arange(nmax)
-    w = torch.arange(tmax * nmax).view(nmax, tmax).t()
+    T, N = 123, 45
+    lmax = torch.arange(N)
+    w = torch.arange(T * N).view(N, T).t()
     w_f = extract_relevant_odds_forward(w, lmax)
-    assert w_f.size() == torch.Size([nmax - 1, tmax + 1, nmax])
-    for n in range(nmax):
+    assert w_f.size() == torch.Size([N - 1, T + 1, N])
+    for n in range(N):
         w_f_n = w_f[..., n]
-        # assert (w_f_n[:, tmax - lmax[n] + 1 :] == 0).all()
+        # assert (w_f_n[:, T - lmax[n] + 1 :] == 0).all()
         # assert (w_f_n[lmax[n] :] == 0).all()
-        w_f_n = w_f_n[: lmax[n], : tmax - lmax[n] + 1]
-        w_f_n_exp = torch.arange(w_f_n.size(1)) + n * tmax
+        w_f_n = w_f_n[: lmax[n], : T - lmax[n] + 1]
+        w_f_n_exp = torch.arange(w_f_n.size(1)) + n * T
         for ell in range(lmax[n].item()):
             assert (w_f_n[ell] == (w_f_n_exp + ell)).all()
 
@@ -199,9 +162,9 @@ def test_R_forward():
 
 def test_log_R_forward():
     torch.manual_seed(3)
-    nmax, tmax = 5, 16
-    logits = torch.randn(nmax, tmax, requires_grad=True, dtype=torch.double)
-    lmax = torch.randint(0, tmax + 1, (nmax,))
+    N, T = 5, 16
+    logits = torch.randn(N, T, requires_grad=True, dtype=torch.double)
+    lmax = torch.randint(0, T + 1, (N,))
     logits_f = extract_relevant_odds_forward(logits, lmax, True, config.EPS_NINF)
     lg_f = torch.randn_like(logits_f, requires_grad=True)
     lwg_f = logits_f + lg_f.masked_fill(torch.isinf(logits_f), config.EPS_NINF)
