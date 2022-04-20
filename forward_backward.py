@@ -15,10 +15,11 @@
 """Forward and backward functions"""
 
 import torch
-import config
+
+import pydrobert.torch.config as config
 
 
-@torch.jit.script
+@torch.jit.script_if_tracing
 def extract_relevant_odds_forward(
     w: torch.Tensor, lmax: torch.Tensor, batch_first: bool = False, fill: float = 0.0
 ) -> torch.Tensor:
@@ -88,127 +89,51 @@ def extract_relevant_odds_forward(
     return w_f if batch_first else w_f.transpose(1, 2)
 
 
-@torch.jit.script
-def _R_forward_k_eq_1(w_f: torch.Tensor) -> torch.Tensor:
-    assert w_f.dim() == 3
-    w_f_shape = w_f.size()
-    r = [torch.ones(w_f_shape[1:], device=w_f.device, dtype=w_f.dtype)]
-    for ell in range(w_f_shape[0]):
-        r.append((w_f[ell] * r[ell]).cumsum(1))
-    return torch.stack(r)
-
-
 @torch.jit.script_if_tracing
 def R_forward(
     w_f: torch.Tensor,
     lmax: torch.Tensor,
-    kmax: int = 1,
     return_all: bool = False,
     batch_first: bool = False,
 ) -> torch.Tensor:
-    assert kmax == 1, "kmax > 1 not yet implemented"
-    assert w_f.dim() == 3 and lmax.dim() == 1
     if not batch_first:
         w_f = w_f.transpose(1, 2)
-    _, nmax, diffdim = w_f.size()
-    assert nmax == lmax.size(0)
-    lmax = lmax.to(torch.long)
-    r = _R_forward_k_eq_1(w_f)
+    lmax = lmax.long()
+    L, N, D = w_f.shape
+    r = [w_f.new_ones(N, D)]
+    for ell in range(L):
+        r.append((w_f[ell] * r[ell]).cumsum(1))
+    r = torch.stack(r)
     if return_all:
         return r if batch_first else r.transpose(1, 2)
     else:
-        return r[
-            lmax,
-            torch.arange(nmax, device=lmax.device),
-            diffdim + lmax.min() - lmax - 1,
-        ]
-
-
-@torch.jit.script
-def _log_R_forward_k_eq_1(
-    logits_f: torch.Tensor, neg_inf: float = config.EPS_INF
-) -> torch.Tensor:
-    assert logits_f.dim() == 3
-    logits_f = logits_f.clamp_min(neg_inf)
-    logits_f_shape = logits_f.size()
-    lr = [torch.zeros(logits_f_shape[1:], device=logits_f.device, dtype=logits_f.dtype)]
-    for ell in range(logits_f_shape[0]):
-        lr.append((logits_f[ell] + lr[ell]).logcumsumexp(1))
-    return torch.stack(lr)
-
-
-# @torch.jit.script_if_tracing
-# def log_R_forward(
-#     logits_f: torch.Tensor,
-#     lmax: torch.Tensor,
-#     kmax: int = 1,
-#     return_all: bool = False,
-#     batch_first: bool = False,
-#     neg_inf: float = config.EPS_INF,
-# ) -> torch.Tensor:
-#     assert logits_f.dim() == 3 and lmax.dim() == 1
-#     if not batch_first:
-#         logits_f = logits_f.transpose(1, 2)
-#     lmax_max, nmax, diffmax = logits_f.size()
-#     tmax = diffmax + int(lmax.min().item()) - 1
-#     max_r = math.factorial(tmax) // (
-#         math.factorial(tmax - lmax_max) * math.factorial(lmax_max)
-#     )
-#     if max_r > torch.finfo(torch.double).max:
-#         assert kmax == 1, "kmax > 1 not supported"
-#         lmax = lmax.to(torch.long)
-#         lr = _log_R_forward_k_eq_1(logits_f, neg_inf)
-#         if return_all:
-#             return lr if batch_first else lr.transpose(1, 2)
-#         else:
-#             return lr[
-#                 lmax, torch.arange(nmax, device=lmax.device), tmax - lmax,
-#             ]
-#     dtype = logits_f.dtype
-#     if max_r > torch.finfo(torch.float).max:
-#         logits_f = logits_f.to(torch.double)
-#     logits_f_max = logits_f.detach().max(2, keepdim=True)[0].clamp_min_(neg_inf)
-#     logits_f = logits_f - logits_f_max
-#     logits_f_max = logits_f_max.cumsum_(0)
-#     lr = R_forward(logits_f.exp(), lmax, kmax, return_all, True).log()
-#     if return_all:
-#         lr = torch.cat([lr[:1], lr[1:] + logits_f_max])
-#         if not batch_first:
-#             lr = lr.transpose(1, 2)
-#     else:
-#         lr = (
-#             lr
-#             + logits_f_max.squeeze(2)[
-#                 (lmax.to(torch.long) - 1).clamp_min_(0), torch.arange(nmax)
-#             ]
-#         )
-#     return lr.to(dtype)
+        r = r[..., -1]
+        return r.gather(0, lmax.unsqueeze(0)).squeeze(0)
 
 
 @torch.jit.script_if_tracing
 def log_R_forward(
     logits_f: torch.Tensor,
     lmax: torch.Tensor,
-    kmax: int = 1,
     return_all: bool = False,
     batch_first: bool = False,
+    eps_ninf: float = config.EPS_NINF,
 ) -> torch.Tensor:
-    assert kmax == 1, "kmax > 1 not yet implemented"
     assert logits_f.dim() == 3 and lmax.dim() == 1
     if not batch_first:
         logits_f = logits_f.transpose(1, 2)
-    _, nmax, diffdim = logits_f.size()
-    assert nmax == lmax.size(0)
-    lmax = lmax.to(torch.long)
-    lr = _log_R_forward_k_eq_1(logits_f)
+    lmax = lmax.long()
+    L, N, D = logits_f.shape
+    logits_f = logits_f.clamp_min(eps_ninf)
+    lr = [logits_f.new_zeros(N, D)]
+    for ell in range(L):
+        lr.append((logits_f[ell] + lr[ell]).logcumsumexp(1))
+    lr = torch.stack(lr)
     if return_all:
         return lr if batch_first else lr.transpose(1, 2)
     else:
-        return lr[
-            lmax,
-            torch.arange(nmax, device=lmax.device),
-            diffdim + lmax.min() - lmax - 1,
-        ]
+        lr = lr[..., -1]
+        return lr.gather(0, lmax.unsqueeze(0)).squeeze(0)
 
 
 # TESTS
@@ -230,7 +155,7 @@ def test_extract_relevant_odds_forward():
             assert (w_f_n[ell] == (w_f_n_exp + ell)).all()
 
 
-def test_R_forward_k1():
+def test_R_forward():
     torch.manual_seed(2)
     w = torch.randn((4, 3)).exp().requires_grad_(True)
     lmax = torch.tensor([3, 1, 2])
@@ -272,14 +197,14 @@ def test_R_forward_k1():
     assert torch.allclose(grad_g_exp, grad_g_act)
 
 
-def test_log_R_forward_k_eq_1():
+def test_log_R_forward():
     torch.manual_seed(3)
     nmax, tmax = 5, 16
     logits = torch.randn(nmax, tmax, requires_grad=True, dtype=torch.double)
     lmax = torch.randint(0, tmax + 1, (nmax,))
-    logits_f = extract_relevant_odds_forward(logits, lmax, True, config.EPS_INF)
+    logits_f = extract_relevant_odds_forward(logits, lmax, True, config.EPS_NINF)
     lg_f = torch.randn_like(logits_f, requires_grad=True)
-    lwg_f = logits_f + lg_f.masked_fill(torch.isinf(logits_f), config.EPS_INF)
+    lwg_f = logits_f + lg_f.masked_fill(torch.isinf(logits_f), config.EPS_NINF)
     r_act = log_R_forward(lwg_f, lmax, batch_first=True)
     logits_grad_act, lg_f_grad_act = torch.autograd.grad(r_act.mean(), [logits, lg_f])
 
@@ -291,21 +216,3 @@ def test_log_R_forward_k_eq_1():
     logits_grad_exp, lg_f_grad_exp = torch.autograd.grad(r_exp.mean(), [logits, lg_f])
     assert torch.allclose(logits_grad_exp, logits_grad_act)
     assert torch.allclose(lg_f_grad_exp, lg_f_grad_act)
-
-
-# def test_flip_relevant_odds():
-#     torch.manual_seed(2)
-#     tmax, nmax = 123, 456
-#     lmax = torch.randint(0, tmax + 1, (nmax,))
-#     w = torch.arange(tmax * nmax).view(nmax, tmax).t()
-#     w_f = extract_relevant_odds_forward(w, lmax)
-#     w_b_act = flip_relevant_odds(w_f, lmax)
-#     for w_b_n_act, w_n, lmax_n in zip(
-#         w_b_act.transpose(0, 2).transpose(1, 2), w.t(), lmax
-#     ):
-#         w_b_n_exp = extract_relevant_odds_forward(
-#             w_n.flip(0).unsqueeze(1), lmax_n.view(1)
-#         ).squeeze(2)
-#         w_b_n_act = w_b_n_act[:lmax_n, : tmax - lmax_n + 1]
-#         assert w_b_n_exp.size() == w_b_n_act.size()
-#         assert (w_b_n_exp == w_b_n_act).all()

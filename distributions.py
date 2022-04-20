@@ -14,20 +14,22 @@
 
 """Distributions, in particular the Conditional Bernoulli"""
 
-from forward_backward import (
-    R_forward,
-    extract_relevant_odds_forward,
-    log_R_forward,
-)
-import config
+
 from typing import Optional, Union
 
 import torch
 
 import pydrobert.torch.distributions as _d
 import pydrobert.torch.functional as _f
+import pydrobert.torch.config as config
 import torch.distributions.constraints as constraints
 from torch.distributions.utils import lazy_property
+
+from forward_backward import (
+    R_forward,
+    extract_relevant_odds_forward,
+    log_R_forward,
+)
 
 
 class PoissonBinomial(torch.distributions.Distribution):
@@ -168,12 +170,10 @@ class PoissonBinomial(torch.distributions.Distribution):
 def extended_conditional_bernoulli(
     w_f: torch.Tensor,
     lmax: torch.Tensor,
-    kmax: int = 1,
     r_f: Optional[torch.Tensor] = None,
     log_space: bool = False,
-    neg_inf: float = config.EPS_INF,
+    neg_inf: float = config.EPS_NINF,
 ) -> torch.Tensor:
-    assert kmax == 1, "kmax > 1 not yet implemented"
     device = w_f.device
     if w_f.dim() == 2:
         # the user passed regular odds instead of the relevant odds forward.
@@ -188,9 +188,9 @@ def extended_conditional_bernoulli(
         assert device == lmax.device and lmax.dim() == 1 and lmax.size(0) == nmax
     if r_f is None:
         r_f = (
-            log_R_forward(w_f, lmax, kmax, True, True)
+            log_R_forward(w_f, lmax, True, True, neg_inf)
             if log_space
-            else R_forward(w_f, lmax, kmax, True, True)
+            else R_forward(w_f, lmax, True, True)
         )
     else:
         assert (
@@ -208,7 +208,7 @@ def extended_conditional_bernoulli(
         return _extended_conditional_bernoulli_k_eq_1(w_f, lmax.long(), r_f, tmax)
 
 
-@torch.jit.script
+@torch.jit.script_if_tracing
 @torch.no_grad()
 def _extended_conditional_bernoulli_k_eq_1(
     w_f: torch.Tensor, lmax: torch.Tensor, r_f: torch.Tensor, tmax: int
@@ -220,7 +220,7 @@ def _extended_conditional_bernoulli_k_eq_1(
     drange = torch.arange(diffmax)
     lmax_max = r_f.size(0) - 1
     tau_ellp1 = torch.full((nmax, 1), diffmax)
-    b = torch.zeros((nmax, tmax), device=device)
+    b = torch.zeros((nmax, tmax), device=device, dtype=torch.long)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -234,16 +234,15 @@ def _extended_conditional_bernoulli_k_eq_1(
     return b[:, :tmax]
 
 
-@torch.jit.script
+@torch.jit.script_if_tracing
 @torch.no_grad()
 def _log_extended_conditional_bernoulli_k_eq_1(
     logits_f: torch.Tensor,
     lmax: torch.Tensor,
     log_r_f: torch.Tensor,
     tmax: int,
-    neg_inf: float = config.EPS_INF,
+    neg_inf: float = config.EPS_NINF,
 ) -> torch.Tensor:
-    assert neg_inf > -float("inf")
     device = logits_f.device
     lmax_max, nmax, diffmax = logits_f.size()
     remainder = lmax
@@ -251,7 +250,7 @@ def _log_extended_conditional_bernoulli_k_eq_1(
     drange = torch.arange(diffmax)
     lmax_max = log_r_f.size(0) - 1
     tau_ellp1 = torch.full((nmax, 1), diffmax)
-    b = torch.zeros((nmax, tmax), device=device)
+    b = torch.zeros((nmax, tmax), device=device, dtype=torch.long)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -380,7 +379,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         else:
             logits_f = logits_f.flatten(1, batch_dims)
             given_count = given_count.flatten()
-        log_r_f = log_R_forward(logits_f, given_count, 1, True, True)
+        log_r_f = log_R_forward(logits_f, given_count, True, True)
         if not batch_dims:
             log_r_f = log_r_f.squeeze(1)
         else:
@@ -396,62 +395,32 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         return log_r_f.gather(0, given_count).squeeze(0)
 
     @property
-    @torch.no_grad()
     def mean(self):
-        # inclusion probabilities
-        log_r_f, logits_f, logits = self.log_r_f, self.logits_f, self.logits
-        device = log_r_f.device
-        given_count = self.given_count
+        # FIXME(sdrobert): there are faster ways of computing this.
+        logits = self.logits
         batch_dims = len(self.batch_shape)
         if not batch_dims:
-            log_r_f, given_count = log_r_f.unsqueeze(1), given_count.view(1)
-            logits, logits_f = logits.unsqueeze(0), logits_f.unsqueeze(1)
+            logits = logits.flatten(end_dim=-2)
+        N, T = logits.shape
+        mask = torch.eye(T, device=logits.device, dtype=torch.bool).expand(N, T, T)
+        mask = mask | (
+            self.total_count.flatten().unsqueeze(1)
+            <= torch.arange(T, device=logits.device)
+        ).unsqueeze(2)
+        x = logits.unsqueeze(1).expand(N, T, T)
+        x = x.masked_fill(mask.unsqueeze(0), -float("inf"))
+        x = x.view(N * T, T)
+        lmax = self.given_count.flatten()
+        empty = lmax == 0
+        lmax_m1 = (lmax - 1).clamp_min_(0).repeat_interleave(T)
+        x = extract_relevant_odds_forward(x, lmax_m1, True, -float("inf"))
+        x = log_R_forward(x, lmax_m1, False, True).view(N, T)
+        x = (x + logits).masked_fill(empty.unsqueeze(1), -float("inf"))
+        if batch_dims:
+            x = x.unflatten(0, self.batch_shape)
         else:
-            log_r_f = log_r_f.flatten(1, batch_dims)
-            logits_f = logits_f.flatten(1, batch_dims)
-            given_count = given_count.flatten()
-        given_count = given_count.long()
-        lmax_max_p1, nmax, diffdim = log_r_f.shape
-        lmax_max = lmax_max_p1 - 1
-        tmax = self.event_shape[0]
-        assert logits_f.shape == (lmax_max, nmax, diffdim)
-        li = torch.full((lmax_max, nmax, tmax), -float("inf"), device=device)
-        keep = torch.full((lmax_max, tmax), 0, device=device, dtype=torch.bool)
-        li_ = []
-        logits = logits.flip([1])
-        nrange = torch.arange(nmax, device=device)
-        for ell in range(lmax_max):
-            remainder = given_count - ell - 1
-            invalid = remainder < 0
-            right = min(ell + diffdim, tmax)
-            keep[ell, ell:right] = True
-            li_.append(
-                (
-                    logits_f[ell, :, : right - ell] + log_r_f[ell, :, : right - ell]
-                ).flatten()
-            )
-            if ell:
-                cur_r_b = torch.cat(
-                    [
-                        torch.full((nmax, ell), -float("inf"), device=device),
-                        logits[:, ell:],
-                    ],
-                    1,
-                )
-                cur_r_b[:, 1:] += last_r_b[:, :-1]
-                cur_r_b = cur_r_b.logcumsumexp(1)
-            else:
-                cur_r_b = torch.zeros_like(logits)
-            cur_r_b.masked_fill_(invalid.unsqueeze(1), -float("inf"))
-            li[remainder.clamp_min_(-1), nrange] = cur_r_b.flip([1])
-            last_r_b = cur_r_b
-        li_ = torch.cat(li_)
-        li2 = torch.full_like(li, -float("inf")).masked_scatter_(keep.unsqueeze(1), li_)
-        li2[..., :-1] += li[..., 1:]
-        li = li2
-        li = li.logsumexp(0) - self.log_partition.view(-1, 1)
-        assert (li <= 0).all(), (li > 0).nonzero()
-        return li.exp().view(self.batch_shape + (tmax,))
+            x = x.squeeze(0)
+        return (x - self.log_partition.unsqueeze(-1)).exp()
 
     @property
     def variance(self):
@@ -515,13 +484,13 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
                     .flatten(1, 2)
                 )
                 lmax = lmax.expand(shape[:-1]).flatten()
-            b = extended_conditional_bernoulli(logits_f, lmax, 1, log_r_f, True)
+            b = extended_conditional_bernoulli(logits_f, lmax, log_r_f, True)
         return b.view(shape)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         if self._validate_args:
             self._validate_sample(value)
-        num = (value * self.logits.clamp_min(config.EPS_INF).expand_as(value)).sum(-1)
+        num = (value * self.logits.clamp_min(config.EPS_NINF).expand_as(value)).sum(-1)
         denom = self.log_partition.expand_as(num)
         return num - denom
 
@@ -574,10 +543,7 @@ def test_conditional_bernoulli():
     assert torch.allclose(inclusions_exp.sum(1), torch.tensor(2.0))
     conditional_bernoulli = ConditionalBernoulli(2, logits=logits)
 
-    # assert torch.allclose(conditional_bernoulli.mean.sum(1), torch.tensor(2.0))
-    # assert torch.allclose(inclusions_exp, conditional_bernoulli.mean)
-
-    b = conditional_bernoulli.sample([mmax])
+    b = conditional_bernoulli.sample([mmax]).float()
     assert b.shape == torch.Size([mmax, nmax, tmax])
     assert (b.sum(-1) == 2).all()
     assert ((b == 0.0) | (b == 1.0)).all()
@@ -603,7 +569,7 @@ def test_conditional_bernoulli():
     conditional_bernoulli = ConditionalBernoulli(
         given_count, logits=logits, total_count=total_count, validate_args=True
     )
-    b = conditional_bernoulli.sample([mmax])
+    b = conditional_bernoulli.sample([mmax]).float()
     total_count_mask = total_count.unsqueeze(1) > torch.arange(tmax)
     assert (b.sum(-1) == given_count.unsqueeze(0)).all()
     assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
@@ -611,6 +577,7 @@ def test_conditional_bernoulli():
 
     inclusions_act = conditional_bernoulli.mean
     assert torch.allclose(inclusions_act.sum(1), given_count)
+    assert torch.allclose(b.mean(0), inclusions_act, atol=1e-2)
     for n in range(nmax):
         total_count_n = int(total_count[n].item())
         given_count_n = int(given_count[n].item())
@@ -622,7 +589,7 @@ def test_conditional_bernoulli():
         )
 
         assert conditional_bernoulli_n.has_enumerate_support
-        b = conditional_bernoulli_n.enumerate_support()
+        b = conditional_bernoulli_n.enumerate_support().float()
         lpb_exp = torch.distributions.Bernoulli(logits=logits_n).log_prob(b).sum(1)
         lpb_exp -= lpb_exp.logsumexp(0)
         lpb_act = conditional_bernoulli_n.log_prob(b)
