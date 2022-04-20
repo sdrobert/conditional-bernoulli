@@ -23,7 +23,7 @@ import pydrobert.torch.distributions as _d
 import pydrobert.torch.functional as _f
 import pydrobert.torch.config as config
 import torch.distributions.constraints as constraints
-from torch.distributions.utils import lazy_property
+from torch.distributions.utils import lazy_property, probs_to_logits, logits_to_probs
 
 from forward_backward import (
     R_forward,
@@ -35,72 +35,48 @@ from forward_backward import (
 class PoissonBinomial(torch.distributions.Distribution):
 
     arg_constraints = {
-        "total_count": constraints.nonnegative_integer,
-        "probs": constraints.unit_interval,
-        "logits": constraints.real,
+        "probs": constraints.independent(constraints.unit_interval, 1),
+        "logits": constraints.real_vector,
     }
 
     def __init__(
         self,
-        total_count: Union[torch.Tensor, int, None] = None,
         probs: Optional[torch.Tensor] = None,
         logits: Optional[torch.Tensor] = None,
         validate_args=None,
     ):
-        non_none = {x for x in (probs, logits) if x is not None}
-        if len(non_none) != 1:
-            raise ValueError("Probs or logits must be non-none, not both")
-        param = non_none.pop()
-        if param.dim() < 1:
-            raise ValueError("parameter must be at least 1-dimensional")
-        param_size = param.size()
-        batch_size = param_size[:-1]
-        T = param_size[-1]
-        if total_count is None:
-            mask = None
-        else:
-            self.total_count = (
-                torch.as_tensor(total_count).expand(batch_size).type_as(param)
-            )
-            mask = self.total_count.unsqueeze(-1) <= torch.arange(T)
+        if (probs is None) == (logits is None):
+            raise ValueError("either probs or logits must be set, not both")
         if probs is not None:
-            self.probs = self._param = (
-                probs if mask is None else probs.masked_fill(mask, 0.0)
-            )
+            self.probs = self._param = probs
         else:
-            self.logits = self._param = (
-                logits if mask is None else logits.masked_fill(mask, -float("inf"))
-            )
-        super(PoissonBinomial, self).__init__(batch_size, validate_args=validate_args)
-
-    @lazy_property
-    def total_count(self):
-        return torch.full(self.batch_shape, self.odds.size(-1)).type_as(self._param)
+            self.logits = self._param = logits
+        shape = self._param.shape
+        if len(shape) < 1:
+            raise ValueError("param must be at least 1 dimensional")
+        super().__init__(shape[:-1], validate_args=validate_args)
 
     @constraints.dependent_property(is_discrete=True, event_dim=0)
     def support(self):
-        return constraints.integer_interval(0, self.total_count)
+        return constraints.integer_interval(0, self._param.size(-1))
 
     @lazy_property
     def probs(self):
-        return self.logits.sigmoid()
+        return logits_to_probs(self.logits, True)
 
     @lazy_property
     def logits(self):
-        return self.probs.logit()
+        return probs_to_logits(self.probs, True)
 
     @lazy_property
     def log_r(self):
-        logits, total_count = self.logits, self.total_count
+        logits = self.logits
         batch_shape = self.batch_shape
         batch_dims = len(batch_shape)
         if not batch_dims:
-            logits, total_count = logits.unsqueeze(0), total_count.view(1)
+            logits = logits.unsqueeze(0)
         else:
-            logits, total_count = (
-                logits.flatten(end_dim=batch_dims - 1),
-                total_count.flatten(),
-            )
+            logits = logits.flatten(end_dim=-2)
         # unfortunately, the sums can get pretty big. This leads to NaNs in the
         # backward pass. We go straight into log here
         log_r_ell = torch.zeros_like(logits)
@@ -133,8 +109,6 @@ class PoissonBinomial(torch.distributions.Distribution):
         # _get_checked_instance and _validate_args
         new = self._get_checked_instance(PoissonBinomial, _instance)
         batch_shape = list(batch_shape)
-        if "total_count" in self.__dict__:
-            new.total_count = self.total_count.expand(batch_shape)
         if "probs" in self.__dict__:
             new.probs = self.probs.expand(batch_shape + [self.probs.size(-1)])
             new._param = new.probs
@@ -151,9 +125,10 @@ class PoissonBinomial(torch.distributions.Distribution):
 
     def sample(self, sample_shape=torch.Size()):
         shape = self._extended_shape(sample_shape)
+        probs = self.probs
+        probs = probs.expand(shape + probs.shape[-1:])
         with torch.no_grad():
-            probs = self.probs.expand(shape + self.probs.size()[-1:])
-            sample = torch.bernoulli(probs).sum(-1)
+            sample = torch.bernoulli(probs).long().sum(-1)
         return sample
 
     def log_prob(self, value: torch.Tensor):
@@ -161,8 +136,8 @@ class PoissonBinomial(torch.distributions.Distribution):
             self._validate_sample(value)
         shape = value.shape
         log_r = self.log_r
-        log_r = log_r.expand(shape + log_r.size()[-1:])
-        return log_r.gather(-1, value.long().unsqueeze(-1)).squeeze(-1)
+        log_r = log_r.expand(shape + log_r.shape[-1:])
+        return log_r.gather(-1, value.unsqueeze(-1)).squeeze(-1)
 
 
 @torch.jit.script_if_tracing
@@ -275,10 +250,9 @@ def _log_extended_conditional_bernoulli(
 class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
     arg_constraints = {
-        "total_count": constraints.nonnegative_integer,
         "given_count": constraints.nonnegative_integer,
-        "probs": constraints.unit_interval,
-        "logits": constraints.real,
+        "probs": constraints.independent(constraints.unit_interval, 1),
+        "logits": constraints.real_vector,
     }
     _mean_carrier_measure = 0
 
@@ -287,52 +261,33 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         given_count: Union[torch.Tensor, int],
         probs: Optional[torch.Tensor] = None,
         logits: Optional[torch.Tensor] = None,
-        total_count: Union[torch.Tensor, int, None] = None,
         validate_args=None,
     ):
-        non_none = {x for x in (probs, logits) if x is not None}
-        if len(non_none) != 1:
-            raise ValueError("Exactly one of probs or logits must be non-None.")
-        param = non_none.pop()
-        if param.dim() < 1:
-            raise ValueError("parameter must be at least 1-dimensional")
-        param_size = param.size()
-        batch_size = param_size[:-1]
-        T = param_size[-1]
-        if total_count is None:
-            mask = None
-        else:
-            self.total_count = (
-                torch.as_tensor(total_count).expand(batch_size).type_as(param)
-            )
-            mask = self.total_count.unsqueeze(-1) <= torch.arange(T)
+        if (probs is None) == (logits is None):
+            raise ValueError("either probs or logits must be set, not both")
         if probs is not None:
-            self.probs = self._param = (
-                probs if mask is None else probs.masked_fill(mask, 0.0)
-            )
+            self.probs = self._param = probs
         else:
-            self.logits = self._param = (
-                logits if mask is None else logits.masked_fill(mask, -float("inf"))
-            )
+            self.logits = self._param = logits
+        shape = self._param.shape
+        if len(shape) < 1:
+            raise ValueError("param must be at least 1-dimensional")
+        batch_shape, event_shape = shape[:-1], shape[-1:]
         self.given_count = (
-            torch.as_tensor(given_count).expand(batch_size).type_as(param)
+            torch.as_tensor(given_count).expand(batch_shape).type_as(self._param)
         )
-        super(ConditionalBernoulli, self).__init__(
-            batch_size, param_size[-1:], validate_args
-        )
+        super().__init__(batch_shape, event_shape, validate_args)
 
     @property
     def has_enumerate_support(self) -> bool:
         return (self.given_count == self.given_count.flatten()[0]).all().item()
 
-    @lazy_property
-    def total_count(self):
-        return torch.full(self.batch_shape, self._event_shape[0]).type_as(self._param)
-
     @constraints.dependent_property
     def support(self) -> torch.Tensor:
         return _d.BinaryCardinalityConstraint(
-            self.total_count, self.given_count, self._event_shape[0]
+            torch.tensor(self.event_shape[0], device=self._param.device),
+            self.given_count,
+            self._event_shape[0],
         )
 
     def enumerate_support(self, expand=True) -> torch.Tensor:
@@ -350,11 +305,11 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
     @lazy_property
     def probs(self):
-        return self.logits.sigmoid()
+        return logits_to_probs(self.logits, True)
 
     @lazy_property
     def logits(self):
-        return self.probs.logit()
+        return probs_to_logits(self.probs, True)
 
     @lazy_property
     def logits_f(self):
@@ -467,11 +422,11 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
     def sample(self, sample_shape=torch.Size([])):
         sample_shape = torch.Size(sample_shape)
         shape = self._extended_shape(sample_shape)
+        logits_f, log_r_f, given_count = self.logits_f, self.log_r_f, self.given_count
         with torch.no_grad():
-            logits_f, log_r_f, L = self.logits_f, self.log_r_f, self.given_count
             if not len(self.batch_shape):
                 logits_f, log_r_f = logits_f.unsqueeze(1), log_r_f.unsqueeze(1)
-                L = L.unsqueeze(0)
+                given_count = given_count.unsqueeze(0)
             if sample_shape:
                 logits_f = (
                     logits_f.unsqueeze(1)
@@ -483,19 +438,15 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
                     .expand(log_r_f.shape[:1] + sample_shape + log_r_f.shape[1:])
                     .flatten(1, 2)
                 )
-                L = L.expand(shape[:-1]).flatten()
-            b = extended_conditional_bernoulli(logits_f, L, log_r_f, True)
+                given_count = given_count.expand(shape[:-1]).flatten()
+            b = extended_conditional_bernoulli(logits_f, given_count, log_r_f, True)
         return b.view(shape)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         if self._validate_args:
             self._validate_sample(value)
-        num = (value * self.logits.clamp_min(config.EPS_NINF).expand_as(value)).sum(-1)
-        denom = self.log_partition.expand_as(num)
-        return num - denom
-
-    def log_joint_likelihoods(self, lcond: torch.Tensor) -> torch.Tensor:
-        pass
+        num = (value * self.logits.expand_as(value)).sum(-1)
+        return num - self.log_partition
 
 
 # TESTS
@@ -505,22 +456,21 @@ def test_poisson_binomial():
     # The Poisson Binomial equals the Binomial distribution when all probs are equal
     torch.manual_seed(1)
     T, N, M = 5, 16, 2 ** 15
-    p = torch.rand(N, requires_grad=True)
     total_count = torch.randint(T + 1, (N,))
-
-    binom = torch.distributions.Binomial(total_count, probs=p)
+    p = torch.rand(N, requires_grad=True)
 
     p_ = p.unsqueeze(1).expand(N, T)
-    poisson_binom = PoissonBinomial(total_count, probs=p_)
-    L = poisson_binom.sample([M])
-    mean = L.mean(0)
+    p_ = p_.masked_fill(total_count.unsqueeze(1) <= torch.arange(T), 0)
+    poisson_binom = PoissonBinomial(probs=p_)
+    b = poisson_binom.sample([M])
+    mean = b.float().mean(0)
     assert torch.allclose(mean, p * total_count, atol=1e-2)
 
-    log_prob_act = poisson_binom.log_prob(L).t()
+    log_prob_act = poisson_binom.log_prob(b).t()
     (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [p])
 
-    binom = torch.distributions.Binomial(total_count, probs=p.requires_grad_(True))
-    log_prob_exp = binom.log_prob(L).t()
+    binom = torch.distributions.Binomial(total_count, probs=p)
+    log_prob_exp = binom.log_prob(b).t()
     assert torch.allclose(log_prob_exp, log_prob_act, atol=1e-3)
     (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [p])
     assert torch.allclose(grad_log_prob_exp, grad_log_prob_act, atol=1e-3)
@@ -553,9 +503,9 @@ def test_conditional_bernoulli():
     inclusions_act = b.mean(0)
     assert torch.allclose(inclusions_exp, inclusions_act, atol=1e-2)
 
-    poisson_binomial = PoissonBinomial(T, logits=logits)
+    poisson_binomial = PoissonBinomial(logits=logits)
     log_prob_act = conditional_bernoulli.log_prob(b) + poisson_binomial.log_prob(
-        torch.tensor(2.0).expand((N,))
+        torch.tensor(2).expand((N,))
     )
     (grad_log_prob_act,) = torch.autograd.grad(log_prob_act.mean(), [logits])
 
@@ -566,27 +516,21 @@ def test_conditional_bernoulli():
     (grad_log_prob_exp,) = torch.autograd.grad(log_prob_exp.mean(), [logits])
     assert torch.allclose(grad_log_prob_exp, grad_log_prob_act)
 
-    total_count = torch.randint(1, T + 1, (N,), dtype=torch.float)
-    given_count = (torch.rand((N,)) * (total_count + 1)).floor_()
-    assert (given_count <= total_count).all()
+    given_count = torch.randint(T + 1, (N,))
     conditional_bernoulli = ConditionalBernoulli(
-        given_count, logits=logits, total_count=total_count, validate_args=True
+        given_count, logits=logits, validate_args=True
     )
     b = conditional_bernoulli.sample([M]).float()
-    total_count_mask = total_count.unsqueeze(1) > torch.arange(T)
     assert (b.sum(-1) == given_count.unsqueeze(0)).all()
-    assert ((b * total_count_mask).sum(-1) == given_count.unsqueeze(0)).all()
     assert (b.max(-1)[0] <= 1).all()
 
     inclusions_act = conditional_bernoulli.mean
-    assert torch.allclose(inclusions_act.sum(1), given_count)
+    assert torch.allclose(inclusions_act.sum(1), given_count.float())
     assert torch.allclose(b.mean(0), inclusions_act, atol=1e-2)
     for n in range(N):
-        total_count_n = int(total_count[n].item())
         given_count_n = int(given_count[n].item())
         inclusions_act_n = inclusions_act[n]
-        assert (inclusions_act_n[total_count_n:] == 0).all()
-        logits_n = logits[n, :total_count_n]
+        logits_n = logits[n]
         conditional_bernoulli_n = ConditionalBernoulli(
             given_count_n, logits=logits_n, validate_args=True
         )
@@ -596,12 +540,12 @@ def test_conditional_bernoulli():
         lpb_exp = torch.distributions.Bernoulli(logits=logits_n).log_prob(b).sum(1)
         lpb_exp -= lpb_exp.logsumexp(0)
         lpb_act = conditional_bernoulli_n.log_prob(b)
-        assert torch.allclose(lpb_exp, lpb_act)
+        assert torch.allclose(lpb_exp, lpb_act, atol=1e-5)
 
         pb = lpb_act.exp()
         assert torch.allclose(pb.sum(), torch.tensor(1.0))
         inclusions_exp_n = (pb.unsqueeze(1) * b).sum(0)
-        assert torch.allclose(inclusions_exp_n, inclusions_act_n[:total_count_n])
+        assert torch.allclose(inclusions_exp_n, inclusions_act_n)
 
 
 # XXX(anon): The following did not work. I've had difficulty with algorithms based

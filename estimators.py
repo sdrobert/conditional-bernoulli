@@ -40,6 +40,7 @@ class FixedCardinalityGibbsStatistic(object):
 
     def __call__(self, b: torch.Tensor) -> torch.Tensor:
         T, device = b.size(-1), b.device
+        b = b.float()
         reps = torch.eye(T, device=device)
         reps = reps.unsqueeze(0) - reps.unsqueeze(1)
         reps = reps.view((T ** 2,) + (1,) * (b.dim() - 1) + (T,))
@@ -51,7 +52,7 @@ class FixedCardinalityGibbsStatistic(object):
         if not self.is_log:
             ll_ = ll_.abs_().log_()
         ll_ += self.density.log_prob(b_).detach()
-        ll = torch.full(keep_mask.shape, -float("inf"), dtype=b.dtype, device=device)
+        ll = torch.full(keep_mask.shape, -float("inf"), device=device)
         ll.masked_scatter_(keep_mask, ll_)
         # the likelihood of the original value only applies when the binary value
         # was high in the original sample
@@ -191,7 +192,7 @@ class DummyBernoulliSequence(torch.distributions.distribution.Distribution):
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         lp = -torch.nn.functional.binary_cross_entropy_with_logits(
-            self.logits.expand_as(value), value, reduction="none"
+            self.logits.expand_as(value), value.float(), reduction="none"
         )
         return lp.sum(-1)
 

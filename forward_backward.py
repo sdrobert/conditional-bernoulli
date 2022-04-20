@@ -16,8 +16,6 @@
 
 import torch
 
-import pydrobert.torch.config as config
-
 
 @torch.jit.script_if_tracing
 def extract_relevant_odds_forward(
@@ -80,14 +78,12 @@ def log_R_forward(
     given_count: torch.Tensor,
     return_all: bool = False,
     batch_first: bool = False,
-    eps_ninf: float = config.EPS_NINF,
 ) -> torch.Tensor:
     assert logits_f.dim() == 3 and given_count.dim() == 1
     if not batch_first:
         logits_f = logits_f.transpose(1, 2)
     given_count = given_count.long()
     L, N, D = logits_f.shape
-    logits_f = logits_f.clamp_min(eps_ninf)
     lr = [logits_f.new_zeros(N, D)]
     for ell in range(L):
         lr.append((logits_f[ell] + lr[ell]).logcumsumexp(1))
@@ -161,6 +157,8 @@ def test_R_forward():
 
 
 def test_log_R_forward():
+    import pydrobert.torch.config as config
+
     torch.manual_seed(3)
     N, T = 5, 16
     logits = torch.randn(N, T, requires_grad=True, dtype=torch.double)
