@@ -167,9 +167,9 @@ def extended_conditional_bernoulli(
         )
     if r_f is None:
         r_f = (
-            log_R_forward(w_f, given_count, True, True, neg_inf)
+            log_R_forward(w_f, given_count, True)
             if log_space
-            else R_forward(w_f, given_count, True, True)
+            else R_forward(w_f, given_count, True)
         )
     else:
         assert (
@@ -268,7 +268,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         if probs is not None:
             self.probs = self._param = probs
         else:
-            self.logits = self._param = logits
+            self.logits = self._param = logits.clamp_min(config.EPS_NINF)
         shape = self._param.shape
         if len(shape) < 1:
             raise ValueError("param must be at least 1-dimensional")
@@ -276,6 +276,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         self.given_count = (
             torch.as_tensor(given_count).expand(batch_shape).type_as(self._param)
         )
+        self.L = int(self.given_count.max().item())
         super().__init__(batch_shape, event_shape, validate_args)
 
     @property
@@ -320,9 +321,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         else:
             logits = logits.flatten(end_dim=-2)
             given_count = given_count.flatten()
-        logits_f = extract_relevant_odds_forward(
-            logits, given_count, True, -float("inf")
-        )
+        logits_f = extract_relevant_odds_forward(logits, given_count, config.EPS_NINF)
         if not batch_dims:
             logits_f = logits_f.squeeze(1)
         else:
@@ -338,7 +337,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         else:
             logits_f = logits_f.flatten(1, batch_dims)
             given_count = given_count.flatten()
-        log_r_f = log_R_forward(logits_f, given_count, True, True)
+        log_r_f = log_R_forward(logits_f, given_count, True)
         if not batch_dims:
             log_r_f = log_r_f.squeeze(1)
         else:
@@ -363,14 +362,14 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         N, T = logits.shape
         mask = torch.eye(T, device=logits.device, dtype=torch.bool).expand(N, T, T)
         x = logits.unsqueeze(1).expand(N, T, T)
-        x = x.masked_fill(mask, -float("inf"))
+        x = x.masked_fill(mask, config.EPS_NINF)
         x = x.view(N * T, T)
-        L = self.given_count.flatten()
-        empty = L == 0
-        lmax_m1 = (L - 1).clamp_min_(0).repeat_interleave(T)
-        x = extract_relevant_odds_forward(x, lmax_m1, True, -float("inf"))
-        x = log_R_forward(x, lmax_m1, False, True).view(N, T)
-        x = (x + logits).masked_fill(empty.unsqueeze(1), -float("inf"))
+        given_count = self.given_count.flatten()
+        empty = given_count == 0
+        lm1 = (given_count - 1).clamp_min_(0).repeat_interleave(T)
+        x = extract_relevant_odds_forward(x, lm1, config.EPS_NINF)
+        x = log_R_forward(x, lm1, False).view(N, T)
+        x = (x + logits).masked_fill(empty.unsqueeze(1), config.EPS_NINF)
         if batch_dims:
             x = x.unflatten(0, self.batch_shape)
         else:
@@ -416,6 +415,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         super(ConditionalBernoulli, new).__init__(
             torch.Size(batch_shape), self.event_shape, validate_args=False
         )
+        new.L = self.L
         new._validate_args = self._validate_args
         return new
 
@@ -447,6 +447,14 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
             self._validate_sample(value)
         num = (value * self.logits.expand_as(value)).sum(-1)
         return num - self.log_partition
+
+    def log_joint_likelihoods(self, lcond: torch.Tensor) -> torch.Tensor:
+        shape = self.batch_shape + self.event_shape
+        if lcond.shape[1:] != shape or lcond.shape[0] <= self.L:
+            raise ValueError(
+                f"Incorrect shape. Expecting (>{self.L}) + {tuple(shape)}, got "
+                f"{tuple(lcond.shape)}"
+            )
 
 
 # TESTS
