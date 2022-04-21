@@ -255,6 +255,34 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         cur = self.merge_dicts(cur_latent, cur_cond, prev_cond, prev_rest)
         return logits, cur
 
+    def calc_log_likelihood_given_latents(
+        self,
+        latent_hist: torch.Tensor,
+        cond_hist: torch.Tensor,
+        prev: StateDict = dict(),
+    ) -> torch.Tensor:
+        prev = self.update_input(prev.copy(), latent_hist)
+        latent_hist, cond_hist = latent_hist.T, cond_hist.T  # batch-first
+        N, T = latent_hist.shape
+        N_, L = cond_hist.shape
+        V, device = self.conditional.vocab_size, cond_hist.device
+        assert N == N_
+        cond_lens = latent_hist.long().sum(1)
+        Lmax = int(cond_lens.max().item())
+        if Lmax > L:
+            cond_hist = torch.nn.functional.pad(cond_hist, (0, Lmax - L))
+        else:
+            Lmax = L
+        hist = torch.full_like(latent_hist, V)
+        cond_hist_ = cond_hist.masked_select(
+            cond_lens.unsqueeze(1) > torch.arange(Lmax, device=device)
+        )
+        hist = hist.masked_scatter(latent_hist.bool(), cond_hist_).T.clamp(0, V)
+        logits = self.calc_full_log_probs(hist[:-1], prev).log_softmax(2)
+        assert logits.shape == (T, N, V + 1)
+        ll = logits.gather(2, hist.unsqueeze(2)).squeeze(2).sum(0)
+        return ll.masked_fill(cond_lens > L, config.EPS_NINF)
+
 
 class LstmLmParams(param.Parameterized):
 
@@ -484,9 +512,9 @@ class LstmLm(MixableSequentialLanguageModel):
             x = prev[self.post_input_name]
             if x.dim() != 2:
                 cur[self.post_input_name] = x
-                x = x.gather(0, idx.unsqueeze(2).expand(1, N, self.input_size)).squeeze(
-                    0
-                )
+                x = x.gather(
+                    0, idx.unsqueeze(2).expand(1, N, self.post_input_size)
+                ).squeeze(0)
             if self.post_merger is not None:
                 x = self.post_merger(x)
                 in_ = self.mix_vectors(in_, x)
@@ -521,7 +549,7 @@ class LstmLm(MixableSequentialLanguageModel):
             in_ = self.lstm(in_, (prev[self.hidden_name], prev[self.cell_name]))[0]
         return in_
 
-    def calc_logits(self, prev: StateDict, hidden: torch.Tensor) -> torch.Tensor:
+    def calc_all_logits(self, prev: StateDict, hidden: torch.Tensor) -> torch.Tensor:
         if self.post_input_name in prev and self.post_input_size:
             x = prev[self.post_input_name]
             if x.dim() != 3:
@@ -538,7 +566,7 @@ class LstmLm(MixableSequentialLanguageModel):
     def calc_full_log_probs(
         self, hist: torch.Tensor, prev: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
-        return self.calc_logits(prev, self.calc_all_hidden(prev, hist))
+        return self.calc_all_logits(prev, self.calc_all_hidden(prev, hist))
 
 
 class JointLatentLstmLm(JointLatentLanguageModel):
@@ -598,7 +626,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         latent_hist = hist != V
         latent_hist_ = latent_hist.long()
         hidden = self.latent.calc_all_hidden(prev_latent, latent_hist_)
-        llogits = self.latent.calc_logits(prev_latent, hidden)
+        llogits = self.latent.calc_all_logits(prev_latent, hidden)
         if T > 0:
             hist = hist.T
             cond_hist = hist[latent_hist.T]
@@ -625,6 +653,49 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         clogits = torch.stack(clogits).log_softmax(2)
         logits = torch.cat([llogits[..., 1:] + clogits, llogits[..., :1]], 2)
         return logits
+
+    def calc_log_likelihood_given_latents(
+        self,
+        latent_hist: torch.Tensor,
+        cond_hist: torch.Tensor,
+        prev: StateDict = dict(),
+    ) -> torch.Tensor:
+        # we're in a better position than when calculating the log probabilities b/c
+        # we don't need to worry about the rest of the pdf when the latent variable
+        # is off.
+        T, N = latent_hist.shape
+        L, N_ = cond_hist.shape
+        assert N == N_
+        latent_hist_ = latent_hist.T.bool()
+        cond_lens = latent_hist.sum(0)
+        Lmax = int(cond_lens.max().item())
+        if Lmax > L:
+            cond_hist = torch.nn.functional.pad(cond_hist, (0, 0, 0, Lmax - L))
+        else:
+            Lmax = L
+        prev = self.update_input(prev.copy(), latent_hist)
+        prev_latent, prev_cond, _, _ = self.split_dicts(prev)
+        hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
+        logits = self.latent.calc_all_logits(prev_latent, hidden).log_softmax(2)
+        ll_latent = logits.gather(2, latent_hist.unsqueeze(2)).squeeze(2).sum(0)
+
+        H = hidden.size(2)
+        assert hidden.shape == (T, N, H)
+        hidden = hidden.transpose(0, 1)
+        hidden_mask = cond_lens.unsqueeze(1) > torch.arange(Lmax, device=hidden.device)
+        hidden_ = hidden.masked_select(latent_hist_.unsqueeze(2).expand(N, T, H))
+        hidden = hidden.new_empty((N, Lmax, H)).masked_scatter(
+            hidden_mask.unsqueeze(2).expand(N, Lmax, H), hidden_
+        )
+        hidden = hidden.transpose(0, 1)
+        prev_cond[self.conditional.input_name] = hidden
+        prev_cond[self.conditional.post_input_name] = hidden
+        cond_hist = cond_hist.clamp(0, self.vocab_size - 1)
+        hidden = self.conditional.calc_all_hidden(prev_cond, cond_hist[:-1])
+        logits = self.conditional.calc_all_logits(prev_cond, hidden).log_softmax(2)
+        ll_cond = logits.gather(2, cond_hist.unsqueeze(2)).squeeze(2)
+        ll_cond = ll_cond.masked_fill(~hidden_mask.T, 0).sum(0)
+        return (ll_latent + ll_cond).masked_fill(cond_lens > L, config.EPS_NINF)
 
 
 ## TESTS
@@ -820,7 +891,7 @@ def test_lstm_lm():
     T, N, V, H = 10, 3, 5, 20
     loss_fn = torch.nn.CrossEntropyLoss()
     for merge_method in ("mix", "cat"):
-        for embedding_size, input_size in itertools.permutations(range(0, 10, 5), 2):
+        for embedding_size, input_size in itertools.product(range(0, 10, 5), repeat=2):
             input_posts = [False, True]
             if embedding_size == 0:
                 input_posts.pop()
@@ -868,32 +939,52 @@ def test_lstm_lm():
 def test_joint_latent_lstm_lm():
     torch.manual_seed(4)
 
-    T, N, V, H, I, E = 6, 1, 3, 4, 5, 2
+    T, N, V, H, I = 6, 7, 3, 4, 5
     hist = torch.randint(V + 1, (T, N))
     in_ = torch.rand(T, N, I)
-    params = LstmLmParams(
-        embedding_size=E, hidden_size=H, merge_method="mix", num_layers=1
-    )
     loss_fn = torch.nn.CrossEntropyLoss()
     prev = {"latent_input": in_}
     for input_post in (False, True):
-        print(f"input_post={input_post}")
-        lm_act = JointLatentLstmLm(V, I, params, cond_input_is_post=input_post)
-        latent = lm_act.latent
-        conditional = lm_act.conditional
-        lm_exp = JointLatentLanguageModel(latent, conditional)
+        for num_layers, embedding_size in itertools.product((0, 3), repeat=2):
+            if input_post and embedding_size == 0:
+                continue
+            print(
+                f"num_layers={num_layers}, embedding_size={embedding_size}, "
+                f"input_post={input_post}"
+            )
+            params = LstmLmParams(
+                embedding_size=embedding_size,
+                hidden_size=H,
+                merge_method="cat",
+                num_layers=num_layers,
+            )
+            lm_act = JointLatentLstmLm(V, I, params, cond_input_is_post=input_post)
+            latent = lm_act.latent
+            conditional = lm_act.conditional
+            lm_exp = JointLatentLanguageModel(latent, conditional)
 
-        logits_exp = lm_exp(hist[:-1], prev)
-        assert logits_exp.shape == (T, N, V + 1)
-        loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
-        g_exp = torch.autograd.grad(loss_exp, lm_exp.parameters())
+            logits_exp = lm_exp(hist[:-1], prev)
+            assert logits_exp.shape == (T, N, V + 1)
+            loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
+            g_exp = torch.autograd.grad(loss_exp, lm_exp.parameters())
 
-        logits_act = lm_act(hist[:-1], prev)
-        assert logits_act.shape == (T, N, V + 1)
-        assert torch.allclose(logits_exp, logits_act)
-        loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
-        assert torch.allclose(loss_exp, loss_act)
-        g_act = torch.autograd.grad(loss_act, lm_act.parameters())
-        for g_exp_p, g_act_p in zip(g_exp, g_act):
-            assert torch.allclose(g_exp_p, g_act_p)
+            logits_act = lm_act(hist[:-1], prev)
+            assert logits_act.shape == (T, N, V + 1)
+            assert torch.allclose(logits_exp, logits_act)
+            loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
+            assert torch.allclose(loss_exp, loss_act)
+            g_act = torch.autograd.grad(loss_act, lm_act.parameters())
+            for g_exp_p, g_act_p in zip(g_exp, g_act):
+                assert torch.allclose(g_exp_p, g_act_p)
+
+            latent_hist = torch.randint(2, (T, N))
+            cond_hist = torch.randint(V, (T // 2, N))
+            ll_exp = lm_exp.calc_log_likelihood_given_latents(
+                latent_hist, cond_hist, prev
+            )
+            assert ll_exp.shape == (N,)
+            ll_act = lm_act.calc_log_likelihood_given_latents(
+                latent_hist, cond_hist, prev
+            )
+            assert torch.allclose(ll_exp, ll_act)
 
