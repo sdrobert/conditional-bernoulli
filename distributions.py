@@ -1,4 +1,4 @@
-# Copyright 2021 Sean Robertson
+# Copyright 2022 Sean Robertson
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -285,11 +285,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
 
     @constraints.dependent_property
     def support(self) -> torch.Tensor:
-        return _d.BinaryCardinalityConstraint(
-            torch.tensor(self.event_shape[0], device=self._param.device),
-            self.given_count,
-            self._event_shape[0],
-        )
+        return _d.BinaryCardinalityConstraint(self.given_count, self._event_shape[0],)
 
     def enumerate_support(self, expand=True) -> torch.Tensor:
         if not self.has_enumerate_support:
@@ -422,23 +418,27 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
     def sample(self, sample_shape=torch.Size([])):
         sample_shape = torch.Size(sample_shape)
         shape = self._extended_shape(sample_shape)
+        M = 1
+        for s in sample_shape:
+            M *= s
+        if not M:
+            return torch.empty(
+                sample_shape, device=self._param.device, dtype=torch.long
+            )
         logits_f, log_r_f, given_count = self.logits_f, self.log_r_f, self.given_count
         with torch.no_grad():
             if not len(self.batch_shape):
-                logits_f, log_r_f = logits_f.unsqueeze(1), log_r_f.unsqueeze(1)
-                given_count = given_count.unsqueeze(0)
-            if sample_shape:
-                logits_f = (
-                    logits_f.unsqueeze(1)
-                    .expand(logits_f.shape[:1] + sample_shape + logits_f.shape[1:])
-                    .flatten(1, 2)
-                )
+                logits_f = logits_f.unsqueeze(1).expand(-1, M, 1)
+                log_r_f = log_r_f.unsqueeze(1).expand(-1, M, 1)
+                given_count = given_count.expand(M)
+            else:
+                L, D = logits_f.size(0), logits_f.size(-1)
+                assert D == log_r_f.size(-1) and L == self.L == log_r_f.size(0) - 1
+                logits_f = logits_f.view(L, 1, -1, D).expand(L, M, -1, D).flatten(1, 2)
                 log_r_f = (
-                    log_r_f.unsqueeze(1)
-                    .expand(log_r_f.shape[:1] + sample_shape + log_r_f.shape[1:])
-                    .flatten(1, 2)
+                    log_r_f.view(L + 1, 1, -1, D).expand(L + 1, M, -1, D).flatten(1, 2)
                 )
-                given_count = given_count.expand(shape[:-1]).flatten()
+                given_count = given_count.view(1, -1).expand(M, -1).flatten()
             b = extended_conditional_bernoulli(logits_f, given_count, log_r_f, True)
         return b.view(shape)
 
@@ -448,13 +448,30 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         num = (value * self.logits.expand_as(value)).sum(-1)
         return num - self.log_partition
 
-    def log_joint_likelihoods(self, lcond: torch.Tensor) -> torch.Tensor:
+    def marginal_log_likelihoods(
+        self, lcond: torch.Tensor, normalize: bool = True
+    ) -> torch.Tensor:
         shape = self.batch_shape + self.event_shape
-        if lcond.shape[1:] != shape or lcond.shape[0] <= self.L:
+        if lcond.shape[1:] != shape or lcond.shape[0] < self.L:
             raise ValueError(
-                f"Incorrect shape. Expecting (>{self.L}) + {tuple(shape)}, got "
+                f"Incorrect shape. Expecting (>={self.L}), + {tuple(shape)}, got "
                 f"{tuple(lcond.shape)}"
             )
+        logits_f, given_count = self.logits_f, self.given_count
+        if not len(self.batch_shape):
+            lcond = lcond.unsqueeze(1)
+            logits_f = logits_f.unsqueeze(1)
+            given_count = given_count.view(1)
+        else:
+            lcond = lcond.flatten(1, -2)
+            logits_f = logits_f.flatten(1, -2)
+            given_count = given_count.flatten()
+        lcond_f = extract_relevant_odds_forward(lcond, given_count, config.EPS_NINF)
+        assert lcond_f.shape == logits_f.shape
+        ll = log_R_forward(logits_f + lcond_f, given_count)
+        if normalize:
+            ll = ll - self.log_partition
+        return ll.view(self.batch_shape)
 
 
 # TESTS
