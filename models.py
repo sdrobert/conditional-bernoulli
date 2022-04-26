@@ -303,9 +303,9 @@ class LstmLmParams(param.Parameterized):
         300, bounds=(1, None), doc="The size of the LSTM's hidden states."
     )
     num_layers = param.Integer(3, bounds=(0, None), doc="The number of LSTM layers.")
-    merge_method = param.Selector(
-        ["mix", "cat"],
+    merge_method = param.ObjectSelector(
         "mix",
+        ["mix", "cat"],
         doc="How to combine inputs with embeddings or hidden vectors. mix: softmax for "
         "weights then weighted mixture; cat: concatenate.",
     )
@@ -424,13 +424,12 @@ class LstmLm(MixableSequentialLanguageModel):
     def update_input(self, prev: StateDict, hist: torch.Tensor) -> StateDict:
         N, L = hist.size(1), len(self.cells)
         H = self.lstm.weight_hh_l0.size(1) if L else self.lstm_input_size
-        zero = torch.zeros(1, device=hist.device)
         if self.hidden_name not in prev:
-            prev[self.hidden_name] = zero.expand(L, N, H)
+            prev[self.hidden_name] = torch.zeros(L, N, H, device=hist.device)
         if self.cell_name not in prev:
-            prev[self.cell_name] = zero.expand(L, N, H)
+            prev[self.cell_name] = torch.zeros(L, N, H, device=hist.device)
         if self.last_hidden_name not in prev:
-            prev[self.last_hidden_name] = zero.expand(N, H)
+            prev[self.last_hidden_name] = torch.zeros(N, H, device=hist.device)
         return prev
 
     def extract_by_src(self, prev: StateDict, src: torch.Tensor) -> StateDict:

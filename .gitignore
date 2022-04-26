@@ -373,6 +373,8 @@ dmypy.json
 # VSCode
 .vscode/
 
-conf/
-log/
+conf
+log
 df.sh
+data
+models

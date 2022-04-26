@@ -8,9 +8,11 @@ dependencies:
   - pytorch=1.10.1
   - ipython
   - pytest
-  - cpuonly
   - pydrobert-param
+  - pydrobert-speech
   - seaborn
   - tqdm
   - jupyter
-  - pydrobert-pytorch
+  - pip
+  - pip:
+    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@fb2496483af7cb6279b7b302493a00318290b7c0"
