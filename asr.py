@@ -3,6 +3,8 @@ import argparse
 import os
 import random
 import math
+import glob
+import gzip
 
 from typing import Optional, Set, Tuple
 from typing_extensions import Literal
@@ -185,10 +187,10 @@ def train_lm_for_epoch(
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
     epoch: int,
-    quiet: bool = False,
+    device: torch.device,
+    quiet: bool,
 ) -> float:
     loader.epoch = epoch
-    device = next(model.parameters()).device
     non_blocking = device.type == "cpu" or loader.pin_memory
     if epoch == 1 or (controller.state_dir and controller.state_csv_path):
         controller.load_model_and_optimizer_for_epoch(model, optimizer, epoch - 1, True)
@@ -215,10 +217,13 @@ def train_lm_for_epoch(
 
 @torch.no_grad()
 def lm_perplexity(
-    model: models.SequentialLanguageModel, val: LanguageModelDataSet
+    model: models.SequentialLanguageModel,
+    val: LanguageModelDataSet,
+    device: torch.device,
 ) -> float:
 
-    device = next(model.parameters()).device
+    model.eval()
+
     total_ll = 0.0
     total_tokens = 0
     loss_fn = torch.nn.CrossEntropyLoss(reduction="sum")
@@ -295,13 +300,13 @@ def train_lm(options, dict_):
         if not options.quiet:
             print(f"Training epoch {epoch}...", file=sys.stderr)
         train_loss = train_lm_for_epoch(
-            model, loader, optimizer, controller, epoch, options.quiet
+            model, loader, optimizer, controller, epoch, options.device, options.quiet
         )
         if not options.quiet:
             print(
                 "Epoch completed. Determining validation perplexity...", file=sys.stderr
             )
-        val_p = lm_perplexity(model, val)
+        val_p = lm_perplexity(model, val, options.device)
         controller.update_for_epoch(model, optimizer, train_loss, -val_p, epoch)
         if not options.quiet:
             print(
@@ -332,6 +337,51 @@ def train_lm(options, dict_):
     torch.save(state_dict, options.save_path)
 
 
+def eval_lm(options, dict_):
+    data_dir = os.path.join(options.data_dir, "dev", "ref")
+    if not os.path.isdir(data_dir):
+        raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
+
+    if options.load_path is not None:
+        print(f"model: {options.load_path.name}, ", end="")
+        if dict_["model"]["conditional"].merge_method == "cat":
+            raise NotImplementedError(
+                "merge_method == 'cat' LM pretraining not implemented"
+            )
+
+        model = initialize_model(options, dict_["model"])
+        model = model.conditional.to(options.device)
+        model.load_state_dict(torch.load(options.load_path, options.device))
+    else:
+        print("model: arpa.lm.gz, ", end="")
+        # FIXME(sdrobert): windows
+        arpa_lm_path = glob.glob(f"{options.data_dir}/local/**/lm.arpa.gz")
+        if len(arpa_lm_path) == 0:
+            raise ValueError(
+                f"Could not find lm.arpa.gz in '{data_dir}'. Did you make it?"
+            )
+        elif len(arpa_lm_path) > 1:
+            raise ValueError(
+                f"found multiple lm.arpa.gz files in '{data_dir}': {arpa_lm_path}"
+            )
+        arpa_lm_path = arpa_lm_path.pop()
+        token2id_path = os.path.join(os.path.dirname(arpa_lm_path), "token2id.txt")
+        token2id = dict()
+        with open(token2id_path) as file_:
+            for line in file_:
+                token, id_ = line.strip().split()
+                id_ = int(id_)
+                token2id[token] = id_
+        with gzip.open(arpa_lm_path, mode="rt") as file_:
+            prob_list = data.parse_arpa_lm(file_, token2id)
+        model = modules.LookupLanguageModel(len(token2id), token2id["<s>"], prob_list)
+        model = model.to(options.device)
+
+    dev = LanguageModelDataSet(data_dir)
+    lm_pp = lm_perplexity(model, dev, options.device)
+    print(f"perplexity: {lm_pp:e}")
+
+
 def main(args=None):
 
     parser = argparse.ArgumentParser(description="Commands for running ASR experiments")
@@ -354,6 +404,11 @@ def main(args=None):
     train_lm_parser = subparsers.add_parser("train_lm")
     train_lm_parser.add_argument("save_path", type=argparse.FileType("wb"))
 
+    eval_lm_parser = subparsers.add_parser("eval_lm")
+    eval_lm_parser.add_argument(
+        "load_path", nargs="?", type=argparse.FileType("rb"), default=None
+    )
+
     options = parser.parse_args(args)
 
     if options.seed is not None:
@@ -361,6 +416,8 @@ def main(args=None):
 
     if options.command == "train_lm":
         return train_lm(options, dict_)
+    elif options.command == "eval_lm":
+        return eval_lm(options, dict_)
 
 
 if __name__ == "__main__":
