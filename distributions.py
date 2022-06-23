@@ -86,7 +86,6 @@ class PoissonBinomial(torch.distributions.Distribution):
             log_r.append(log_r_ell[:, -1])
             logits, log_r_ell = logits[:, 1:], log_r_ell[:, :-1]
         log_r = torch.stack(log_r, 1)
-        log_r = log_r.log_softmax(1)
         if not batch_dims:
             return log_r.flatten()
         else:
@@ -136,7 +135,7 @@ class PoissonBinomial(torch.distributions.Distribution):
             self._validate_sample(value)
         shape = value.shape
         log_r = self.log_r
-        log_r = log_r.expand(shape + log_r.shape[-1:])
+        log_r = log_r.log_softmax(-1).expand(shape + log_r.shape[-1:])
         return log_r.gather(-1, value.unsqueeze(-1)).squeeze(-1)
 
 
@@ -317,7 +316,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
         else:
             logits = logits.flatten(end_dim=-2)
             given_count = given_count.flatten()
-        logits_f = extract_relevant_odds_forward(logits, given_count, config.EPS_NINF)
+        logits_f = extract_relevant_odds_forward(logits, given_count, -float("inf"))
         if not batch_dims:
             logits_f = logits_f.squeeze(1)
         else:

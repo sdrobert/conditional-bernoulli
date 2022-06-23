@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 from typing import Optional, Callable
 
 import torch
@@ -119,7 +121,8 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
             sample = Q.sample([1])
             laf = self.func(sample)
             lpd = self.density.log_prob(sample)
-            lpp = Q.log_prob(sample).detach()
+            with torch.no_grad():
+                lpp = Q.log_prob(sample)
             if self.is_log:
                 density = laf + lpd
                 lomegas.append(density - lpp)
@@ -127,7 +130,8 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
                 omegas.append(laf * (lpd - lpp).exp())
                 laf = laf.abs().log()
                 density = laf + lpd
-            lpp_last = Q.log_prob(last_sample).detach()
+            with torch.no_grad():
+                lpp_last = Q.log_prob(last_sample)
             accept_ratio = (density - last_density - lpp + lpp_last).exp()
             u = torch.rand_like(accept_ratio)
             accept = u < accept_ratio
@@ -143,7 +147,7 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
             #     print(n, h_last, a)
         # cat not stack b/c 0 dim is sample dim
         if self.is_log:
-            v = torch.cat(lomegas).exp().mean(0)
+            v = torch.cat(lomegas).logsumexp(0) - math.log(self.mc_samples)
         else:
             v = torch.cat(omegas).mean(0)
         return v
@@ -237,7 +241,7 @@ def _test_estimator_boilerplate(T, N):
     L = torch.randint(T + 1, (N,))
     func = DummyLogFunc(y, x, L)
     dist = DummyBernoulliSequence(logits)
-    estimator = _e.EnumerateEstimator(dist, func, is_log=True, return_log=False)
+    estimator = _e.EnumerateEstimator(dist, func, is_log=True)
     z_exp = estimator()
     g_exp_logits, g_exp_theta = torch.autograd.grad(
         z_exp, [logits, func.weights], torch.ones_like(z_exp)
@@ -247,7 +251,7 @@ def _test_estimator_boilerplate(T, N):
 
 def test_dummy():
     torch.manual_seed(1)
-    T, N, M = 5, 10, 2 ** 19
+    T, N, M = 5, 10, 2 ** 13
     logits, func, z_exp, g_exp_logits, g_exp_theta = _test_estimator_boilerplate(T, N)
     dist = DummyBernoulliSequence(logits)
     estimator = _e.DirectEstimator(dist, func, M, is_log=True)
@@ -255,14 +259,14 @@ def test_dummy():
     g_act_logits, g_act_theta = torch.autograd.grad(
         z_act, [logits, func.weights], torch.ones_like(z_act)
     )
-    assert torch.allclose(z_exp, z_act, atol=1e-3)
-    assert torch.allclose(g_exp_logits, g_act_logits, atol=1e-3)
-    assert torch.allclose(g_exp_theta, g_act_theta, atol=1e-3)
+    assert torch.allclose(z_exp, z_act, atol=1e-1)
+    assert torch.allclose(g_exp_logits, g_act_logits, atol=1e-1)
+    assert torch.allclose(g_exp_theta, g_act_theta, atol=1e-1)
 
 
 def test_ais_imh():
     torch.manual_seed(1)
-    T, N, M = 5, 10, 2 ** 16
+    T, N, M = 5, 10, 2 ** 9
     logits, func, z_exp, g_exp_logits, g_exp_theta = _test_estimator_boilerplate(T, N)
     density = DummyBernoulliSequence(logits)
     proposal = DummyBernoulliSequence(torch.zeros_like(logits))
@@ -276,18 +280,18 @@ def test_ais_imh():
         lambda h, n: DummyBernoulliSequence(
             torch.logit(h, torch.finfo(torch.float).tiny)
         ),
-        2 ** 7,
+        M // 4,
         is_log=True,
     )
     z_act = estimator()
     g_act_logits, g_act_theta = torch.autograd.grad(
         z_act, [logits, func.weights], torch.ones_like(z_act)
     )
-    assert torch.allclose(z_exp, z_act, atol=1e-3), (z_exp - z_act).abs().max().item()
-    assert torch.allclose(g_exp_logits, g_act_logits, atol=1e-3), (
+    assert torch.allclose(z_exp, z_act, atol=1e-1), (z_exp - z_act).abs().max().item()
+    assert torch.allclose(g_exp_logits, g_act_logits, atol=1e-1), (
         (g_exp_logits - g_act_logits).abs().max().item()
     )
-    assert torch.allclose(g_exp_theta, g_act_theta, atol=1e-3)
+    assert torch.allclose(g_exp_theta, g_act_theta, atol=1e-1)
 
 
 def test_fixed_cardinality_gibbs_statistic():
