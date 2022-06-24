@@ -27,6 +27,7 @@ from tqdm import tqdm
 import models
 import distributions
 import estimators
+import decoding
 
 
 def get_filts_and_classes(train_dir: str) -> Tuple[int, int]:
@@ -83,6 +84,7 @@ class LanguageModelDataLoaderParams(param.Parameterized):
 
 class DecodingParams(param.Parameterized):
     beam_width = param.Integer(4, bounds=(1, None))
+    style = param.ObjectSelector("beam", objects=["beam", "prefix"])
 
 
 class LanguageModelDataSet(torch.utils.data.Dataset):
@@ -278,20 +280,13 @@ def initialize_model(options, dict_) -> models.JointLatentLstmLm:
     )
     if "pretrained_lm_path" in options and options.pretrained_lm_path is not None:
         state_dict = torch.load(options.pretrained_lm_path)
-        if "post_merger.weight" in state_dict:
-            del state_dict["post_merger.weight"]
-        if "post_merger.bias" in state_dict:
-            del state_dict["post_merger.bias"]
         model.conditional.load_state_dict(state_dict, strict=False)
         # don't let the controller reset the parameters on the first epoch!
         model.conditional.reset_parameters = lambda *args, **kwargs: None
-        if model.conditional.lstm is not None:
-            # double checking that loading the state dict does not decouple
-            # cell weights from lstm weights
-            assert (
-                model.conditional.lstm.weight_ih_l0
-                is model.conditional.cells[0].weight_ih
-            )
+    if "am_path" in options:
+        assert options.am_path is not None
+        state_dict = torch.load(options.am_path)
+        model.load_state_dict(state_dict)
     return model.to(device)
 
 
@@ -308,6 +303,7 @@ def train_lm(options, dict_):
 
     model = initialize_model(options, dict_["model"])
     model = model.conditional
+    model.add_module("post_merger", None)
     model.dropout_prob = dict_["lm"]["training"].dropout_prob
     optimizer = torch.optim.Adam(model.parameters())
 
@@ -408,6 +404,7 @@ def eval_lm(options, dict_):
 
         model = initialize_model(options, dict_["model"])
         model = model.conditional.to(options.device)
+        model.add_module("post_merger", None)
         model.load_state_dict(torch.load(options.load_path, options.device))
     else:
         print("model: arpa.lm.gz, ", end="")
@@ -445,12 +442,17 @@ def error_rates(
     loader: data.SpectEvaluationDataLoader,
     width: int,
     device: torch.device,
+    style: str,
 ):
     model.eval()
 
     total_errs = 0
     total_toks = 0
-    search = modules.BeamSearch(model, width)
+    search = (
+        modules.BeamSearch
+        if style == "beam"
+        else decoding.JointLatentLanguageModelPrefixSearch
+    )(model, width)
     rater = modules.ErrorRate(eos=config.INDEX_PAD_VALUE, norm=False)
     for feats, _, refs, feat_lens, ref_lens, _ in loader:
         # feats = feats[::3]
@@ -460,10 +462,16 @@ def error_rates(
         feat_lens, ref_lens = feat_lens.to(device), ref_lens.to(device)
         T, N = feats.shape[:2]
         prev = {"latent_input": feats, "latent_length": feat_lens}
-        hyps = search(prev, batch_size=N, max_iters=T)[0][..., 0]
-        hyps = models.extended_hist_to_conditional(
-            hyps, vocab_size=model.vocab_size - 1
-        )[0]
+        if style == "beam":
+            hyps = search(prev, batch_size=N, max_iters=T)[0][..., 0]
+            hyps = models.extended_hist_to_conditional(
+                hyps, vocab_size=model.vocab_size - 1
+            )[0]
+        else:
+            hyps, lens, _ = search(N, T, prev)
+            hyps, lens = hyps[..., 0], lens[..., 0]
+            len_mask = torch.arange(T, device=device).unsqueeze(1) >= lens
+            hyps.masked_fill_(len_mask, config.INDEX_PAD_VALUE)
         total_errs += rater(refs, hyps).sum().item()
 
     return total_errs / total_toks
@@ -624,9 +632,13 @@ def train_am(options, dict_):
             options.quiet,
         )
         if not options.quiet:
-            print("Epoch completed. Deteriming dev error rate...", file=sys.stderr)
+            print("Epoch completed. Determining dev error rate...", file=sys.stderr)
         dev_er = error_rates(
-            model, dev_loader, dict_["am"]["decoding"].beam_width, options.device
+            model,
+            dev_loader,
+            dict_["am"]["decoding"].beam_width,
+            options.device,
+            dict_["am"]["decoding"].style,
         )
         controller.update_for_epoch(model, optimizer, train_loss, dev_er, epoch)
         if not options.quiet:
@@ -654,6 +666,42 @@ def train_am(options, dict_):
 
     state_dict = model.state_dict()
     torch.save(state_dict, options.save_path)
+
+
+def decode_am(options, dict_):
+    test_dir = os.path.join(options.data_dir, "test")
+    num_data_workers = min(get_num_avail_cores() - 1, 4)
+
+    model = initialize_model(options, dict_["model"])
+    model.eval()
+    search = (
+        modules.BeamSearch
+        if dict_["am"]["decoding"].style == "beam"
+        else decoding.JointLatentLanguageModelPrefixSearch
+    )(model, dict_["am"]["decoding"].beam_width)
+
+    test_loader = data.SpectEvaluationDataLoader(
+        test_dir,
+        dict_["am"]["data"]["test"],
+        batch_first=False,
+        num_workers=num_data_workers,
+    )
+    for feats, _, _, feat_lens, _, uttids in test_loader:
+        feats, feat_lens = feats.to(options.device), feat_lens.to(options.device)
+        T, N = feats.shape[:2]
+        prev = {"latent_input": feats, "latent_length": feat_lens}
+        if dict_["am"]["decoding"].style == "beam":
+            hyps = search(prev, batch_size=N, max_iters=T)[0][..., 0]
+            hyps, lens = models.extended_hist_to_conditional(
+                hyps, vocab_size=model.vocab_size - 1
+            )
+        else:
+            hyps, lens, _ = search(N, T, prev)
+            hyps, lens = hyps[..., 0], lens[..., 0]
+        hyps, lens = hyps.cpu(), lens.cpu()
+        for hyp, len, uttid in zip(hyps.T, lens.T, uttids):
+            hyp = hyp[:len]
+            torch.save(hyp, f"{options.hyp_dir}/{uttid}.pt")
 
 
 def main(args=None):
@@ -689,6 +737,10 @@ def main(args=None):
         "--pretrained-lm-path", type=argparse.FileType("rb"), default=None
     )
 
+    decode_am_parser = subparsers.add_parser("decode_am")
+    decode_am_parser.add_argument("am_path", type=argparse.FileType("rb"))
+    decode_am_parser.add_argument("hyp_dir", type=DirType("w"))
+
     options = parser.parse_args(args)
 
     if options.seed is not None:
@@ -700,6 +752,8 @@ def main(args=None):
         return eval_lm(options, dict_)
     elif options.command == "train_am":
         return train_am(options, dict_)
+    elif options.command == "decode_am":
+        return decode_am(options, dict_)
 
 
 if __name__ == "__main__":
