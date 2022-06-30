@@ -36,10 +36,10 @@ python asr.py data/timit \
   train_am exp/timit/dummy/am/final.pt \
     --pretrained-lm-path exp/timit/dummy/lm/final.pt
 
-python asr.py data/timit \
-  --read-yaml conf/dummy.yml \
-  --device cuda \
-  train_am /dev/null
+# python asr.py data/timit \
+#   --read-yaml conf/dummy.yml \
+#   --device cuda \
+#   train_am /dev/null
 
 python asr.py data/timit \
   --read-yaml conf/dummy.yml \

@@ -65,7 +65,16 @@ class MergeParams(param.Parameterized):
 class AcousticModelTrainingStateParams(training.TrainingStateParams):
     estimator = param.ObjectSelector(
         "direct",
-        objects=["direct", "marginal", "partial-indep", "srswor", "ais-c", "ais-g"],
+        objects=[
+            "direct",
+            "marginal",
+            "partial-indep",
+            "srswor",
+            "ais-c",
+            "ais-g",
+            "sf-biased",
+            "sf-is",
+        ],
     )
     mc_samples = param.Integer(1, bounds=(1, None))
     mc_burn_in = param.Integer(1, bounds=(1, None))
@@ -534,6 +543,7 @@ def train_am_for_epoch(
                 "input": feats,
                 "post": feats,
                 "length": feat_lens,
+                "given": ref_lens,
             }
             v = 0
             if estimator_name == "partial-indep":
@@ -544,19 +554,34 @@ def train_am_for_epoch(
                 dist = distributions.ConditionalBernoulli(ref_lens, logits=logits.T)
                 v = distributions.PoissonBinomial(logits=logits.T).log_prob(ref_lens)
             else:
-                walk = modules.RandomWalk(model.latent)
+                if estimator_name == "sf-biased":
+                    model_ = models.SuffixForcingWrapper(model.latent, "length")
+                    walk = modules.RandomWalk(model_)
+                else:
+                    walk = modules.RandomWalk(model.latent)
                 dist = pdistributions.SequentialLanguageModelDistribution(
-                    walk, N, prev, T, True
+                    walk,
+                    N,
+                    prev,
+                    T,
+                    estimator_name in {"direct", "partial-indep", "sf-biased"},
                 )
-            if estimator_name in {"direct", "partial-indep"}:
+            if estimator_name in {"direct", "partial-indep", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(
                     dist, func, params.mc_samples, is_log=True
                 )
                 # estimator = estimators.SerialMCWrapper(estimator)
-            elif estimator_name == "srswor":
-                proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                    ref_lens, feat_lens, T
-                )
+            elif estimator_name in {"srswor", "sf-is"}:
+                if estimator_name == "srswor":
+                    proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
+                        ref_lens, feat_lens, T
+                    )
+                else:
+                    model_ = models.SuffixForcingWrapper(model.latent, "length")
+                    walk = modules.RandomWalk(model_)
+                    proposal = pdistributions.SequentialLanguageModelDistribution(
+                        walk, N, prev, T, True
+                    )
                 estimator = pestimators.ImportanceSamplingEstimator(
                     proposal, func, params.mc_samples, dist, is_log=True,
                 )

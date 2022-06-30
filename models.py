@@ -16,7 +16,7 @@
 
 import itertools
 
-from typing import Dict, Optional, Type, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import param
@@ -33,107 +33,94 @@ import distributions
 StateDict = Dict[str, torch.Tensor]
 
 
-def build_suffix_forcing(
-    cls: Type[SequentialLanguageModel],
-    total_count_name: str = "total",
-    given_count_name: str = "given",
-) -> Type[SequentialLanguageModel]:
-    if not issubclass(cls, SequentialLanguageModel):
-        raise ValueError(f"Class {cls.__name__} is not a SequentialLanguageModel")
+class SuffixForcingWrapper(SequentialLanguageModel):
 
-    class _SuffixForcing(cls):
-        f"""Fixed cardinality version of {cls.__name__}"""
+    lm: SequentialLanguageModel
+    total_count_name: str
+    given_count_name: str
 
-        __constants__ = ["_tn", "_gn"]
-        if hasattr(cls, "__constants__"):
-            __constants__ += cls.__constants__
+    def __init__(
+        self,
+        lm: SequentialLanguageModel,
+        total_count_name: str = "total",
+        given_count_name: str = "given",
+    ):
+        super().__init__(lm.vocab_size)
+        self.lm = lm
+        self.total_count_name = total_count_name
+        self.given_count_name = given_count_name
 
-        _tn = total_count_name
-        _gn = given_count_name
+    def update_input(self, prev: StateDict, hist: torch.Tensor) -> StateDict:
+        total, given = prev[self.total_count_name], prev[self.given_count_name]
+        prev = self.lm.update_input(prev, hist)
+        prev[self.total_count_name], prev[self.given_count_name] = total, given
+        return prev
 
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            if self.vocab_size != 2:
-                raise ValueError(f"vocab_size must be 2, got {self.vocab_size}")
+    def extract_by_src(self, prev: StateDict, src: torch.Tensor) -> StateDict:
+        prev = self.lm.extract_by_src(prev, src)
+        total, given = prev[self.total_count_name], prev[self.given_count_name]
+        total, given = total.index_select(0, src), given.index_select(0, src)
+        prev[self.total_count_name], prev[self.given_count_name] = total, given
+        return prev
 
-        if hasattr(cls, "extract_by_src"):
+    def mix_by_mask(
+        self, prev_true: StateDict, prev_false: StateDict, mask: torch.Tensor,
+    ) -> StateDict:
+        prev = super().mix_by_mask(prev_true, prev_false)
+        total = prev_true[self.total_count_name]
+        given = prev_true[self.given_count_name]
+        # assert (total == prev_false[self.total_count_name]).all()
+        # assert (given == prev_false[self.given_count_name]).all()
+        prev[self.total_count_name], prev[self.given_count_name] = total, given
+        return prev
 
-            def extract_by_src(
-                self, prev: Dict[str, torch.Tensor], src: torch.Tensor
-            ) -> Dict[str, torch.Tensor]:
-                total, given = prev[self._tn], prev[self._gn]
-                new_prev = super().extract_by_src(prev, src)
-                total, given = total.index_select(0, src), given.index_select(0, src)
-                new_prev[self._tn], new_prev[self._gn] = total, given
-                return new_prev
+    def calc_idx_log_probs(
+        self, hist: torch.Tensor, prev: StateDict, idx: torch.Tensor
+    ) -> Tuple[torch.Tensor, StateDict]:
+        total, given = prev[self.total_count_name], prev[self.given_count_name]
+        logits, cur = self.lm.calc_idx_log_probs(hist, prev, idx)
+        N = hist.size(1)
+        device = hist.device
+        hist = torch.cat([torch.zeros((1, N), device=device, dtype=torch.long), hist])
+        count = hist.cumsum(0).gather(0, idx.expand(1, N)).squeeze(0)
+        remaining_count = given - count
+        remaining_space = total - idx
+        force_low = (remaining_count <= 0).unsqueeze(1)
+        force_high = (remaining_count == remaining_space).unsqueeze(1) & ~force_low
+        high_config = torch.tensor([config.EPS_NINF, config.EPS_0], device=device)
+        low_config = torch.tensor([config.EPS_0, config.EPS_NINF], device=device)
+        logits = (
+            (~force_low & ~force_high) * logits
+            + force_low * low_config
+            + force_high * high_config
+        )
+        cur[self.total_count_name] = total
+        cur[self.given_count_name] = given
+        return logits, cur
 
-        if hasattr(cls, "mix_by_mask"):
-
-            def mix_by_mask(
-                self, prev_true: StateDict, prev_false: StateDict, mask: torch.Tensor,
-            ) -> StateDict:
-                total, given = prev_true[self._tn], prev_true[self._gn]
-                assert (total == prev_false[self._tn]).all()
-                assert (given == prev_false[self._gn]).all()
-                new_prev = super().mix_by_mask(prev_true, prev_false)
-                new_prev[self._tn], new_prev[self._gn] = total, given
-                return new_prev
-
-        def calc_idx_log_probs(
-            self, hist: torch.Tensor, prev: StateDict, idx: torch.Tensor
-        ) -> Tuple[torch.Tensor, StateDict]:
-            total, given = prev[self._tn], prev[self._gn]
-            logits, cur = super().calc_idx_log_probs(hist, prev, idx)
-            N = hist.size(1)
-            device = hist.device
-            hist = torch.cat(
-                [torch.zeros((1, N), device=device, dtype=torch.long), hist]
-            )
-            count = hist.cumsum(0).gather(0, idx.expand(1, N)).squeeze(0)
-            remaining_count = given - count
-            remaining_space = total - idx
-            force_low = (remaining_count <= 0).unsqueeze(1)
-            force_high = (remaining_count == remaining_space).unsqueeze(1) & ~force_low
-            high_config = torch.tensor([config.EPS_NINF, config.EPS_0], device=device)
-            low_config = torch.tensor([config.EPS_0, config.EPS_NINF], device=device)
-            logits = (
-                (~force_low & ~force_high) * logits
-                + force_low * low_config
-                + force_high * high_config
-            )
-            cur[self._tn] = total
-            cur[self._gn] = given
-            return logits, cur
-
-        def calc_full_log_probs(
-            self, hist: torch.Tensor, prev: StateDict
-        ) -> torch.Tensor:
-            total, given = prev[self._tn], prev[self._gn]
-            logits = super().calc_full_log_probs(hist, prev)
-            T, N = hist.shape
-            device = hist.device
-            # prepend 0 to hist (for empty prefix count)
-            hist = torch.cat(
-                [torch.zeros((1, N), device=device, dtype=torch.long), hist]
-            )
-            # set values of hist beyond total to zero (should be padding)
-            idx = torch.arange(-1, T, device=device)
-            hist.masked_fill_(idx.unsqueeze(1) >= total, 0)
-            count = hist.cumsum(0)
-            remaining_count = given.unsqueeze(0) - count
-            remaining_space = total.unsqueeze(0) - (idx + 1).unsqueeze(1)
-            force_low = (remaining_count <= 0).unsqueeze(2)
-            force_high = (remaining_count == remaining_space).unsqueeze(2) & ~force_low
-            high_config = torch.tensor([config.EPS_NINF, config.EPS_0], device=device)
-            low_config = torch.tensor([config.EPS_0, config.EPS_NINF], device=device)
-            logits = (
-                (~force_low & ~force_high) * logits
-                + force_low * low_config
-                + force_high * high_config
-            )
-            return logits
-
-    return _SuffixForcing
+    def calc_full_log_probs(self, hist: torch.Tensor, prev: StateDict) -> torch.Tensor:
+        total, given = prev[self.total_count_name], prev[self.given_count_name]
+        logits = self.lm.calc_full_log_probs(hist, prev)
+        T, N = hist.shape
+        device = hist.device
+        # prepend 0 to hist (for empty prefix count)
+        hist = torch.cat([torch.zeros((1, N), device=device, dtype=torch.long), hist])
+        # set values of hist beyond total to zero (should be padding)
+        idx = torch.arange(-1, T, device=device)
+        hist.masked_fill_(idx.unsqueeze(1) >= total, 0)
+        count = hist.cumsum(0)
+        remaining_count = given.unsqueeze(0) - count
+        remaining_space = total.unsqueeze(0) - (idx + 1).unsqueeze(1)
+        force_low = (remaining_count <= 0).unsqueeze(2)
+        force_high = (remaining_count == remaining_space).unsqueeze(2) & ~force_low
+        high_config = torch.tensor([config.EPS_NINF, config.EPS_0], device=device)
+        low_config = torch.tensor([config.EPS_0, config.EPS_NINF], device=device)
+        logits = (
+            (~force_low & ~force_high) * logits
+            + force_low * low_config
+            + force_high * high_config
+        )
+        return logits
 
 
 def extended_hist_to_conditional(
@@ -813,7 +800,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
 ## TESTS
 
 
-def test_build_suffix_forcing():
+def test_suffix_forcing():
     from scipy.special import betainc
     from pydrobert.torch.modules import RandomWalk
     from pydrobert.torch.distributions import SequentialLanguageModelDistribution
@@ -853,8 +840,8 @@ def test_build_suffix_forcing():
     T, N, M = 5, 10, 2 ** 13
     zero = torch.zeros(1)
     uniform_binary = UniformBinary()
-    walk = RandomWalk(uniform_binary, max_iters=T)
-    dist = SequentialLanguageModelDistribution(walk, N)
+    walk = RandomWalk(uniform_binary)
+    dist = SequentialLanguageModelDistribution(walk, N, max_iters=T)
     support = dist.enumerate_support()
     log_probs = dist.log_prob(support)
     assert log_probs.shape == (2 ** T, N)
@@ -866,10 +853,10 @@ def test_build_suffix_forcing():
     total = torch.randint(T + 1, (N,))
     given = (torch.rand(N) * (total + 1)).long()
     assert (given <= total).all()
-    suffix_forcing = build_suffix_forcing(UniformBinary)()
-    walk = RandomWalk(suffix_forcing, max_iters=T)
+    suffix_forcing = SuffixForcingWrapper(uniform_binary)
+    walk = RandomWalk(suffix_forcing)
     dist = SequentialLanguageModelDistribution(
-        walk, N, {"total": total, "given": given}
+        walk, N, {"total": total, "given": given}, max_iters=T
     )
     log_probs = dist.log_prob(support)
     assert log_probs.shape == (2 ** T, N)
@@ -988,8 +975,8 @@ def test_joint_latent_model():
     latent = DummyLatent()
     conditional = DummyConditional(V)
     joint = JointLatentLanguageModel(latent, conditional)
-    walk = RandomWalk(joint, max_iters=T)
-    dist = SequentialLanguageModelDistribution(walk)
+    walk = RandomWalk(joint)
+    dist = SequentialLanguageModelDistribution(walk, max_iters=T)
     support = dist.enumerate_support()
     assert support.shape == ((V + 1) ** T, T)
     assert (support == V).any()
@@ -1125,9 +1112,9 @@ def test_joint_latent_lstm_lm():
                 )
                 tok = torch.randint(V, (T // 2, N))
                 given_count = torch.randint(1, T // 2 + 1, (N,))
-                walk = _m.RandomWalk(lm.latent, max_iters=T)
+                walk = _m.RandomWalk(lm.latent)
                 dist = _d.SequentialLanguageModelDistribution(
-                    walk, N, {"input": in_}, cache_samples=True
+                    walk, N, {"input": in_}, cache_samples=True, max_iters=T
                 )
                 proposal = _d.SimpleRandomSamplingWithoutReplacement(given_count, T)
 
@@ -1150,7 +1137,7 @@ def test_joint_latent_lstm_lm():
                 estimator = _e.ImportanceSamplingEstimator(
                     proposal, func, M, dist, is_log=True
                 )
-                act = estimator().log()
+                act = estimator()
 
                 exp = lm.calc_marginal_log_likelihoods(tok, given_count, prev)
                 assert torch.allclose(exp, act, atol=1e-2)
