@@ -362,6 +362,8 @@ class LstmLm(MixableSequentialLanguageModel):
     ):
         if params is None:
             params = LstmLmParams()
+        # FIXME(sdrobert): bad coding
+        self._params = params
         using_names = [
             input_name,
             post_input_name,
@@ -753,7 +755,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         hidden = hidden.transpose(0, 1)
         hidden_mask = cond_lens.unsqueeze(1) > torch.arange(Lmax, device=hidden.device)
         hidden_ = hidden.masked_select(latent_hist_.unsqueeze(2).expand(N, T, H))
-        hidden = hidden.new_empty((N, Lmax, H)).masked_scatter(
+        hidden = hidden.new_zeros((N, Lmax, H)).masked_scatter(
             hidden_mask.unsqueeze(2).expand(N, Lmax, H), hidden_
         )
         hidden = hidden.transpose(0, 1)

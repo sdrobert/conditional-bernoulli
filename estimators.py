@@ -40,27 +40,58 @@ class FixedCardinalityGibbsStatistic(object):
         self.density = density
         self.is_log = is_log
 
-    def __call__(self, b: torch.Tensor) -> torch.Tensor:
-        T, device = b.size(-1), b.device
-        b = b.float()
+    @torch.no_grad()
+    def __call__(self, b: torch.Tensor, chunk_size: int = 64) -> torch.Tensor:
+        T, D, device = b.size(-1), b.dim(), b.device
         reps = torch.eye(T, device=device)
         reps = reps.unsqueeze(0) - reps.unsqueeze(1)
-        reps = reps.view((T ** 2,) + (1,) * (b.dim() - 1) + (T,))
+        reps = reps.view((T ** 2,) + (1,) * (D - 1) + (T,))
         b_ = reps + b
         keep_mask = (b_ != 2).all(-1) & (b_ != -1).all(-1)
         keep_mask[T + 1 :: T + 1] = False  # only calculate the original values once
         b_ = b_[keep_mask]
-        ll_ = self.func(b_).detach()
-        if not self.is_log:
-            ll_ = ll_.abs_().log_()
-        ll_ += self.density.log_prob(b_).detach()
+        if D > 1:
+            keep_mask_lens = keep_mask.sum(0)
+            len_mask = torch.arange(keep_mask_lens.max(), device=device).view(
+                (-1,) + (1,) * keep_mask_lens.dim()
+            ) < keep_mask_lens.unsqueeze(0)
+            b_ = torch.zeros(
+                len_mask.shape + (T,), device=device, dtype=b_.dtype
+            ).masked_scatter_(len_mask.unsqueeze(-1).expand(len_mask.shape + (T,)), b_)
+        ll_ = torch.zeros_like(b_[..., 0])
+        for idx in range(0, b_.size(0), chunk_size):
+            b_i = b_[idx : idx + chunk_size]
+            ll_i = self.func(b_i)
+            if not self.is_log:
+                ll_i = ll_i.abs_().log_()
+            ll_i += self.density.log_prob(b_i)
+            ll_[idx : idx + chunk_size] = ll_i
+        if D > 1:
+            ll_ = ll_[len_mask]
         ll = torch.full(keep_mask.shape, -float("inf"), device=device)
         ll.masked_scatter_(keep_mask, ll_)
+        ll = ll.movedim(0, -1)
         # the likelihood of the original value only applies when the binary value
         # was high in the original sample
-        ll[:: T + 1] = ll[0].masked_fill(~(b.bool()), -float("inf"))
-        h = ll.movedim(0, -1).unflatten(-1, (T, T)).softmax(-1).nan_to_num_(0)
-        return h.sum(-2)
+        ll[..., :: T + 1] = ll[..., :1].masked_fill(b == 0, -float("inf"))
+        h = ll.unflatten(-1, (T, T)).softmax(-1).nan_to_num_(0).sum(-2)
+        return h
+
+
+class ConditionalBernoulliProposalMaker(object):
+
+    eps: float
+
+    def __init__(
+        self, given_count: torch.Tensor, eps: float = torch.finfo(torch.float).eps
+    ):
+        self.eps = eps
+        self.given_count = given_count
+
+    def __call__(self, h_n: torch.Tensor, n: int) -> distributions.ConditionalBernoulli:
+        return distributions.ConditionalBernoulli(
+            self.given_count, h_n.clamp(self.eps, 1 - self.eps)
+        )
 
 
 class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
@@ -150,6 +181,40 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
             v = torch.cat(lomegas).logsumexp(0) - math.log(self.mc_samples)
         else:
             v = torch.cat(omegas).mean(0)
+        return v
+
+
+class SerialMCWrapper(_e.MonteCarloEstimator):
+
+    wrapped: _e.MonteCarloEstimator
+    chunk_size: int
+
+    def __init__(self, wrapped: _e.MonteCarloEstimator, chunk_size: int = 1) -> None:
+        super().__init__(
+            wrapped.proposal, wrapped.func, wrapped.mc_samples, wrapped.is_log
+        )
+        self.chunk_size = chunk_size
+        self.wrapped = wrapped
+
+    def __call__(self) -> torch.Tensor:
+        try:
+            v = None
+            remainder = self.mc_samples
+            while remainder:
+                cur_chunk_size = min(remainder, self.chunk_size)
+                self.wrapped.mc_samples = cur_chunk_size
+                v_cur = self.wrapped() * cur_chunk_size
+                if v is None:
+                    v = v_cur
+                elif self.is_log:
+                    v = v + (v_cur - v).exp().log1p()
+                else:
+                    v = v + v_cur
+                remainder -= cur_chunk_size
+                del v_cur
+            v = v / self.mc_samples
+        finally:
+            self.wrapped.mc_samples = self.mc_samples
         return v
 
 
@@ -296,17 +361,14 @@ def test_ais_imh():
 
 def test_fixed_cardinality_gibbs_statistic():
     torch.manual_seed(2)
-    T, L = 10, 3
-    logits = torch.randn(T)
-    func = lambda x: torch.zeros_like(x)[..., 0]
-    density = distributions.ConditionalBernoulli(L, logits=logits)
+    N, T = 5, 10
+    L = torch.randint(T + 1, (N,))
+    logits = torch.randn(N, T)
+    func = lambda x: torch.zeros(x.shape[:-1])
+    density = distributions.ConditionalBernoulli(L, logits=logits, validate_args=False)
     gibbs = FixedCardinalityGibbsStatistic(func, density, True)
-    b = _f.enumerate_binary_sequences_with_cardinality(T, L)
+    b = _f.enumerate_binary_sequences(T).unsqueeze(1).expand(-1, N, T)
     probs = density.log_prob(b).exp()
-    act = 0
-    for b_, prob in zip(b, probs):
-        act += gibbs(b_) * prob
-    indicator_mask = (b.unsqueeze(0) * torch.eye(T).unsqueeze(1)).sum(2)
-    exp = (probs.expand(T, *probs.shape) * indicator_mask).sum(1)
-    assert exp.shape == act.shape
-    assert torch.allclose(exp, act)
+    assert torch.allclose(probs.sum(0), torch.tensor(1.0))
+    act = (gibbs(b) * probs.unsqueeze(-1)).sum(0)
+    assert torch.allclose(act, density.mean)

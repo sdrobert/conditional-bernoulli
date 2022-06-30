@@ -39,6 +39,8 @@ class PoissonBinomial(torch.distributions.Distribution):
         "logits": constraints.real_vector,
     }
 
+    has_enumerate_support = True
+
     def __init__(
         self,
         probs: Optional[torch.Tensor] = None,
@@ -59,6 +61,14 @@ class PoissonBinomial(torch.distributions.Distribution):
     @constraints.dependent_property(is_discrete=True, event_dim=0)
     def support(self):
         return constraints.integer_interval(0, self._param.size(-1))
+
+    def enumerate_support(self, expand=True) -> torch.Tensor:
+        total = self.event_shape[0]
+        support = torch.arange(total + 1, device=self._param.device, dtype=torch.float)
+        support = support.view((-1,) + (1,) * self.batch_shape)
+        if expand:
+            support = support.expand((-1,) + self.batch_shape)
+        return support
 
     @lazy_property
     def probs(self):
@@ -127,7 +137,7 @@ class PoissonBinomial(torch.distributions.Distribution):
         probs = self.probs
         probs = probs.expand(shape + probs.shape[-1:])
         with torch.no_grad():
-            sample = torch.bernoulli(probs).long().sum(-1)
+            sample = torch.bernoulli(probs).sum(-1)
         return sample
 
     def log_prob(self, value: torch.Tensor):
@@ -136,7 +146,7 @@ class PoissonBinomial(torch.distributions.Distribution):
         shape = value.shape
         log_r = self.log_r
         log_r = log_r.log_softmax(-1).expand(shape + log_r.shape[-1:])
-        return log_r.gather(-1, value.unsqueeze(-1)).squeeze(-1)
+        return log_r.gather(-1, value.long().unsqueeze(-1)).squeeze(-1)
 
 
 @torch.jit.script_if_tracing
@@ -198,7 +208,7 @@ def _extended_conditional_bernoulli(
     drange = torch.arange(diffmax)
     lmax_max = r_f.size(0) - 1
     tau_ellp1 = torch.full((N, 1), diffmax)
-    b = torch.zeros((N, T), device=device, dtype=torch.long)
+    b = torch.zeros((N, T), device=device, dtype=torch.float)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -224,11 +234,11 @@ def _log_extended_conditional_bernoulli(
     device = logits_f.device
     lmax_max, N, diffmax = logits_f.size()
     remainder = given_count
-    nrange = torch.arange(N)
-    drange = torch.arange(diffmax)
+    nrange = torch.arange(N, device=device)
+    drange = torch.arange(diffmax, device=device)
     lmax_max = log_r_f.size(0) - 1
-    tau_ellp1 = torch.full((N, 1), diffmax)
-    b = torch.zeros((N, T), device=device, dtype=torch.long)
+    tau_ellp1 = torch.full((N, 1), diffmax, device=device)
+    b = torch.zeros((N, T), device=device, dtype=torch.float)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -293,7 +303,9 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
             )
         total = self._event_shape[0]
         given = int(self.given_count.flatten()[0].item())
-        support = _f.enumerate_binary_sequences_with_cardinality(total, given)
+        support = _f.enumerate_binary_sequences_with_cardinality(
+            total, given, dtype=torch.float
+        )
         support = support.view((-1,) + (1,) * len(self.batch_shape) + (total,))
         if expand:
             support = support.expand((-1,) + self.batch_shape + (total,))
@@ -444,7 +456,11 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         if self._validate_args:
             self._validate_sample(value)
-        num = (value * self.logits.expand_as(value)).sum(-1)
+        num = (
+            (value * self.logits.expand_as(value))
+            .sum(-1)
+            .masked_fill(value.sum(-1) != self.given_count, config.EPS_NINF)
+        )
         return num - self.log_partition
 
     def marginal_log_likelihoods(
@@ -487,7 +503,7 @@ def test_poisson_binomial():
     p_ = p_.masked_fill(total_count.unsqueeze(1) <= torch.arange(T), 0)
     poisson_binom = PoissonBinomial(probs=p_)
     b = poisson_binom.sample([M])
-    mean = b.float().mean(0)
+    mean = b.mean(0)
     assert torch.allclose(mean, p * total_count, atol=1e-2)
 
     log_prob_act = poisson_binom.log_prob(b).t()

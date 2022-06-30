@@ -64,7 +64,8 @@ class MergeParams(param.Parameterized):
 
 class AcousticModelTrainingStateParams(training.TrainingStateParams):
     estimator = param.ObjectSelector(
-        "direct", objects=["direct", "marginal", "partial-indep", "srswor"]
+        "direct",
+        objects=["direct", "marginal", "partial-indep", "srswor", "ais-c", "ais-g"],
     )
     mc_samples = param.Integer(1, bounds=(1, None))
     mc_burn_in = param.Integer(1, bounds=(1, None))
@@ -175,9 +176,10 @@ def construct_default_param_dict():
         },
         "am": {
             "data": {
-                "train": data.SpectDataLoaderParams(name="am.data.train"),
-                "dev": data.SpectDataLoaderParams(name="am.data.dev"),
-                "test": data.SpectDataLoaderParams(name="am.data.test"),
+                "train": data.SpectDataParams(name="am.data.train"),
+                "dev": data.SpectDataParams(name="am.data.dev"),
+                "test": data.SpectDataParams(name="am.data.test"),
+                "loader": data.DynamicLengthDataLoaderParams(name="am.data.loader"),
             },
             "training": AcousticModelTrainingStateParams(name="am.training"),
             "decoding": DecodingParams(name="am.decoding"),
@@ -533,14 +535,15 @@ def train_am_for_epoch(
                 "post": feats,
                 "length": feat_lens,
             }
+            v = 0
             if estimator_name == "partial-indep":
-                logits = model.latent.calc_all_logits(
-                    prev, model.latent.calc_all_hidden(prev)
-                )
+                prev_latent = model.latent.update_input(prev, refs)
+                hidden = model.latent.calc_all_hidden(prev_latent)
+                logits = model.latent.calc_all_logits(prev_latent, hidden)
                 logits = logits[..., 1] - logits[..., 0]
                 dist = distributions.ConditionalBernoulli(ref_lens, logits=logits.T)
+                v = distributions.PoissonBinomial(logits=logits.T).log_prob(ref_lens)
             else:
-
                 walk = modules.RandomWalk(model.latent)
                 dist = pdistributions.SequentialLanguageModelDistribution(
                     walk, N, prev, T, True
@@ -549,16 +552,44 @@ def train_am_for_epoch(
                 estimator = pestimators.DirectEstimator(
                     dist, func, params.mc_samples, is_log=True
                 )
+                # estimator = estimators.SerialMCWrapper(estimator)
             elif estimator_name == "srswor":
                 proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
                     ref_lens, feat_lens, T
                 )
                 estimator = pestimators.ImportanceSamplingEstimator(
-                    proposal, func, params.mc_samples, dist, is_log=True
+                    proposal, func, params.mc_samples, dist, is_log=True,
+                )
+                # estimator = estimators.SerialMCWrapper(estimator)
+            elif estimator_name.startswith("ais-"):
+                proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
+                    ref_lens, feat_lens, T
+                )
+                maker = estimators.ConditionalBernoulliProposalMaker(ref_lens)
+                density = pdistributions.SequentialLanguageModelDistribution(
+                    walk, N, prev, T
+                )
+                if estimator_name == "ais-c":
+                    adaptation_func = lambda x: x
+                elif estimator_name == "ais-g":
+                    adaptation_func = estimators.FixedCardinalityGibbsStatistic(
+                        func, density, True
+                    )
+                else:
+                    assert False
+                estimator = estimators.AisImhEstimator(
+                    proposal,
+                    func,
+                    params.mc_samples,
+                    density,
+                    adaptation_func,
+                    maker,
+                    params.mc_burn_in,
+                    is_log=True,
                 )
             else:
                 assert False
-            v = estimator()
+            v = v + estimator()
         else:
             prev = {
                 "latent_input": feats,
@@ -568,11 +599,11 @@ def train_am_for_epoch(
             v = model.calc_marginal_log_likelihoods(refs, ref_lens, prev)
 
         loss = -v.mean()
-        total_loss += loss.item()
+        total_loss += loss.detach() * N
         loss.backward()
         optimizer.step()
 
-    return total_loss
+    return total_loss.item()
 
 
 def train_am(options, dict_):
@@ -602,7 +633,8 @@ def train_am(options, dict_):
 
     train_loader = data.SpectTrainingDataLoader(
         train_dir,
-        dict_["am"]["data"]["train"],
+        dict_["am"]["data"]["loader"],
+        data_params=dict_["am"]["data"]["train"],
         batch_first=False,
         pin_memory=True,
         seed=seed,
@@ -610,7 +642,8 @@ def train_am(options, dict_):
     )
     dev_loader = data.SpectEvaluationDataLoader(
         dev_dir,
-        dict_["am"]["data"]["dev"],
+        dict_["am"]["data"]["loader"],
+        data_params=dict_["am"]["data"]["dev"],
         batch_first=False,
         num_workers=num_data_workers,
     )
@@ -682,7 +715,8 @@ def decode_am(options, dict_):
 
     test_loader = data.SpectEvaluationDataLoader(
         test_dir,
-        dict_["am"]["data"]["test"],
+        dict_["am"]["data"]["loader"],
+        data_params=dict_["am"]["data"]["dev"],
         batch_first=False,
         num_workers=num_data_workers,
     )

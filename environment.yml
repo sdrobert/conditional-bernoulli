@@ -14,6 +14,7 @@ dependencies:
   - jupyter
   - pip
   - ruamel_yaml
+  - requests
   - pip:
     - "git+https://github.com/sdrobert/pydrobert-speech.git@fd0c48d9db0e4ff189f37d6f655dcac6070c70dd"
-    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@cb3eb2ef4becb03143d138c2ba3442945fc70442"
+    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@6b366f912222990f477617cc5cfb76abb0ea4a7a"
