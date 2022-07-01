@@ -1,0 +1,26 @@
+model:
+  latent:
+    hidden_size: 300
+    merge_method: mix
+    num_layers: 5
+  conditional:
+    merge_method: mix
+am:
+  data:
+    loader:
+      batch_size: 16  # Number of elements in a batch.
+      drop_last: false # Whether to drop the last batch if it does reach batch_size
+      num_length_buckets: 5 # If greater than 1, elements will be batched with other elements of similar length (along the feature time dimension). Elements will be partioned roughly evenly into num_length_buckets. Increasing num_length_buckets will usually decrease the total amount of padding per batch at the cost of fewer candidates to choose from within batches.
+      size_batch_by_length: true # Only matters when num_length_buckets > 1. If false, all buckets have the same batch size of batch_size. If true, buckets with shorter-length utterances will contain greater than batch_size elements per batch. Letting x be the batch size of a bucket, y be the length of the largest element in the bucket, and Y be the length of the largest element in the corpus, x is the greatest value such that x * y <= Y * batch_size
+  training:
+    dropout_prob: 0.0
+    mc_samples: 16
+    mc_burn_in: 8
+    early_stopping_burnin: 100  # Number of epochs before the early stopping criterion kicks in
+    early_stopping_patience: 20 # Number of epochs after which, if the classifier has failed to decrease its validation metric by a threshold, training is halted
+    early_stopping_threshold: 0.1 # Minimum magnitude decrease in validation metric from the last best that resets the early stopping clock. If zero, early stopping will never be performed
+    keep_last_and_best_only: true # If the model is being saved, keep only the model and optimizer parameters for the last and best epoch (in terms of validation loss). If False, save every epoch. See also "saved_model_fmt" and "saved_optimizer_fmt"
+    log10_learning_rate: -4
+  decoding:
+    beam_width: 16
+    style: beam  # Choices: "beam", "prefix"

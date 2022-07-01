@@ -251,9 +251,9 @@ def train_lm_for_epoch(
         loss = loss_fn(logits.flatten(0, 1), hyp.flatten())
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
+        total_loss += loss.detach() * hyp.size(1)
 
-    return total_loss
+    return total_loss.item()
 
 
 @torch.no_grad()
@@ -315,6 +315,7 @@ def train_lm(options, dict_):
     model = initialize_model(options, dict_["model"])
     model = model.conditional
     model.add_module("post_merger", None)
+    model.add_module("input_merger", None)
     model.dropout_prob = dict_["lm"]["training"].dropout_prob
     optimizer = torch.optim.Adam(model.parameters())
 
@@ -416,6 +417,7 @@ def eval_lm(options, dict_):
         model = initialize_model(options, dict_["model"])
         model = model.conditional.to(options.device)
         model.add_module("post_merger", None)
+        model.add_module("input_merger", None)
         model.load_state_dict(torch.load(options.load_path, options.device))
     else:
         print("model: arpa.lm.gz, ", end="")

@@ -1,0 +1,5 @@
+model:
+  latent:
+    embedding_size: 1  # The size of token embeddings.
+  merge:
+    cond_input_is_post: false

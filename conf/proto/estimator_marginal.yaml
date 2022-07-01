@@ -1,0 +1,3 @@
+am:
+  training:
+    estimator: marginal
