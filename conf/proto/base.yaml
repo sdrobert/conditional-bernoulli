@@ -1,19 +1,19 @@
 model:
   latent:
-    hidden_size: 300
+    hidden_size: 512
     merge_method: mix
-    num_layers: 5
+    num_layers: 3
   conditional:
     merge_method: mix
 am:
   data:
     loader:
-      batch_size: 16  # Number of elements in a batch.
+      batch_size: 32  # Number of elements in a batch.
       drop_last: false # Whether to drop the last batch if it does reach batch_size
       num_length_buckets: 5 # If greater than 1, elements will be batched with other elements of similar length (along the feature time dimension). Elements will be partioned roughly evenly into num_length_buckets. Increasing num_length_buckets will usually decrease the total amount of padding per batch at the cost of fewer candidates to choose from within batches.
       size_batch_by_length: true # Only matters when num_length_buckets > 1. If false, all buckets have the same batch size of batch_size. If true, buckets with shorter-length utterances will contain greater than batch_size elements per batch. Letting x be the batch size of a bucket, y be the length of the largest element in the bucket, and Y be the length of the largest element in the corpus, x is the greatest value such that x * y <= Y * batch_size
   training:
-    dropout_prob: 0.0
+    dropout_prob: 0.15
     mc_samples: 16
     mc_burn_in: 8
     early_stopping_burnin: 100  # Number of epochs before the early stopping criterion kicks in

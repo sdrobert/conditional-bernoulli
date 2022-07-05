@@ -9,10 +9,17 @@ device=cuda
 # models=( full indep partial )
 models=( indep )
 # estimators=( direct marginal partial-indep srswor ais-c ais-g sf-biased sf-is )
-estimators=( marginal srswor )
+estimators=( marginal )
 # lms=( lm nolm )
-lms=( lm )
+lms=( lm-flatstart lm-pretrained nolm )
 invalids=( full_marginal full_partial-indep partial_full )
+
+# special "clean" command
+if [ $stage = "clean" ]; then
+  echo "Cleaning the exp/ directory"
+  rm -rf exp/*
+  exit 0
+fi
 
 # prep the dataset
 if [ $stage -le 1 ]; then
@@ -29,9 +36,8 @@ if [ $stage -le 1 ]; then
     trn-to-torch-token-data-dir - data/timit/ext/token2id.txt data/timit/lm
 fi
 
-# construct the experiment matrix and delete any old experiment stuff
+# construct the experiment matrix
 if [ $stage -le 2 ]; then
-  rm -rf conf/matrix/* exp/timit/lm/* exp/timit/am/*
   mkdir -p conf/matrix
   for model in "${models[@]}"; do
     for estimator in "${estimators[@]}"; do
@@ -55,19 +61,19 @@ if [ $stage -le 2 ]; then
 fi
 
 # train the language models
-if [ $stage -le 3 ] && [[ "lm " =~ "${lms[*]}" ]]; then
+if [ $stage -le 3 ] && [[ "${lms[*]}" =~ "lm-pretrained" ]]; then
   mkdir -p exp/timit/lm
   python asr.py data/timit eval_lm > exp/timit/lm/results.txt
   for seed in $(seq 1 $SEEDS); do
     python asr.py data/timit \
-      --read-yaml conf/proto/lm_lm.yaml \
+      --read-yaml conf/proto/lm_lm-pretrained.yaml \
       --device $device \
       --model-dir exp/timit/lm/$seed \
       --seed $seed \
       train_lm exp/timit/lm/$seed/final.pt
 
     python asr.py data/timit \
-      --read-yaml conf/proto/lm_lm.yaml \
+      --read-yaml conf/proto/lm_lm-pretrained.yaml \
       --device $device \
       eval_lm exp/timit/lm/$seed/final.pt >> exp/timit/lm/results.txt
   done
@@ -77,10 +83,10 @@ if [ $stage -le 4 ]; then
   for yml in conf/matrix/*; do
     mname="$(echo $yml | cut -d / -f 3 | cut -d . -f 1)"
     for seed in $(seq 1 $SEEDS); do
-      mdir="exp/timit/am/$mdir/$seed"
+      mdir="exp/timit/am/$mname/$seed"
       mkdir -p "$mdir"
       xtra_args=""
-      if [[ "$mname" =~ "_lm" ]]; then
+      if [[ "$mname" =~ "_lm-pretrained" ]]; then
         xtra_args="--pretrained-lm-path exp/timit/lm/$seed/final.pt"
       fi
       python asr.py data/timit \

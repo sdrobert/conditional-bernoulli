@@ -292,6 +292,9 @@ def initialize_model(options, dict_) -> models.JointLatentLstmLm:
     if "pretrained_lm_path" in options and options.pretrained_lm_path is not None:
         state_dict = torch.load(options.pretrained_lm_path)
         model.conditional.load_state_dict(state_dict, strict=False)
+        for key, param in model.conditional.named_parameters():
+            if state_dict.get(key, None) is not None:
+                param.requires_grad = False
         # don't let the controller reset the parameters on the first epoch!
         model.conditional.reset_parameters = lambda *args, **kwargs: None
     if "am_path" in options:
@@ -415,10 +418,14 @@ def eval_lm(options, dict_):
             )
 
         model = initialize_model(options, dict_["model"])
-        model = model.conditional.to(options.device)
+        if options.full_model:
+            model.load_state_dict(torch.load(options.load_path, options.device), False)
+        model = model.conditional
         model.add_module("post_merger", None)
         model.add_module("input_merger", None)
-        model.load_state_dict(torch.load(options.load_path, options.device))
+        if not options.full_model:
+            model.load_state_dict(torch.load(options.load_path, options.device))
+        model = model.to(options.device)
     else:
         print("model: arpa.lm.gz, ", end="")
         # FIXME(sdrobert): windows
@@ -646,7 +653,7 @@ def train_am(options, dict_):
     model = initialize_model(options, dict_["model"])
     model.latent.dropout_prob = dict_["am"]["training"].dropout_prob
     model.conditional.dropout_prob = dict_["am"]["training"].dropout_prob
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.Adam(p for p in model.parameters() if p.requires_grad)
 
     if options.model_dir is not None:
         state_dir = os.path.join(options.model_dir, "training")
@@ -791,6 +798,7 @@ def main(args=None):
     eval_lm_parser.add_argument(
         "load_path", nargs="?", type=argparse.FileType("rb"), default=None
     )
+    eval_lm_parser.add_argument("--full-model", action="store_true", default=False)
 
     train_am_parser = subparsers.add_parser("train_am")
     train_am_parser.add_argument("save_path", type=argparse.FileType("wb"))

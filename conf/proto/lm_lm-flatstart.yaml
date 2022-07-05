@@ -1,0 +1,6 @@
+model:
+  conditional:
+    embedding_size: 16  # The size of token embeddings.
+    hidden_size: 128
+    merge_method: mix # How to combine inputs with embeddings or hidden vectors. mix: softmax for weights then weighted mixture; cat: concatenate. Choices: "mix", "cat"
+    num_layers: 3 # The number of LSTM layers.
