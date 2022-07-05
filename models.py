@@ -17,6 +17,7 @@
 import itertools
 
 from typing import Dict, Optional, Tuple
+from itertools import chain
 
 import torch
 import param
@@ -797,6 +798,238 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         return ll
 
 
+class FrontendParams(param.Parameterized):
+    window_size = param.Integer(
+        5,
+        bounds=(1, None),
+        softbounds=(2, 10),
+        doc="The total number of audio elements per window in time",
+    )
+    window_stride = param.Integer(
+        3,
+        bounds=(1, None),
+        softbounds=(1, 5),
+        doc="The number of audio elements over to shift for subsequent windows",
+    )
+    convolutional_kernel_time = param.Integer(
+        3,
+        bounds=(1, None),
+        softbounds=(1, 10),
+        doc="The width of convolutional kernels along the time dimension",
+    )
+    convolutional_kernel_freq = param.Integer(
+        3,
+        bounds=(1, None),
+        softbounds=(1, 20),
+        doc="The width of convolutional kernels along the frequency dimension",
+    )
+    convolutional_initial_channels = param.Integer(
+        64,
+        bounds=(1, None),
+        softbounds=(16, 64),
+        doc="The number of channels in the initial convolutional layer",
+    )
+    convolutional_layers = param.Integer(
+        5,
+        bounds=(0, None),
+        softbounds=(1, 6),
+        doc="The number of layers in the convolutional part of the network",
+    )
+    convolutional_time_factor = param.Integer(
+        2,
+        bounds=(1, None),
+        softbounds=(1, 4),
+        doc="The factor by which to reduce the size of the input along the "
+        "time dimension between convolutional layers",
+    )
+    convolutional_freq_factor = param.Integer(
+        1,
+        bounds=(1, None),
+        softbounds=(1, 2),
+        doc="The factor by which to reduce the size of the input along the "
+        "frequency dimension after convolutional_factor_schedule layers",
+    )
+    convolutional_channel_factor = param.Integer(
+        1,
+        bounds=(1, None),
+        softbounds=(1, 2),
+        doc="The factor by which to increase the size of the channel dimension after "
+        "convolutional_factor_schedule layers",
+    )
+    convolutional_factor_schedule = param.Integer(
+        2,
+        bounds=(1, None),
+        doc="The number of convolutional layers after the first layer before "
+        "we modify the size of the time and frequency dimensions",
+    )
+    convolutional_nonlinearity = param.ObjectSelector(
+        torch.nn.functional.relu,
+        objects={
+            "relu": torch.nn.functional.relu,
+            "sigmoid": torch.sigmoid,
+            "tanh": torch.tanh,
+        },
+        doc="The pointwise convolutional_nonlinearity between convolutional layers",
+    )
+    recurrent_size = param.Integer(
+        128,
+        bounds=(1, None),
+        softbounds=(64, 1024),
+        doc="The size of each recurrent layer",
+    )
+    recurrent_layers = param.Integer(
+        2,
+        bounds=(0, None),
+        softbounds=(1, 10),
+        doc="The number of recurrent layers in the recurrent part of the network",
+    )
+    recurrent_type = param.ObjectSelector(
+        torch.nn.LSTM,
+        objects={"LSTM": torch.nn.LSTM, "GRU": torch.nn.GRU, "RNN": torch.nn.RNN},
+        doc="The type of recurrent cell in the recurrent part of the network ",
+    )
+    recurrent_bidirectional = param.Boolean(
+        True, doc="Whether the recurrent layers are bidirectional"
+    )
+
+
+class Frontend(torch.nn.Module):
+    def __init__(self, freq_dim: int, params: FrontendParams):
+        super(Frontend, self).__init__()
+        self.params = params
+        self.freq_dim = freq_dim
+        self._p = 0.0
+
+        self.convs = torch.nn.ModuleList([])
+
+        x = params.window_size
+        kx = params.convolutional_kernel_time
+        ky = params.convolutional_kernel_freq
+        ci = 1
+        y = freq_dim
+        co = params.convolutional_initial_channels
+        up_c = params.convolutional_channel_factor
+        on_sy = params.convolutional_freq_factor
+        on_sx = params.convolutional_time_factor
+        px, py = (kx - 1) // 2, (ky - 1) // 2
+        off_s = 1
+        for layer_no in range(1, params.convolutional_layers + 1):
+            if (
+                layer_no % params.convolutional_factor_schedule
+            ):  # "off:" not adjusting output size
+                sx = sy = off_s
+            else:  # "on:" adjusting output size
+                sx, sy, co = on_sx, on_sy, up_c * co
+            px_ = px if (x + 2 * px - kx) // sx + 1 > 0 else px + 1
+            py_ = py if (y + 2 * py - ky) // sy + 1 > 0 else py + 1
+            self.convs.append(torch.nn.Conv2d(ci, co, (kx, ky), (sx, sy), (px_, py_)))
+            y = (y + 2 * py_ - ky) // sy + 1
+            x = (x + 2 * px_ - kx) // sx + 1
+            ci = co
+        assert x > 0 and y > 0
+        prev_size = ci * x * y
+        if params.recurrent_layers:
+            self.rnn = params.recurrent_type(
+                input_size=prev_size,
+                hidden_size=params.recurrent_size,
+                num_layers=params.recurrent_layers,
+                dropout=0.0,
+                bidirectional=params.recurrent_bidirectional,
+                batch_first=False,
+            )
+            prev_size = params.recurrent_size * (
+                2 if params.recurrent_bidirectional else 1
+            )
+        else:
+            self.rnn = None
+
+    def check_input(self, x: torch.Tensor, lens: torch.Tensor):
+        if x.dim() != 3:
+            raise RuntimeError("x must be 3-dimensional")
+        if lens.dim() != 1:
+            raise RuntimeError("lens must be 1-dimensional")
+        if x.size(2) != self.freq_dim:
+            raise RuntimeError(
+                f"Final dimension size of x {x.size(2)} != {self.freq_dim}"
+            )
+        if x.size(0) != lens.size(0):
+            str_ = f"Batch size of x ({x.size(1)}) != lens size ({lens.size(0)})"
+            if x.size(1) == lens.size(0):
+                str_ += ". (batch dimension of x should be 0, not 1)"
+            raise RuntimeError(str_)
+        if ((lens <= 0) | (lens > x.size(1))).any():
+            raise RuntimeError(f"lens must all be between [1, {lens.size(2)}]")
+
+    @property
+    def dropout_prob(self) -> float:
+        return self._p
+
+    @dropout_prob.setter
+    def dropout_prob(self, p: float):
+        self._p = p
+
+    def forward(
+        self, x: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.check_input(x, lens)
+        # zero the input past lens to ensure no weirdness
+        len_mask = (
+            torch.arange(x.size(1), device=lens.device) >= lens.unsqueeze(1)
+        ).unsqueeze(2)
+        x = x.masked_fill(len_mask, 0)
+        del len_mask
+        # we always pad by one less than the window length. This will have the effect
+        # of taking the final window if it's incomplete
+        # N.B. this has to be zero-padding b/c shorter sequences will be zero-padded.
+        if self.params.window_size > 1:
+            x = torch.nn.functional.pad(x, (0, 0, 0, self.params.window_size - 1))
+        x = x.unfold(1, self.params.window_size, self.params.window_stride).transpose(
+            2, 3
+        )  # (N, T', w, F)
+        # all lengths are positive, so trunc = floor. Assuming trunc is more efficient
+        lens_ = (
+            torch.div(lens - 1, self.params.window_stride, rounding_mode="trunc") + 1
+        )
+
+        # fuse the N and T' dimension together for now. No sense in performing
+        # convolutions on windows of entirely padding
+        x = torch.nn.utils.rnn.pack_padded_sequence(
+            x, lens_.cpu(), batch_first=True, enforce_sorted=False
+        )
+
+        x, bs, si, ui = x.data, x.batch_sizes, x.sorted_indices, x.unsorted_indices
+        x = x.unsqueeze(1)  # (N', 1, w, F)
+
+        # convolutions
+        for conv in self.convs:
+            x = self.params.convolutional_nonlinearity(conv(x))
+            x = torch.nn.functional.dropout(x, self._p, self.training)
+
+        x = x.flatten(1)  # (N', co * W * F')
+
+        # rnns
+        if self.rnn is not None:
+            self.rnn.dropout = self._p
+            x = self.rnn(
+                torch.nn.utils.rnn.PackedSequence(
+                    x, batch_sizes=bs, sorted_indices=si, unsorted_indices=ui
+                )
+            )[0].data
+
+        # unpack and return
+        x = torch.nn.utils.rnn.PackedSequence(
+            x, batch_sizes=bs, sorted_indices=si, unsorted_indices=ui
+        )
+        return torch.nn.utils.rnn.pad_packed_sequence(x, batch_first=False)[0], lens_
+
+    def reset_parameters(self):
+        if self.params.seed is not None:
+            torch.manual_seed(self.params.seed)
+        for layer in chain((self.rnn,), self.convs):
+            if layer is not None:
+                layer.reset_parameters()
+
+
 ## TESTS
 
 
@@ -1141,3 +1374,27 @@ def test_joint_latent_lstm_lm():
 
                 exp = lm.calc_marginal_log_likelihoods(tok, given_count, prev)
                 assert torch.allclose(exp, act, atol=1e-2)
+
+
+def test_frontend():
+    torch.manual_seed(5)
+
+    N, T, F, H, W, w = 30, 20, 50, 10, 3, 2
+    x = torch.randn(N, T, F)
+    lens = torch.randint(1, T + 1, (N,))
+
+    params = FrontendParams(
+        recurrent_size=H, recurrent_layers=1, recurrent_bidirectional=True
+    )
+    frontend = Frontend(F, params)
+    h, lens_ = frontend(x, lens)
+    assert h.shape[1:] == (N, 2 * H)
+    assert (lens_ <= h.size(0)).all()
+    params.recurrent_layers = 0
+    params.convolutional_layers = 0
+    params.window_size = W
+    params.window_stride = w
+    frontend = Frontend(F, params)
+    h, lens_ = frontend(x, lens)
+    assert (lens_ == ((lens - 1) / w + 1).long()).all()
+    assert h.shape == (int((T - 1) / w + 1), N, F * W)
