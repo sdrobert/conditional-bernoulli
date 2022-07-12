@@ -201,23 +201,6 @@ def construct_default_param_dict():
     }
 
 
-class DirType(object):
-
-    mode: str
-
-    def __init__(self, mode: Literal["r", "w"]):
-        super().__init__()
-        self.mode = mode
-
-    def __call__(self, path: str) -> str:
-        if self.mode == "r":
-            if not os.path.isdir(path):
-                raise TypeError(f"path '{path}' is not an existing directory")
-        else:
-            os.makedirs(path, exist_ok=True)
-        return path
-
-
 def train_lm_for_epoch(
     model: models.SequentialLanguageModel,
     loader: LanguageModelDataLoader,
@@ -743,8 +726,13 @@ def train_am(options, dict_):
 
 
 def decode_am(options, dict_):
-    test_dir = os.path.join(options.data_dir, "test")
+    test_dir = os.path.join(options.data_dir, "dev" if options.dev else "test")
     num_data_workers = min(get_num_avail_cores() - 1, 4)
+
+    if options.beam_width is not None:
+        beam_width = options.beam_width
+    else:
+        beam_width = dict_["am"]["decoding"].beam_width
 
     model = initialize_model(options, dict_["model"])
     model.eval()
@@ -752,7 +740,7 @@ def decode_am(options, dict_):
         modules.BeamSearch
         if dict_["am"]["decoding"].style == "beam"
         else decoding.JointLatentLanguageModelPrefixSearch
-    )(model, dict_["am"]["decoding"].beam_width)
+    )(model, beam_width)
 
     test_loader = data.SpectEvaluationDataLoader(
         test_dir,
@@ -778,6 +766,23 @@ def decode_am(options, dict_):
         for hyp, len, uttid in zip(hyps.T, lens.T, uttids):
             hyp = hyp[:len]
             torch.save(hyp, f"{options.hyp_dir}/{uttid}.pt")
+
+
+class DirType(object):
+
+    mode: str
+
+    def __init__(self, mode: Literal["r", "w"]):
+        super().__init__()
+        self.mode = mode
+
+    def __call__(self, path: str) -> str:
+        if self.mode == "r":
+            if not os.path.isdir(path):
+                raise TypeError(f"path '{path}' is not an existing directory")
+        else:
+            os.makedirs(path, exist_ok=True)
+        return path
 
 
 def main(args=None):
@@ -817,6 +822,8 @@ def main(args=None):
     decode_am_parser = subparsers.add_parser("decode_am")
     decode_am_parser.add_argument("am_path", type=argparse.FileType("rb"))
     decode_am_parser.add_argument("hyp_dir", type=DirType("w"))
+    decode_am_parser.add_argument("--dev", action="store_true", default=False)
+    decode_am_parser.add_argument("--beam-width", type=int, default=None)
 
     options = parser.parse_args(args)
 

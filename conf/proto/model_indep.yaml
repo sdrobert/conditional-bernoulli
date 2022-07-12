@@ -3,3 +3,6 @@ model:
     embedding_size: 0  # The size of token embeddings.
   merge:
     cond_input_is_post: true
+am:
+  decoding:
+    stye: prefix

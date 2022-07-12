@@ -12,7 +12,7 @@ what everything is.
 
 This is not a proper Python package. Commands are expected to be run directly
 from the directory this file is contained in. A Conda Python environment called
-`conditional-bernoulli` with the necessary dependencies (and unnecessary ones,
+`conditional-bernoulli` with the necessary dependencies (and unnecessary ones;
 anything used anywhere in this repo) can be installed with the command
 
 ``` sh
@@ -24,33 +24,38 @@ install via PyPI.
 
 ## Running
 
-If you are interested in just the descriptive statistics of the experiment (as
-well as how I generated the tables and figures), open up the Jupyter notebook
-`df_vis.ipynb`. Results per iteration are stored in `res/df.*.csv.gz` as
-gzipped CSV files if you want to look at the data directly.
+### TIMIT
 
-`df_bernoulli.py` contains the command-line interface for training a single
-Drezner & Farnum statistical model to match an objective.
+The TIMIT recipe can be found in `timit.sh`. Running
 
 ``` sh
-python df_bernoulli.py --print-ini > df.ini  # store default config
-# modify df.ini with your own parameters
-python df_bernoulli.py --read-ini df.ini out.csv  # store results in out.csv
+./timit.sh -i /path/to/timit
 ```
 
-If you want to reproduce the results found in the `res/` directory, have a look
-at `build_array.sh`. I used this script to build a SLURM array of jobs with
-different configuration files over a fixed number of seeds, then stored the
-gzipped csvs back in to the `res/` folder. You'll have to modify
-`build_array.sh` with your own cluster configuration. Then
+will train a model for every valid combination of `<model>_<estimator>_<lm>`
+and a fixed number of seeds *in sequence*.
 
-``` sh
-./build_array.sh
-sbatch ./df.sh  # runs all of them
-sbatch --array=1-3  # runs the first three configurations (see conf/df.*.ini)
-```
+`<model>` can be one of
 
-and sit back for a few days.
+- `indep`: both the latent and conditional models obey the Markov Assumption.
+- `partial`: the latent model obeys the Markov Assumption, not the conditional.
+- `full`: neither the latent nor conditional obeys the Markov Assumption.
+
+`<estimator>` can be one of
+
+- `direct`: A naive Monte Carlo estimate which draws samples directly from the
+  latent distribution (without any conditioning).
+- `marginal`: Marginalizes out the latent distribution. Only possible with the
+  `indep` model.
+- `partial`: A Monte Carlo estimate which draws from the latent distribution
+  conditioned on the number of events. Not possible for the `full` model.
+- `srswor`: A Monte Carlo Importance Sampling estimate with a proposal
+  uniformly distributed over event configurations given the number of events
+  (Simple Random Sampling WithOut Replacement).
+- `ais-c`: The AIS-IMH algorithm with sufficient statistics estimated by count.
+- `ais-g`: The AIS-IMH algorithm with sufficient statistics estimated by Gibbs
+  conditionals.
+
 
 ## Testing
 

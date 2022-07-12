@@ -13,8 +13,11 @@ Usage: $0
                   Value: '$data'
   -o PTH:         Location to store experiment artifacts.
                   Value: '$exp'
+  -b 'A [B ...]'  The beam widths to test for decoding
   -n N:           Number of repeated trials to perform.
                   Value: '$seeds'
+  -k N:           Offset (inclusive) of the seed to start from.
+                  Value: '$offset'
   -c DEVICE:      Device to run experiments on.
                   Value: '$device'
   -m 'A [B ...]': Model configurations to experiment with.
@@ -30,10 +33,15 @@ EOF
 }
 
 argcheck_nat() {
-  if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
-    echo "$0: '-$1' argument '$2' is not a natural number" 1>&2
-    usage
-  fi
+  arg="$1"
+  shift
+  while (( $# )); do
+    if ! [[ "$1" =~ ^[1-9][0-9]*$ ]]; then
+      echo "$0: '-$arg' argument '$1' is not a natural number" 1>&2
+      usage
+    fi
+    shift
+  done
 }
 
 argcheck_rdir() {
@@ -85,15 +93,16 @@ device=cuda
 models=( "${ALL_MODELS[@]}" )
 estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
+beam_widths=( 1 2 4 8 16 32 )
 only=0
 
-while getopts "xhs:S:i:d:o:n:c:m:e:l:" opt; do
+while getopts "xhs:i:d:o:b:n:k:c:m:e:l:" opt; do
   case $opt in
     s)
       argcheck_nat $opt "$OPTARG"
       stage=$OPTARG
       ;;
-    S)
+    k)
       argcheck_nat $opt "$OPTARG"
       offset=$OPTARG
       ;;
@@ -108,6 +117,10 @@ while getopts "xhs:S:i:d:o:n:c:m:e:l:" opt; do
     o)
       argcheck_writable $opt "$OPTARG"
       exp="$OPTARG"
+      ;;
+    b)
+      argcheck_nat $opt $OPTARG
+      beam_widths=( $OPTARG )
       ;;
     n)
       argcheck_nat $opt "$OPTARG"
@@ -194,6 +207,7 @@ if [ $stage -le 2 ]; then
   ((only)) && exit 0
 fi
 
+# train the acoustic models
 if [ $stage -le 3 ]; then
   for model in "${models[@]}"; do
     for estimator in "${estimators[@]}"; do
@@ -222,27 +236,77 @@ if [ $stage -le 3 ]; then
   ((only)) && exit 0
 fi
 
+# decode and compute error rates
+if [ $stage -le 4 ]; then
+  for model in "${models[@]}"; do
+    for estimator in "${estimators[@]}"; do
+      for lm in "${lms[@]}"; do
+        check_config $model $estimator $lm || continue
+        mname="${model}_${estimator}_${lm}"
+        yml="$confdir/$mname.yaml"
+        for seed in $(seq $offset $seeds); do
+          mdir="$amdir/$mname/$seed"
+          if [ ! -f "$mdir/final.pt" ]; then
+            echo "$mdir/final.pt doesn't exist (did stage 3 finish?)" 1>&2
+            exit 1
+          fi
+          for part in dev test; do
+            hdir="$mdir/hyp/$part"
+            if [ "$part" = dev ]; then
+              xtra_args=( "--dev" )
+              active_widths=( "${beam_widths[@]}" )
+            else
+              xtra_args=( )
+              active_widths=( "$(awk '
+$1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
+' "$amdir/$mname/results.dev.$seed.txt")" )
+            fi
+            for beam_width in "${active_widths[@]}"; do
+              bdir="$hdir/$beam_width"
+              mkdir -p "$bdir"
+              python asr.py "$data" \
+                --read-yaml "$yml" \
+                --device "$device" \
+                decode_am \
+                  "${xtra_args[@]}" --beam-width "$beam_width" \
+                  "$mdir/final.pt" "$bdir"
+              torch-token-data-dir-to-trn \
+                "$bdir" "$data/ext/id2token.txt" \
+                "$mdir/$part.hyp.$beam_width.utrn"
+              python prep/timit.py "$data" filter \
+                "$mdir/$part.hyp.$beam_width."{u,}trn
+            done
+            python prep/error-rates-from-trn.py \
+              "$data/ext/$part.ref.trn" "$mdir/$part.hyp."*.trn \
+              --suppress-warning > "$amdir/$mname/results.$part.$seed.txt"
+          done
+        done
+      done
+    done
+  done
+  ((only)) && exit 0
+fi
+
+# compute descriptives for all the models
+for part in dev test; do
+  for mdir in $(find "$amdir" -maxdepth 1 -mindepth 1 -type d); do
+    results=( $(find "$mdir" -name "results.$part.*.txt" -print) )
+    if [ "${#results[@]}" -gt 0 ]; then
+      echo -n "$part ${mdir##*/}: "
+      awk '
+BEGIN {n=0; s=0; min=1000; max=0}
+$1 ~ /best/ {
+  x=substr($NF, 1, length($NF) - 1);
+  a[n++]=x; s+=x; if (x < min) min=x; if (x > max) max=x;
+}
+END {
+  mean=s/n; med=a[int(n/2)];
+  var=0; for (i=0;i<n;i++) var+=(a[i] - mean) * (a[i] - mean) / n; std=sqrt(var);
+  printf "n=%d, mean=%.1f%%, std=%.1f%%, med=%.1f%%, min=%.1f%%, max=%.1f%%\n", n, mean, std, med, min, max;
+}' "${results[@]}"
+    fi
+  done
+done
+
 exit 0
-# scratch
 
-python asr.py "$data" \
-  --read-yaml conf/matrix/full_ais-g_lm.yaml \
-  --device cuda \
-  train_am /dev/null
-
-python asr.py "$data" \
-  --read-yaml conf/dummy.yml \
-  --device cuda \
-  decode_am exp/timit/dummy/am/final.pt exp/timit/dummy/hyp
-
-torch-token-data-dir-to-trn \
-  exp/timit/dummy/hyp \
-  $data/ext/id2token.txt \
-  exp/timit/dummy/test.hyp.trn
-
-python prep/timit.py data filter exp/timit/dummy/test.hyp{,.filt}.trn
-
-~/kaldi/tools/sctk/bin/sclite \
-  -r $data/ext/test.ref.trn \
-  -h exp/timit/dummy/test.hyp.filt.trn \
-  -i swb

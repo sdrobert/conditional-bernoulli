@@ -38,5 +38,4 @@ am:
     keep_last_and_best_only: true # If the model is being saved, keep only the model and optimizer parameters for the last and best epoch (in terms of validation loss). If False, save every epoch. See also "saved_model_fmt" and "saved_optimizer_fmt"
     log10_learning_rate: -4
   decoding:
-    beam_width: 16
-    style: beam  # Choices: "beam", "prefix"
+    beam_width: 1

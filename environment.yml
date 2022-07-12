@@ -1,14 +1,12 @@
 name: conditional-bernoulli
 channels:
   - defaults
-  - sdrobert
   - pytorch
 dependencies:
   - python=3.7
   - pytorch=1.10.1
   - ipython
   - pytest
-  - pydrobert-param
   - seaborn
   - tqdm
   - jupyter
@@ -16,5 +14,7 @@ dependencies:
   - ruamel_yaml
   - requests
   - pip:
+    - pydrobert-param
+    - jiwer
     - "git+https://github.com/sdrobert/pydrobert-speech.git@fd0c48d9db0e4ff189f37d6f655dcac6070c70dd"
     - "git+https://github.com/sdrobert/pydrobert-pytorch.git@6b366f912222990f477617cc5cfb76abb0ea4a7a"
