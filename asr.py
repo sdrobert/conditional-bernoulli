@@ -68,7 +68,7 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
         objects=[
             "direct",
             "marginal",
-            "partial-indep",
+            "partial",
             "srswor",
             "ais-c",
             "ais-g",
@@ -179,6 +179,7 @@ class LanguageModelDataLoader(torch.utils.data.DataLoader):
 def construct_default_param_dict():
     return {
         "model": {
+            "frontend": models.FrontendParams(name="model.frontend"),
             "latent": models.LstmLmParams(name="model.latent"),
             "conditional": models.LstmLmParams(name="model.conditional"),
             "merge": MergeParams(name="model.merge"),
@@ -277,14 +278,15 @@ def lm_perplexity(
     return math.exp(-total_ll / max(total_tokens, 1))
 
 
-def initialize_model(options, dict_) -> models.JointLatentLstmLm:
+def initialize_model(options, dict_) -> models.AcousticModel:
     device = options.device
     num_filts, num_classes = get_filts_and_classes(
         os.path.join(options.data_dir, "train")
     )
-    model = models.JointLatentLstmLm(
+    model = models.AcousticModel(
         num_classes,
         num_filts,
+        dict_["frontend"],
         dict_["latent"],
         dict_["conditional"],
         dict_["merge"].cond_input_is_post,
@@ -458,11 +460,12 @@ def eval_lm(options, dict_):
 
 @torch.no_grad()
 def error_rates(
-    model: models.JointLatentLstmLm,
+    model: models.AcousticModel,
     loader: data.SpectEvaluationDataLoader,
     width: int,
     device: torch.device,
     style: str,
+    quiet: bool,
 ):
     model.eval()
 
@@ -474,6 +477,10 @@ def error_rates(
         else decoding.JointLatentLanguageModelPrefixSearch
     )(model, width)
     rater = modules.ErrorRate(eos=config.INDEX_PAD_VALUE, norm=False)
+
+    if not quiet:
+        loader = tqdm(loader)
+
     for feats, _, refs, feat_lens, ref_lens, _ in loader:
         # feats = feats[::3]
         # feat_lens = torch.div(feat_lens - 1, 3, rounding_mode="floor") + 1
@@ -481,16 +488,17 @@ def error_rates(
         feats, refs = feats.to(device), refs[..., 0].to(device)
         feat_lens, ref_lens = feat_lens.to(device), ref_lens.to(device)
         T, N = feats.shape[:2]
-        prev = {"latent_input": feats, "latent_length": feat_lens}
+        Tp = model.compute_output_time_size(T)
+        prev = {"input": feats, "length": feat_lens}
         if style == "beam":
-            hyps = search(prev, batch_size=N, max_iters=T)[0][..., 0]
+            hyps = search(prev, batch_size=N, max_iters=Tp)[0][..., 0]
             hyps = models.extended_hist_to_conditional(
                 hyps, vocab_size=model.vocab_size - 1
             )[0]
         else:
-            hyps, lens, _ = search(N, T, prev)
+            hyps, lens, _ = search(N, Tp, prev)
             hyps, lens = hyps[..., 0], lens[..., 0]
-            len_mask = torch.arange(T, device=device).unsqueeze(1) >= lens
+            len_mask = torch.arange(Tp, device=device).unsqueeze(1) >= lens
             hyps.masked_fill_(len_mask, config.INDEX_PAD_VALUE)
         total_errs += rater(refs, hyps).sum().item()
 
@@ -498,7 +506,7 @@ def error_rates(
 
 
 def train_am_for_epoch(
-    model: models.JointLatentLstmLm,
+    model: models.AcousticModel,
     loader: data.SpectTrainingDataLoader,
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
@@ -521,21 +529,19 @@ def train_am_for_epoch(
     def func(b: torch.Tensor) -> torch.Tensor:
         M = b.size(0)
         mismatch = b.sum(-1) != func.ref_lens  # (M, N)
-        feats = func.feats.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
-        feat_lens = func.feat_lens.unsqueeze(0).expand(M, -1).flatten()
+        h = func.h.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
+        h_lens = func.h_lens.unsqueeze(0).expand(M, -1).flatten()
         refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
         ll = model.calc_log_likelihood_given_latents(
             b.flatten(0, 1).T.long(),
             refs,
-            {"latent_input": feats, "latent_lengths": feat_lens},
+            {"latent_input": h, "latent_length": h_lens},
         )
-        ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -10000)
+        ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
         return ll
 
     total_loss = 0.0
     for feats, _, refs, feat_lens, ref_lens in loader:
-        # feats = feats[::3]
-        # feat_lens = torch.div(feat_lens - 1, 3, rounding_mode="floor") + 1
         T, N = feats.shape[:2]
         feats = feats.to(device, non_blocking=non_blocking)
         refs = refs[..., 0].to(device, non_blocking=non_blocking)
@@ -544,18 +550,19 @@ def train_am_for_epoch(
         optimizer.zero_grad()
 
         if estimator_name != "marginal":
-            func.feats = feats
-            func.feat_lens = feat_lens
+            h, lens_ = model.frontend(feats.transpose(0, 1), feat_lens)
+            func.h = h
+            func.h_lens = lens_
             func.refs = refs
             func.ref_lens = ref_lens
             prev = {
-                "input": feats,
-                "post": feats,
-                "length": feat_lens,
+                "input": h,
+                "post": h,
+                "length": lens_,
                 "given": ref_lens,
             }
             v = 0
-            if estimator_name == "partial-indep":
+            if estimator_name == "partial":
                 prev_latent = model.latent.update_input(prev, refs)
                 hidden = model.latent.calc_all_hidden(prev_latent)
                 logits = model.latent.calc_all_logits(prev_latent, hidden)
@@ -572,10 +579,10 @@ def train_am_for_epoch(
                     walk,
                     N,
                     prev,
-                    T,
-                    estimator_name in {"direct", "partial-indep", "sf-biased"},
+                    h.size(0),
+                    estimator_name in {"direct", "partial", "sf-biased"},
                 )
-            if estimator_name in {"direct", "partial-indep", "sf-biased"}:
+            if estimator_name in {"direct", "partial", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(
                     dist, func, params.mc_samples, is_log=True
                 )
@@ -626,9 +633,8 @@ def train_am_for_epoch(
             v = v + estimator()
         else:
             prev = {
-                "latent_input": feats,
-                "latent_post": feats,
-                "latent_length": feat_lens,
+                "input": feats,
+                "length": feat_lens,
             }
             v = model.calc_marginal_log_likelihoods(refs, ref_lens, prev)
 
@@ -706,6 +712,7 @@ def train_am(options, dict_):
             dict_["am"]["decoding"].beam_width,
             options.device,
             dict_["am"]["decoding"].style,
+            options.quiet,
         )
         controller.update_for_epoch(model, optimizer, train_loss, dev_er, epoch)
         if not options.quiet:
@@ -757,14 +764,15 @@ def decode_am(options, dict_):
     for feats, _, _, feat_lens, _, uttids in test_loader:
         feats, feat_lens = feats.to(options.device), feat_lens.to(options.device)
         T, N = feats.shape[:2]
-        prev = {"latent_input": feats, "latent_length": feat_lens}
+        Tp = model.compute_output_time_size(T).item()
+        prev = {"input": feats, "length": feat_lens}
         if dict_["am"]["decoding"].style == "beam":
-            hyps = search(prev, batch_size=N, max_iters=T)[0][..., 0]
+            hyps = search(prev, batch_size=N, max_iters=Tp)[0][..., 0]
             hyps, lens = models.extended_hist_to_conditional(
                 hyps, vocab_size=model.vocab_size - 1
             )
         else:
-            hyps, lens, _ = search(N, T, prev)
+            hyps, lens, _ = search(N, Tp, prev)
             hyps, lens = hyps[..., 0], lens[..., 0]
         hyps, lens = hyps.cpu(), lens.cpu()
         for hyp, len, uttid in zip(hyps.T, lens.T, uttids):
@@ -792,7 +800,7 @@ def main(args=None):
     subparsers = parser.add_subparsers(title="commands", required=True, dest="command")
 
     train_lm_parser = subparsers.add_parser("train_lm")
-    train_lm_parser.add_argument("save_path", type=argparse.FileType("wb"))
+    train_lm_parser.add_argument("save_path")
 
     eval_lm_parser = subparsers.add_parser("eval_lm")
     eval_lm_parser.add_argument(
@@ -801,7 +809,7 @@ def main(args=None):
     eval_lm_parser.add_argument("--full-model", action="store_true", default=False)
 
     train_am_parser = subparsers.add_parser("train_am")
-    train_am_parser.add_argument("save_path", type=argparse.FileType("wb"))
+    train_am_parser.add_argument("save_path")
     train_am_parser.add_argument(
         "--pretrained-lm-path", type=argparse.FileType("rb"), default=None
     )

@@ -1,14 +1,30 @@
 model:
+  frontend:
+    window_size: 5
+    window_stride: 2
+    convolutional_kernel_time: 3
+    convolutional_kernel_freq: 8
+    convolutional_layers: 6
+    convolutional_initial_channels: 32
+    convolutional_factor_schedule: 3
+    convolutional_time_factor: 2
+    convolutional_channel_factor: 2
+    convolutional_nonlinearity: relu
+    # recurrent_layers: 0
+    recurrent_type: LSTM
+    recurrent_size: 512
+    recurrent_layers: 3
+    recurrent_bidirectional: false
   latent:
     hidden_size: 512
     merge_method: mix
-    num_layers: 3
+    num_layers: 0
   conditional:
     merge_method: mix
 am:
   data:
     loader:
-      batch_size: 32  # Number of elements in a batch.
+      batch_size: 16  # Number of elements in a batch.
       drop_last: false # Whether to drop the last batch if it does reach batch_size
       num_length_buckets: 5 # If greater than 1, elements will be batched with other elements of similar length (along the feature time dimension). Elements will be partioned roughly evenly into num_length_buckets. Increasing num_length_buckets will usually decrease the total amount of padding per batch at the cost of fewer candidates to choose from within batches.
       size_batch_by_length: true # Only matters when num_length_buckets > 1. If false, all buckets have the same batch size of batch_size. If true, buckets with shorter-length utterances will contain greater than batch_size elements per batch. Letting x be the batch size of a bucket, y be the length of the largest element in the bucket, and Y be the length of the largest element in the corpus, x is the greatest value such that x * y <= Y * batch_size

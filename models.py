@@ -428,7 +428,7 @@ class LstmLm(MixableSequentialLanguageModel):
             cell_list.append(cell)
             in_size = params.hidden_size
         self.cells = torch.nn.ModuleList(cell_list)
-        past_length = torch.full((vocab_size,), config.EPS_NINF)
+        past_length = torch.full((vocab_size,), torch.finfo(torch.float).min / 2)
         past_length[0] = config.EPS_0
         self.register_buffer("past_length", past_length, persistent=False)
 
@@ -650,7 +650,6 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         latent_params: Optional[LstmLmParams] = None,
         cond_params: Optional[LstmLmParams] = None,
         cond_input_is_post: bool = False,
-        input_name: str = "input",
         latent_prefix: str = "latent_",
         conditional_prefix: str = "conditional_",
         old_conditional_prefix: str = "old_",
@@ -659,7 +658,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             latent_params = LstmLmParams()
         if cond_params is None:
             cond_params = latent_params
-        latent = LstmLm(2, input_size, params=latent_params, input_name=input_name)
+        latent = LstmLm(2, input_size, params=latent_params)
         in_size = latent.logiter_input_size
         if cond_input_is_post:
             conditional = LstmLm(
@@ -894,10 +893,16 @@ class FrontendParams(param.Parameterized):
 
 
 class Frontend(torch.nn.Module):
-    def __init__(self, freq_dim: int, params: FrontendParams):
+    params: FrontendParams
+    input_size: int
+    output_size: int
+
+    def __init__(self, input_size: int, params: Optional[FrontendParams] = None):
         super(Frontend, self).__init__()
+        if params is None:
+            params = FrontendParams()
         self.params = params
-        self.freq_dim = freq_dim
+        self.input_size = input_size
         self._p = 0.0
 
         self.convs = torch.nn.ModuleList([])
@@ -906,7 +911,7 @@ class Frontend(torch.nn.Module):
         kx = params.convolutional_kernel_time
         ky = params.convolutional_kernel_freq
         ci = 1
-        y = freq_dim
+        y = input_size
         co = params.convolutional_initial_channels
         up_c = params.convolutional_channel_factor
         on_sy = params.convolutional_freq_factor
@@ -941,16 +946,17 @@ class Frontend(torch.nn.Module):
                 2 if params.recurrent_bidirectional else 1
             )
         else:
-            self.rnn = None
+            self.register_parameter("rnn", None)
+        self.output_size = prev_size
 
     def check_input(self, x: torch.Tensor, lens: torch.Tensor):
         if x.dim() != 3:
             raise RuntimeError("x must be 3-dimensional")
         if lens.dim() != 1:
             raise RuntimeError("lens must be 1-dimensional")
-        if x.size(2) != self.freq_dim:
+        if x.size(2) != self.input_size:
             raise RuntimeError(
-                f"Final dimension size of x {x.size(2)} != {self.freq_dim}"
+                f"Final dimension size of x {x.size(2)} != {self.input_size}"
             )
         if x.size(0) != lens.size(0):
             str_ = f"Batch size of x ({x.size(1)}) != lens size ({lens.size(0)})"
@@ -966,6 +972,8 @@ class Frontend(torch.nn.Module):
 
     @dropout_prob.setter
     def dropout_prob(self, p: float):
+        if p < 0 or p > 1:
+            raise ValueError(f"Invalid dropout_prob {p}")
         self._p = p
 
     def forward(
@@ -1023,11 +1031,51 @@ class Frontend(torch.nn.Module):
         return torch.nn.utils.rnn.pad_packed_sequence(x, batch_first=False)[0], lens_
 
     def reset_parameters(self):
-        if self.params.seed is not None:
-            torch.manual_seed(self.params.seed)
         for layer in chain((self.rnn,), self.convs):
             if layer is not None:
                 layer.reset_parameters()
+
+    def compute_output_time_size(self, T) -> torch.Tensor:
+        T = torch.as_tensor(T, dtype=torch.long)
+        return (T - 1).div(self.params.window_stride, rounding_mode="trunc") + 1
+
+
+class AcousticModel(JointLatentLstmLm):
+    def __init__(
+        self,
+        vocab_size: int,
+        input_size: int,
+        frontend_params: Optional[FrontendParams] = None,
+        latent_params: Optional[LstmLmParams] = None,
+        cond_params: Optional[LstmLmParams] = None,
+        cond_input_is_post: bool = False,
+    ):
+        frontend = Frontend(input_size, frontend_params)
+        super().__init__(
+            vocab_size,
+            frontend.output_size,
+            latent_params,
+            cond_params,
+            cond_input_is_post,
+        )
+        self.frontend = frontend
+
+    def reset_parameters(self) -> None:
+        self.frontend.reset_parameters()
+        super().reset_parameters()
+
+    def update_input(self, prev: StateDict, hist: torch.Tensor) -> StateDict:
+        if "latent_input" not in prev or "latent_length" not in prev:
+            prev = prev.copy()
+            in_, lens = prev.pop("input"), prev.pop("length")
+            in_, lens = self.frontend(in_.transpose(0, 1), lens)
+            prev["latent_input"] = in_
+            prev["latent_length"] = lens
+            prev["latent_post"] = in_
+        return super().update_input(prev, hist)
+
+    def compute_output_time_size(self, T) -> torch.Tensor:
+        return self.frontend.compute_output_time_size(T)
 
 
 ## TESTS
@@ -1282,11 +1330,15 @@ def test_joint_latent_lstm_lm():
 
     torch.manual_seed(4)
 
-    T, N, V, H, I, M = 6, 7, 3, 4, 5, 2 ** 12
+    T, N, V, H, I, M = 6, 7, 3, 4, 5, 2 ** 14
     hist = torch.randint(V + 1, (T, N))
     in_ = torch.rand(T, N, I)
+    lens = torch.randint(1, T + 1, (N,))
     loss_fn = torch.nn.CrossEntropyLoss()
-    prev = {"latent_input": in_, "latent_lens": torch.randint(T + 1, (N,))}
+    given_count = (torch.rand(N) * lens).long().clamp_min_(1)
+    count_mask = torch.arange(T).unsqueeze(1) >= given_count
+    hist = hist.masked_fill_(count_mask, config.INDEX_PAD_VALUE)
+    prev = {"latent_input": in_, "latent_length": lens}
     for merge_method in ("cat", "mix"):
         for input_post in (False, True):
             for num_layers, embedding_size in itertools.product((0, 3), repeat=2):
@@ -1307,12 +1359,12 @@ def test_joint_latent_lstm_lm():
                 conditional = lm_act.conditional
                 lm_exp = JointLatentLanguageModel(latent, conditional)
 
-                logits_exp = lm_exp(hist[:-1], prev)
+                logits_exp = lm_exp(hist[:-1].clamp_min(0), prev)
                 assert logits_exp.shape == (T, N, V + 1)
                 loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
                 g_exp = torch.autograd.grad(loss_exp, lm_exp.parameters())
 
-                logits_act = lm_act(hist[:-1], prev)
+                logits_act = lm_act(hist[:-1].clamp_min(0), prev)
                 assert logits_act.shape == (T, N, V + 1)
                 assert torch.allclose(logits_exp, logits_act)
                 loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
@@ -1343,11 +1395,14 @@ def test_joint_latent_lstm_lm():
                 lm = JointLatentLstmLm(
                     V, I, latent_params, cond_params, cond_input_is_post=True
                 )
-                tok = torch.randint(V, (T // 2, N))
-                given_count = torch.randint(1, T // 2 + 1, (N,))
+                tok = torch.randint(V, (T, N))
                 walk = _m.RandomWalk(lm.latent)
                 dist = _d.SequentialLanguageModelDistribution(
-                    walk, N, {"input": in_}, cache_samples=True, max_iters=T
+                    walk,
+                    N,
+                    {"input": in_, "length": lens},
+                    cache_samples=True,
+                    max_iters=T,
                 )
                 proposal = _d.SimpleRandomSamplingWithoutReplacement(given_count, T)
 
@@ -1361,7 +1416,8 @@ def test_joint_latent_lstm_lm():
                         {
                             "latent_input": in_.unsqueeze(1)
                             .expand(-1, M_, -1, -1)
-                            .flatten(1, -2)
+                            .flatten(1, -2),
+                            "latent_length": lens.unsqueeze(1).expand(-1, M_).flatten(),
                         },
                     )
                     return ll.view(b.shape[:-1]).masked_fill(bad_count, config.EPS_NINF)
@@ -1373,7 +1429,7 @@ def test_joint_latent_lstm_lm():
                 act = estimator()
 
                 exp = lm.calc_marginal_log_likelihoods(tok, given_count, prev)
-                assert torch.allclose(exp, act, atol=1e-2)
+                assert torch.allclose(exp, act, atol=1e-1)
 
 
 def test_frontend():
@@ -1396,5 +1452,36 @@ def test_frontend():
     params.window_stride = w
     frontend = Frontend(F, params)
     h, lens_ = frontend(x, lens)
-    assert (lens_ == ((lens - 1) / w + 1).long()).all()
+    assert (lens_ == frontend.compute_output_time_size(lens)).all()
     assert h.shape == (int((T - 1) / w + 1), N, F * W)
+
+
+def test_acoustic_model():
+    torch.manual_seed(6)
+
+    N, T, F, V = 15, 20, 11, 3
+    in_ = torch.randn(T, N, F)
+    lens = torch.randint(1, T + 1, (N,))
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    am = AcousticModel(V, F)
+    h, lens_ = am.frontend(in_.transpose(0, 1), lens)
+    hist = torch.randint(V + 1, h.shape[:-1])
+    given_count = (torch.rand(N) * lens_).long().clamp_min_(1)
+    count_mask = torch.arange(h.size(0)).unsqueeze(1) >= given_count
+    hist = hist.masked_fill_(count_mask, config.INDEX_PAD_VALUE)
+
+    latent = am.latent
+    conditional = am.conditional
+    lm_exp = JointLatentLanguageModel(latent, conditional)
+
+    logits_exp = lm_exp(
+        hist[:-1].clamp_min(0), {"latent_input": h, "latent_length": lens_}
+    )
+    assert logits_exp.shape[1:] == (N, V + 1)
+    loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
+    logits_act = am(hist[:-1].clamp_min(0), {"input": in_, "length": lens})
+    loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
+    assert logits_exp.shape == logits_act.shape
+    assert torch.allclose(loss_exp, loss_act)
+

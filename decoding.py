@@ -136,6 +136,8 @@ class JointLatentLanguageModelPrefixSearch(torch.nn.Module):
                 )
             )
 
+            next_src = next_src + torch.arange(N, device=device).unsqueeze(1) * Kp
+
             if K < self.width:
                 rem = self.width - K
                 neg_inf = torch.full((N, rem), -float("inf"), device=device)
@@ -175,18 +177,21 @@ def test_joint_latent_language_model_prefix_search():
     torch.manual_seed(1)
 
     T, N, V, H, I, E = 4, 4, 5, 3, 5, 5
-    W = (V + 1) ** T
+    W = V ** (T + 1)
 
     cond_hist = torch.randint(V, (T, N))
-    in_ = torch.randn(T, N, I)
-    latent_lens = torch.randint(T + 1, (N,))
-    latent_lens[0] = T
-    given_count = (torch.rand(N) * latent_lens).long()
-    prev = {"latent_input": in_, "latent_lens": latent_lens}
+    in_ = torch.randn(N, T, I)
+    lens = torch.randint(1, T + 1, (N,))
+    lens[0] = T
+    given_count = (torch.rand(N) * lens).long().clamp_min_(1)
+    prev = {"input": in_, "length": lens}
+    frontend_params = models.FrontendParams(
+        window_size=1, window_stride=1, convolutional_layers=1, recurrent_size=H
+    )
     latent_params = models.LstmLmParams(embedding_size=0, hidden_size=H)
     cond_params = models.LstmLmParams(embedding_size=E, hidden_size=H)
-    lm = models.JointLatentLstmLm(
-        V, I, latent_params, cond_params, cond_input_is_post=True
+    lm = models.AcousticModel(
+        V, I, frontend_params, latent_params, cond_params, cond_input_is_post=True
     )
     exp = lm.calc_marginal_log_likelihoods(cond_hist, given_count, prev)
     len_mask = torch.arange(T).unsqueeze(1) >= given_count
@@ -194,17 +199,28 @@ def test_joint_latent_language_model_prefix_search():
 
     search = JointLatentLanguageModelPrefixSearch(lm, W, normalize=False)
     beam, beam_lens, act = search(N, T, prev)
-    invalid_mask = (act <= 0).expand_as(beam)
+    assert torch.allclose(act.clamp_min(0).sum(1), torch.ones(1))
+    invalid_mask = act <= 0
+
+    assert (
+        (~invalid_mask).sum(1)
+        == (torch.tensor([V]) ** (lens + 1) - 1).div(V - 1, rounding_mode="trunc")
+    ).all()
     len_mask = torch.arange(T).view(T, 1, 1) >= beam_lens
     beam.masked_fill_(len_mask, -1)
-    beam.masked_fill_(invalid_mask, -2)
+    beam.masked_fill_(invalid_mask.expand_as(beam), -2)
     seq_match = (beam == cond_hist.unsqueeze(2)).all(0)
     assert (seq_match.sum(1) == 1).all()
     act = act.masked_fill_(~seq_match, 0.0).sum(1).log_()
-    assert torch.allclose(exp, act, atol=1e-1)
+    assert torch.allclose(exp, act)
 
     search.normalize = True
     beam2, _, _ = search(N, T, prev)
     beam2.masked_fill_(len_mask, -1)
     beam2.masked_fill_(invalid_mask, -2)
     assert (beam == beam2).all()
+    # for n, (beam_n, beam2_n) in enumerate(
+    #     zip(beam.transpose(0, 1), beam2.transpose(0, 1))
+    # ):
+    #     for k, (beam_nk, beam2_nk) in enumerate(zip(beam_n.T, beam2_n.T)):
+    #         assert (beam_nk == beam2_nk).all(), (n, k, beam_nk.T, beam2_nk.T, lens[n])
