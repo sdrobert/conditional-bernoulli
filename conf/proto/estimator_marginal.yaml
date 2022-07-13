@@ -1,3 +1,5 @@
 am:
   training:
     estimator: marginal
+  decoding:
+    is_ctc: false

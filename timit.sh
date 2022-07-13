@@ -5,22 +5,22 @@ set -e
 usage () {
   cat << EOF 1>&2
 Usage: $0
-  -s N:           Run from stage N.
+  -s N            Run from stage N.
                   Value: '$stage'
-  -i PTH:         Location of TIMIT data directory (unprocessed).
+  -i PTH          Location of TIMIT data directory (unprocessed).
                   Value: '$timit'
-  -d PTH:         Location of processed data directory.
+  -d PTH          Location of processed data directory.
                   Value: '$data'
-  -o PTH:         Location to store experiment artifacts.
+  -o PTH          Location to store experiment artifacts.
                   Value: '$exp'
   -b 'A [B ...]'  The beam widths to test for decoding
-  -n N:           Number of repeated trials to perform.
+  -n N            Number of repeated trials to perform.
                   Value: '$seeds'
-  -k N:           Offset (inclusive) of the seed to start from.
+  -k N            Offset (inclusive) of the seed to start from.
                   Value: '$offset'
-  -c DEVICE:      Device to run experiments on.
+  -c DEVICE       Device to run experiments on.
                   Value: '$device'
-  -m 'A [B ...]': Model configurations to experiment with.
+  -m 'A [B ...]'  Model configurations to experiment with.
                   Value: '${models[*]}'
   -e 'A [B ...]'  Estimators to experment with.
                   Value: '${estimators[*]}'
@@ -32,16 +32,21 @@ EOF
   exit ${1:-1}
 }
 
-argcheck_nat() {
+argcheck_list() {
   arg="$1"
-  shift
-  while (( $# )); do
-    if ! [[ "$1" =~ ^[1-9][0-9]*$ ]]; then
-      echo "$0: '-$arg' argument '$1' is not a natural number" 1>&2
-      usage
-    fi
-    shift
+  cmd="$2"
+  read -ra a <<<"$3"
+  shift 3
+  for x in "${a[@]}"; do
+    $cmd $arg "$1" "$@"
   done
+}
+
+argcheck_nat() {
+  if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$0: '-$1' argument '$2' is not a natural number" 1>&2
+    usage
+  fi
 }
 
 argcheck_rdir() {
@@ -66,21 +71,23 @@ argcheck_choices() {
 }
 
 check_config() {
-  if [[ " ${INVALIDS[*]} " =~ " $1_$2 " ]] || [[ " ${INVALIDS[*]} " =~ " $2_$3" ]]; then
+  if [[ " ${INVALIDS[*]} " =~ " $1_$2 " ]] || \
+     [[ " ${INVALIDS[*]} " =~ " $2_$3 " ]] || \
+     [[ " ${INVALIDS[*]} " =~ " $1_$3 " ]] ; then
     return 1
   fi
   mkdir -p "$confdir"
   yml="$confdir/$1_$2_$3.yaml"
   combine-yaml-files \
-    --nested \
+    --nested --quiet \
     conf/proto/{base,model_$1,estimator_$2,lm_$3}.yaml "$yml"
 }
 
 # constants
 ALL_MODELS=( full indep partial )
-ALL_ESTIMATORS=( direct marginal partial srswor ais-c ais-g sf-biased sf-is )
+ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc )
 ALL_LMS=( lm-flatstart lm-pretrained nolm )
-INVALIDS=( full_marginal full_partial partial_full )
+INVALIDS=( full_marginal full_cb partial_marginal full_nolm partial_nolm ctc_lm-partial ctc_lm-flatstart full_ctc partial_ctc )
 
 # variables
 stage=1
@@ -119,7 +126,7 @@ while getopts "xhs:i:d:o:b:n:k:c:m:e:l:" opt; do
       exp="$OPTARG"
       ;;
     b)
-      argcheck_nat $opt $OPTARG
+      argcheck_list $opt argcheck_nat "$OPTARG"
       beam_widths=( $OPTARG )
       ;;
     n)
@@ -130,15 +137,15 @@ while getopts "xhs:i:d:o:b:n:k:c:m:e:l:" opt; do
       device="$OPTARG"
       ;;
     m)
-      argcheck_choices $opt "$OPTARG" "${ALL_MODELS[*]}"
+      argcheck_list $opt argcheck_choices "$OPTARG" "${ALL_MODELS[*]}"
       models=( $OPTARG )
       ;;
     e)
-      argcheck_choices $opt "$OPTARG" "${ALL_ESTIMATORS[*]}"
+      argcheck_list $opt argcheck_choices "$OPTARG" "${ALL_ESTIMATORS[*]}"
       estimators=( $OPTARG )
       ;;
     l)
-      argcheck_choices $opt "$OPTARG" "${ALL_LMS[*]}"
+      argcheck_list $opt argcheck_choices "$OPTARG" "${ALL_LMS[*]}"
       lms=( $OPTARG )
       ;;
     x)

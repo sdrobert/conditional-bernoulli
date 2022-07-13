@@ -5,4 +5,4 @@ model:
     cond_input_is_post: true
 am:
   decoding:
-    stye: prefix
+    style: prefix

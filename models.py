@@ -610,7 +610,9 @@ class LstmLm(MixableSequentialLanguageModel):
             in_ = self.lstm(in_, (prev[self.hidden_name], prev[self.cell_name]))[0]
         return in_
 
-    def calc_all_logits(self, prev: StateDict, hidden: torch.Tensor) -> torch.Tensor:
+    def calc_all_logits(
+        self, prev: StateDict, hidden: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         if self.post_input_name in prev and self.post_input_size:
             x = prev[self.post_input_name]
             if x.dim() != 3:
@@ -764,7 +766,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         if self.conditional.input_size > 0 or self.latent.embedder is not None:
             raise NotImplementedError
         assert self.conditional.post_input_size
-        prev = self.update_input(prev, cond_hist)
+        prev = self.update_input(prev.copy(), cond_hist)
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
         cond_hist = cond_hist.clamp(0, self.vocab_size - 1)
 
@@ -795,6 +797,21 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         ll = ll - denom
         assert (ll < 0).all()
         return ll
+
+    def calc_ctc_log_probs(
+        self, hist: torch.Tensor, prev: StateDict = dict()
+    ) -> torch.Tensor:
+        if self.conditional.lstm_input_size > 0 or self.latent.embedder is not None:
+            raise NotImplementedError
+        assert self.conditional.post_input_size
+        prev = self.update_input(prev.copy(), hist)
+        prev_latent, prev_cond, _, _ = self.split_dicts(prev)
+        hidden = self.latent.calc_all_hidden(prev_latent)
+        llogits = self.latent.calc_all_logits(prev_latent, hidden).log_softmax(2)
+        prev_cond[self.conditional.post_input_name] = hidden
+        clogits = self.conditional.calc_all_logits(prev_cond).log_softmax(2)
+        logits = torch.cat([llogits[..., 1:] + clogits, llogits[..., :1]], 2)
+        return logits
 
 
 class FrontendParams(param.Parameterized):

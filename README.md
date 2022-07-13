@@ -47,7 +47,7 @@ and a fixed number of seeds *in sequence*.
   latent distribution (without any conditioning).
 - `marginal`: Marginalizes out the latent distribution. Only possible with the
   `indep` model.
-- `partial`: A Monte Carlo estimate which draws from the latent distribution
+- `cb`: A Monte Carlo estimate which draws from the latent distribution
   conditioned on the number of events. Not possible for the `full` model.
 - `srswor`: A Monte Carlo Importance Sampling estimate with a proposal
   uniformly distributed over event configurations given the number of events
@@ -55,6 +55,15 @@ and a fixed number of seeds *in sequence*.
 - `ais-c`: The AIS-IMH algorithm with sufficient statistics estimated by count.
 - `ais-g`: The AIS-IMH algorithm with sufficient statistics estimated by Gibbs
   conditionals.
+
+`<lm>` refers to part of the conditional model which predicts the next token
+based on the history of tokens, like a traditional LM. AM predictions are
+injected via weighted mixture. It can be one of
+
+- `lm-flatstart`: Sequence prediction is trained alongside everything else.
+- `lm-pretrained`: Sequence prediction is trained first. Its weights are frozen
+  while the rest of the model is trained.
+- `nolm`: Sequence prediction is minimal
 
 
 ## Testing

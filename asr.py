@@ -68,12 +68,13 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
         objects=[
             "direct",
             "marginal",
-            "partial",
+            "cb",
             "srswor",
             "ais-c",
             "ais-g",
             "sf-biased",
             "sf-is",
+            "ctc",
         ],
     )
     mc_samples = param.Integer(1, bounds=(1, None))
@@ -93,8 +94,8 @@ class LanguageModelDataLoaderParams(param.Parameterized):
 
 
 class DecodingParams(param.Parameterized):
-    beam_width = param.Integer(4, bounds=(1, None))
-    style = param.ObjectSelector("beam", objects=["beam", "prefix"])
+    style = param.ObjectSelector("beam", objects=["beam", "prefix", "ctc"])
+    is_ctc = param.Boolean(False)
 
 
 class LanguageModelDataSet(torch.utils.data.Dataset):
@@ -442,23 +443,22 @@ def eval_lm(options, dict_):
 
 
 @torch.no_grad()
-def error_rates(
+def val_error_rates(
     model: models.AcousticModel,
     loader: data.SpectEvaluationDataLoader,
-    width: int,
     device: torch.device,
-    style: str,
+    is_ctc: bool,
     quiet: bool,
 ):
     model.eval()
 
     total_errs = 0
     total_toks = 0
-    search = (
-        modules.BeamSearch
-        if style == "beam"
-        else decoding.JointLatentLanguageModelPrefixSearch
-    )(model, width)
+
+    if is_ctc:
+        search = modules.CTCGreedySearch()
+    else:
+        search = modules.BeamSearch(model, 1)
     rater = modules.ErrorRate(eos=config.INDEX_PAD_VALUE, norm=False)
 
     if not quiet:
@@ -473,16 +473,16 @@ def error_rates(
         T, N = feats.shape[:2]
         Tp = model.compute_output_time_size(T)
         prev = {"input": feats, "length": feat_lens}
-        if style == "beam":
-            hyps = search(prev, batch_size=N, max_iters=Tp)[0][..., 0]
+        if is_ctc:
+            lprobs = model.calc_ctc_log_probs(refs, prev)
+            _, hyps, lens = search(lprobs)
+            len_mask = torch.arange(hyps.size(0), device=device).unsqueeze(1) >= lens
+            hyps.masked_fill_(len_mask, config.INDEX_PAD_VALUE)
+        else:
+            hyps = search(prev, batch_size=N, max_iters=Tp)[0].squeeze(-1)
             hyps = models.extended_hist_to_conditional(
                 hyps, vocab_size=model.vocab_size - 1
             )[0]
-        else:
-            hyps, lens, _ = search(N, Tp, prev)
-            hyps, lens = hyps[..., 0], lens[..., 0]
-            len_mask = torch.arange(Tp, device=device).unsqueeze(1) >= lens
-            hyps.masked_fill_(len_mask, config.INDEX_PAD_VALUE)
         total_errs += rater(refs, hyps).sum().item()
 
     return total_errs / total_toks
@@ -532,7 +532,24 @@ def train_am_for_epoch(
         ref_lens = ref_lens.to(device, non_blocking=non_blocking)
         optimizer.zero_grad()
 
-        if estimator_name != "marginal":
+        if estimator_name == "marginal":
+            prev = {
+                "input": feats,
+                "length": feat_lens,
+            }
+            v = model.calc_marginal_log_likelihoods(refs, ref_lens, prev)
+        elif estimator_name == "ctc":
+            prev = {
+                "input": feats,
+                "length": feat_lens,
+            }
+            lens_ = model.compute_output_time_size(feat_lens)
+            lprobs = model.calc_ctc_log_probs(refs, prev)
+            v = -torch.nn.functional.ctc_loss(
+                lprobs, refs.T, lens_, ref_lens, model.vocab_size - 1, "mean"
+            )
+        else:
+            Tp = model.compute_output_time_size(T).item()
             h, lens_ = model.frontend(feats.transpose(0, 1), feat_lens)
             func.h = h
             func.h_lens = lens_
@@ -544,11 +561,11 @@ def train_am_for_epoch(
                 "length": lens_,
                 "given": ref_lens,
             }
+            prev = model.latent.update_input(prev, refs)
             v = 0
-            if estimator_name == "partial":
-                prev_latent = model.latent.update_input(prev, refs)
-                hidden = model.latent.calc_all_hidden(prev_latent)
-                logits = model.latent.calc_all_logits(prev_latent, hidden)
+            if estimator_name == "cb":
+                hidden = model.latent.calc_all_hidden(prev)
+                logits = model.latent.calc_all_logits(prev, hidden)
                 logits = logits[..., 1] - logits[..., 0]
                 dist = distributions.ConditionalBernoulli(ref_lens, logits=logits.T)
                 v = distributions.PoissonBinomial(logits=logits.T).log_prob(ref_lens)
@@ -559,13 +576,9 @@ def train_am_for_epoch(
                 else:
                     walk = modules.RandomWalk(model.latent)
                 dist = pdistributions.SequentialLanguageModelDistribution(
-                    walk,
-                    N,
-                    prev,
-                    h.size(0),
-                    estimator_name in {"direct", "partial", "sf-biased"},
+                    walk, N, prev, Tp, estimator_name in {"direct", "cb", "sf-biased"}
                 )
-            if estimator_name in {"direct", "partial", "sf-biased"}:
+            if estimator_name in {"direct", "cb", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(
                     dist, func, params.mc_samples, is_log=True
                 )
@@ -573,13 +586,13 @@ def train_am_for_epoch(
             elif estimator_name in {"srswor", "sf-is"}:
                 if estimator_name == "srswor":
                     proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                        ref_lens, feat_lens, T
+                        ref_lens, lens_, Tp
                     )
                 else:
                     model_ = models.SuffixForcingWrapper(model.latent, "length")
                     walk = modules.RandomWalk(model_)
                     proposal = pdistributions.SequentialLanguageModelDistribution(
-                        walk, N, prev, T, True
+                        walk, N, prev, Tp, True
                     )
                 estimator = pestimators.ImportanceSamplingEstimator(
                     proposal, func, params.mc_samples, dist, is_log=True,
@@ -587,11 +600,11 @@ def train_am_for_epoch(
                 # estimator = estimators.SerialMCWrapper(estimator)
             elif estimator_name.startswith("ais-"):
                 proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                    ref_lens, feat_lens, T
+                    ref_lens, lens_, Tp
                 )
                 maker = estimators.ConditionalBernoulliProposalMaker(ref_lens)
                 density = pdistributions.SequentialLanguageModelDistribution(
-                    walk, N, prev, T
+                    walk, N, prev, Tp
                 )
                 if estimator_name == "ais-c":
                     adaptation_func = lambda x: x
@@ -614,12 +627,6 @@ def train_am_for_epoch(
             else:
                 assert False
             v = v + estimator()
-        else:
-            prev = {
-                "input": feats,
-                "length": feat_lens,
-            }
-            v = model.calc_marginal_log_likelihoods(refs, ref_lens, prev)
 
         loss = -v.mean()
         total_loss += loss.detach() * N
@@ -689,12 +696,11 @@ def train_am(options, dict_):
         )
         if not options.quiet:
             print("Epoch completed. Determining dev error rate...", file=sys.stderr)
-        dev_er = error_rates(
+        dev_er = val_error_rates(
             model,
             dev_loader,
-            dict_["am"]["decoding"].beam_width,
             options.device,
-            dict_["am"]["decoding"].style,
+            dict_["am"]["decoding"].is_ctc,
             options.quiet,
         )
         controller.update_for_epoch(model, optimizer, train_loss, dev_er, epoch)
@@ -729,18 +735,19 @@ def decode_am(options, dict_):
     test_dir = os.path.join(options.data_dir, "dev" if options.dev else "test")
     num_data_workers = min(get_num_avail_cores() - 1, 4)
 
-    if options.beam_width is not None:
-        beam_width = options.beam_width
-    else:
-        beam_width = dict_["am"]["decoding"].beam_width
-
     model = initialize_model(options, dict_["model"])
     model.eval()
-    search = (
-        modules.BeamSearch
-        if dict_["am"]["decoding"].style == "beam"
-        else decoding.JointLatentLanguageModelPrefixSearch
-    )(model, beam_width)
+
+    if dict_["am"]["decoding"].style == "beam":
+        if dict_["am"]["decoding"].is_ctc:
+            raise NotImplementedError
+        search = modules.BeamSearch(model, options.beam_width)
+    elif dict_["am"]["decoding"].is_ctc:
+        search = modules.CTCPrefixSearch(options.beam_width)
+    else:
+        search = decoding.JointLatentLanguageModelPrefixSearch(
+            model, options.beam_width
+        )
 
     test_loader = data.SpectEvaluationDataLoader(
         test_dir,
@@ -752,14 +759,18 @@ def decode_am(options, dict_):
     for feats, _, _, feat_lens, _, uttids in test_loader:
         feats, feat_lens = feats.to(options.device), feat_lens.to(options.device)
         T, N = feats.shape[:2]
-        Tp = model.compute_output_time_size(T).item()
         prev = {"input": feats, "length": feat_lens}
         if dict_["am"]["decoding"].style == "beam":
             hyps = search(prev, batch_size=N, max_iters=Tp)[0][..., 0]
             hyps, lens = models.extended_hist_to_conditional(
                 hyps, vocab_size=model.vocab_size - 1
             )
+        elif dict_["am"]["decoding"].is_ctc:
+            lens_ = model.compute_output_time_size(feat_lens)
+            lprobs = model.calc_ctc_log_probs(feat_lens.new_empty((0, N)), prev)
+            hyps, lens = search(lprobs, lens_, prev)
         else:
+            Tp = model.compute_output_time_size(T).item()
             hyps, lens, _ = search(N, Tp, prev)
             hyps, lens = hyps[..., 0], lens[..., 0]
         hyps, lens = hyps.cpu(), lens.cpu()
@@ -823,7 +834,7 @@ def main(args=None):
     decode_am_parser.add_argument("am_path", type=argparse.FileType("rb"))
     decode_am_parser.add_argument("hyp_dir", type=DirType("w"))
     decode_am_parser.add_argument("--dev", action="store_true", default=False)
-    decode_am_parser.add_argument("--beam-width", type=int, default=None)
+    decode_am_parser.add_argument("--beam-width", type=int, default=1)
 
     options = parser.parse_args(args)
 
