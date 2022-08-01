@@ -508,8 +508,9 @@ class LstmLm(MixableSequentialLanguageModel):
 
     @staticmethod
     def mix_vectors(a, b):
-        w = (a - b).sigmoid()
-        return a * w + b * (1 - w)
+        return a + b
+        # w = (a - b).sigmoid()
+        # return a * w + b * (1 - w)
 
     def calc_idx_log_probs(
         self, hist: torch.Tensor, prev: StateDict, idx: torch.Tensor

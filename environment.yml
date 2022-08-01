@@ -13,6 +13,8 @@ dependencies:
   - pip
   - ruamel_yaml
   - requests
+  - setuptools_scm
+  - wheel
   - pip:
     - pydrobert-param
     - jiwer

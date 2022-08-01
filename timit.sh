@@ -2,6 +2,8 @@
 
 set -e
 
+source scripts/utils.sh
+
 usage () {
   cat << EOF 1>&2
 Usage: $0
@@ -32,62 +34,20 @@ EOF
   exit ${1:-1}
 }
 
-argcheck_list() {
-  arg="$1"
-  cmd="$2"
-  read -ra a <<<"$3"
-  shift 3
-  for x in "${a[@]}"; do
-    $cmd $arg "$1" "$@"
-  done
-}
-
-argcheck_nat() {
-  if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
-    echo "$0: '-$1' argument '$2' is not a natural number" 1>&2
-    usage
-  fi
-}
-
-argcheck_rdir() {
-  if ! [ -d "$2" ]; then
-    echo "$0: '-$1' argument '$2' is not a readable directory." 1>&2
-    usage
-  fi
-}
-
-argcheck_writable() {
-  if ! [ -w "$2" ]; then
-    echo "$0: '-$1' argument '$2' is not writable." 1>&2
-    usage
-  fi
-}
-
-argcheck_choices() {
-  if ! [[ " $3 " =~ " $2 " ]]; then
-    echo "$0: '-$1' argument '$2' not one of '$3'." 1>&2
-    usage
-  fi
-}
-
-check_config() {
-  if [[ " ${INVALIDS[*]} " =~ " $1_$2 " ]] || \
-     [[ " ${INVALIDS[*]} " =~ " $2_$3 " ]] || \
-     [[ " ${INVALIDS[*]} " =~ " $1_$3 " ]] ; then
-    return 1
-  fi
-  mkdir -p "$confdir"
-  yml="$confdir/$1_$2_$3.yaml"
-  combine-yaml-files \
-    --nested --quiet \
-    conf/proto/{base,model_$1,estimator_$2,lm_$3}.yaml "$yml"
-}
 
 # constants
 ALL_MODELS=( full indep partial )
 ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc )
 ALL_LMS=( lm-flatstart lm-pretrained nolm )
-INVALIDS=( full_marginal full_cb partial_marginal full_nolm partial_nolm ctc_lm-partial ctc_lm-flatstart full_ctc partial_ctc )
+INVALIDS=( 
+  'full_marginal' 'full_cb' 'partial_marginal'
+  'full_*_nolm' 'partial_*_nolm'
+  'ctc_lm-partial' 'ctc_lm-flatstart' 'full_ctc' 'partial_ctc'
+)
+OFFSET="${TIMIT_OFFSET:-0}"
+STRIDE="${TIMIT_STRIDE:-1}"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
 
 # variables
 stage=1
@@ -106,46 +66,44 @@ only=0
 while getopts "xhs:i:d:o:b:n:k:c:m:e:l:" opt; do
   case $opt in
     s)
-      argcheck_nat $opt "$OPTARG"
+      argcheck_is_nat $opt "$OPTARG"
       stage=$OPTARG
       ;;
     k)
-      argcheck_nat $opt "$OPTARG"
+      argcheck_is_nat $opt "$OPTARG"
       offset=$OPTARG
       ;;
     i)
-      argcheck_rdir $opt "$OPTARG"
+      argcheck_is_readable $opt "$OPTARG"
       timit="$OPTARG"
       ;;
     d)
-      argcheck_writable $opt "$OPTARG"
       data="$OPTARG"
       ;;
     o)
-      argcheck_writable $opt "$OPTARG"
       exp="$OPTARG"
       ;;
     b)
-      argcheck_list $opt argcheck_nat "$OPTARG"
+      argcheck_all_nat $opt "$OPTARG"
       beam_widths=( $OPTARG )
       ;;
     n)
-      argcheck_nat $opt "$OPTARG"
+      argcheck_is_nat $opt "$OPTARG"
       seeds=$OPTARG
       ;;
     c)
       device="$OPTARG"
       ;;
     m)
-      argcheck_list $opt argcheck_choices "$OPTARG" "${ALL_MODELS[*]}"
+      argcheck_all_a_choice $opt "${ALL_MODELS[@]}" "$OPTARG"
       models=( $OPTARG )
       ;;
     e)
-      argcheck_list $opt argcheck_choices "$OPTARG" "${ALL_ESTIMATORS[*]}"
+      argcheck_all_a_choice $opt "${ALL_ESTIMATORS[@]}" "$OPTARG"
       estimators=( $OPTARG )
       ;;
     l)
-      argcheck_list $opt argcheck_choices "$OPTARG" "${ALL_LMS[*]}"
+      argcheck_all_a_choice $opt "${ALL_LMS[@]}" "$OPTARG"
       lms=( $OPTARG )
       ;;
     x)
@@ -159,21 +117,61 @@ while getopts "xhs:i:d:o:b:n:k:c:m:e:l:" opt; do
 done
 
 if [ $# -ne $(($OPTIND - 1)) ]; then
-  echo "Expected no positional arguments but found one: '${@:$OPTIND}'" 1>&2
+  echo "Expected no positional arguments but found one" 1>&2
   usage
 fi
 
 confdir="$exp/conf"
 lmdir="$exp/lm"
 amdir="$exp/am"
+mel_combos=( $(
+  echo "" |
+  prod "" "${models[@]}" |
+  prod _ "${estimators[@]}" |
+  prod _ "${lms[@]}" |
+  filter is_not is_a_match "${INVALIDS[@]}"
+) )
+ncombos="${#mel_combos[@]}"
+ncs=$((ncombos * seeds))
+ncsb=$((ncs * ${#beam_widths[@]}))
+model=
+estimator=
+lm=
+seed=
 
+unpack_nc() {
+  local combo
+  IFS='_' read -ra combos <<< "${mel_combos[$1]}" 
+  model=${combos[0]}
+  estimator=${combos[1]}
+  lm=${combos[2]}
+}
+
+unpack_s() {
+  seed=$(printf '%02d' $(( $1 % seeds + 1)))
+}
+
+unpack_ncs() {
+  unpack_s $1
+  unpack_nc $(( $1 / seeds ))
+}
+
+combine() {
+  yml="$(mktemp)"
+  combine-yaml-files \
+    --nested --quiet conf/proto/{base,model_${model},estimator_${estimator},lm_${lm}}.yaml "$yml"
+  echo "$yml"
+}
 # prep the dataset
 if [ $stage -le 1 ]; then
   if [ ! -f "$data/.complete" ]; then 
+    echo "Beginning stage 1"
     if [ -z "$timit" ]; then
       echo "timit directory unset, but needed for this command (use -t)" 1>&2
       exit 1
     fi
+    argcheck_is_writable d "$data"
+    argcheck_is_readable i "$timit"
     python prep/timit.py "$data" preamble "$timit"
     python prep/timit.py "$data" init_phn --lm
     # 40mel+1energy fbank features every 10ms, stacked 3 at a time for 123-dim
@@ -185,6 +183,9 @@ if [ $stage -le 1 ]; then
       gunzip -c | \
       trn-to-torch-token-data-dir - "$data/ext/token2id.txt" "$data/lm"
     touch "$data/.complete"
+    echo "Finished stage 1"
+  else
+    echo "$data/.complete exists already. Skipping stage 1."
   fi
   ((only)) && exit 0
 fi
@@ -193,22 +194,34 @@ fi
 if [ $stage -le 2 ]; then
   if [[ " ${lms[*]} " =~ " lm-pretrained " ]]; then
     mkdir -p "$lmdir"
-    [ -f "$lmdir/results.ngram.txt" ] || \
+    if [ ! -f "$lmdir/results.ngram.txt" ]; then
+      echo "Beginning stage 2 - results.ngram.txt"
       python asr.py "$data" eval_lm > "$lmdir/results.ngram.txt"
-    for seed in $(seq $offset $seeds); do
-      [ -f "$lmdir/$seed/final.pt" ] || \
+      echo "Ending stage 2 - results.ngram.txt"
+    fi
+    for (( i = $OFFSET; i < $seeds; i += $STRIDE )); do
+      unpack_s $i
+      if [ ! -f "$lmdir/$seed/final.pt" ]; then
+        echo "Beginning stage 2 - training LM for seed $seed"
         python asr.py "$data" \
           --read-yaml conf/proto/lm_lm-pretrained.yaml \
           --device "$device" \
           --model-dir "$lmdir/$seed" \
           --seed $seed \
           train_lm "$lmdir/$seed/final.pt"
+        echo "Ending stage 2 - training LM for seed $seed"
+      else
+        echo "Stage 2 - $lmdir/$seed/final.pt exists. Skipping"
+      fi
 
-      [ -f "$lmdir/results.$seed.txt" ] || \
+      if [ ! -f "$lmdir/results.$seed.txt" ]; then
+        echo "Beginning stage 2 - computing LM perplexity for seed $seed"
         python asr.py "$data" \
           --read-yaml conf/proto/lm_lm-pretrained.yaml \
           --device "$device" \
           eval_lm "$lmdir/$seed/final.pt" > "$lmdir/results.$seed.txt"
+        echo "Ending stage 2 - computing LM perplexity for seed $seed"
+      fi
     done
   fi
   ((only)) && exit 0
@@ -216,79 +229,100 @@ fi
 
 # train the acoustic models
 if [ $stage -le 3 ]; then
-  for model in "${models[@]}"; do
-    for estimator in "${estimators[@]}"; do
-      for lm in "${lms[@]}"; do
-        check_config $model $estimator $lm || continue
-        mname="${model}_${estimator}_${lm}"
-        yml="$confdir/$mname.yaml"
-        for seed in $(seq $offset $seeds); do
-          mdir="$amdir/$mname/$seed"
-          mkdir -p "$mdir"
-          xtra_args=( )
-          if [[ "$mname" =~ "_lm-pretrained" ]]; then
-            xtra_args=( "--pretrained-lm-path" "$lmdir/$seed/final.pt" )
-          fi
-          [ -f "$mdir/final.pt" ] || \
-            python asr.py "$data" \
-              --read-yaml "$yml" \
-              --device "$device" \
-              --model-dir "$mdir" \
-              --seed $seed \
-              train_am "${xtra_args[@]}" "$mdir/final.pt"
-        done
-      done
-    done
+  for (( i = $OFFSET; i < ncs; i += $STRIDE )); do
+    unpack_ncs $i
+    mname="${model}_${estimator}_${lm}"
+    yml="$(combine)"
+    mdir="$amdir/$mname/$seed"
+    mkdir -p "$mdir"
+    xtra_args=( )
+    if [ "$lm" = "lm-pretrained" ]; then
+      xtra_args=( "--pretrained-lm-path" "$lmdir/$seed/final.pt" )
+    fi
+    if [ ! -f "$mdir/final.pt" ]; then
+      echo "Beginning stage 3 - training $mname with seed $seed"
+      python asr.py "$data" \
+        --read-yaml "$yml" \
+        --device "$device" \
+        --model-dir "$mdir" \
+        --seed $seed \
+        train_am "${xtra_args[@]}" "$mdir/final.pt"
+      echo "Ending stage 3 - training $mname with seed $seed"
+    else
+      echo "Stage 3 - $mdir/final.pt exists. Skipping"
+    fi
   done
   ((only)) && exit 0
 fi
 
 # decode and compute error rates
 if [ $stage -le 4 ]; then
-  for model in "${models[@]}"; do
-    for estimator in "${estimators[@]}"; do
-      for lm in "${lms[@]}"; do
-        check_config $model $estimator $lm || continue
-        mname="${model}_${estimator}_${lm}"
-        yml="$confdir/$mname.yaml"
-        for seed in $(seq $offset $seeds); do
-          mdir="$amdir/$mname/$seed"
-          if [ ! -f "$mdir/final.pt" ]; then
-            echo "$mdir/final.pt doesn't exist (did stage 3 finish?)" 1>&2
-            exit 1
-          fi
-          for part in dev test; do
-            hdir="$mdir/hyp/$part"
-            if [ "$part" = dev ]; then
-              xtra_args=( "--dev" )
-              active_widths=( "${beam_widths[@]}" )
-            else
-              xtra_args=( )
-              active_widths=( "$(awk '
+  for (( i = $OFFSET; i < ncs; i += $STRIDE )); do
+    unpack_ncs $i
+    mname="${model}_${estimator}_${lm}"
+    yml="$(combine)"
+    mdir="$amdir/$mname/$seed"
+    if [ ! -f "$mdir/final.pt" ]; then
+      echo "$mdir/final.pt doesn't exist (did stage 3 finish?)" 1>&2
+      exit 1
+    fi
+    for part in dev test; do
+      hdir="$mdir/hyp/$part"
+      if [ "$part" = dev ]; then
+        xtra_args=( "--dev" )
+        active_widths=( "${beam_widths[@]}" )
+      else
+        xtra_args=( )
+        active_widths=( "$(awk '
 $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
 ' "$amdir/$mname/results.dev.$seed.txt")" )
-            fi
-            for beam_width in "${active_widths[@]}"; do
-              bdir="$hdir/$beam_width"
-              mkdir -p "$bdir"
-              python asr.py "$data" \
-                --read-yaml "$yml" \
-                --device "$device" \
-                decode_am \
-                  "${xtra_args[@]}" --beam-width "$beam_width" \
-                  "$mdir/final.pt" "$bdir"
-              torch-token-data-dir-to-trn \
-                "$bdir" "$data/ext/id2token.txt" \
-                "$mdir/$part.hyp.$beam_width.utrn"
-              python prep/timit.py "$data" filter \
-                "$mdir/$part.hyp.$beam_width."{u,}trn
-            done
-            python prep/error-rates-from-trn.py \
-              "$data/ext/$part.ref.trn" "$mdir/$part.hyp."*.trn \
-              --suppress-warning > "$amdir/$mname/results.$part.$seed.txt"
-          done
-        done
+      fi
+      for beam_width in "${active_widths[@]}"; do
+        beam_width="$(printf '%02d' $beam_width)"
+        bdir="$hdir/$beam_width"
+        mkdir -p "$bdir"
+        if [ ! -f "$bdir/.complete" ]; then
+          echo "Beginning stage 4 - decoding $mname with seed $seed and" \
+            "beam width $beam_width"
+          python asr.py "$data" \
+            --read-yaml "$yml" \
+            --device "$device" \
+            decode_am \
+              "${xtra_args[@]}" --beam-width "$beam_width" \
+              "$mdir/final.pt" "$bdir"
+          touch "$bdir/.complete"
+          echo "Ending stage 4 - decoding $mname with seed $seed and" \
+            "beam width $beam_width"
+        else
+          echo "'$bdir/.complete' exists. Skipping decoding for $mname with" \
+            "seed $seed and beam width $beam_width"
+        fi
+        if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
+          echo "Beginning stage 4 - gathering hyps for $mname with seed" \
+            "$seed and beam with $beam_width"
+          torch-token-data-dir-to-trn \
+            "$bdir" "$data/ext/id2token.txt" \
+            "$mdir/$part.hyp.$beam_width.utrn"
+          python prep/timit.py "$data" filter \
+            "$mdir/$part.hyp.$beam_width."{u,}trn
+          echo "Ending stage 4 - gathering hyps for $mname with seed" \
+            "$seed and beam with $beam_width"
+        fi
       done
+      active_files=( "$mdir/$part.hyp."*.trn )
+      if [ ${#active_files[@]} -ne ${#active_widths[@]} ]; then
+        echo "The number of evaluated beam widths does not equal the number" \
+          "of hypothesis files for partition '$part' in '$mdir'. This could" \
+          "mean you changed the -b parameter after running once or you reran" \
+          "experiments with different parameters and the partition is" \
+          "'test'. Delete all hyp files in '$amdir' and try runing this step" \
+          "again" 1>&2
+        exit 1
+      fi
+      [ -f "$amdir/$mname/results.$part.$seed.txt" ] || \
+        python prep/error-rates-from-trn.py \
+          "$data/ext/$part.ref.trn" "$mdir/$part.hyp."*.trn \
+          --suppress-warning > "$amdir/$mname/results.$part.$seed.txt"
     done
   done
   ((only)) && exit 0
