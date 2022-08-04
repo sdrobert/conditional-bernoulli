@@ -429,7 +429,7 @@ class LstmLm(MixableSequentialLanguageModel):
             in_size = params.hidden_size
         self.cells = torch.nn.ModuleList(cell_list)
         past_length = torch.full((vocab_size,), torch.finfo(torch.float).min / 2)
-        past_length[0] = config.EPS_0
+        past_length[0] = 0
         self.register_buffer("past_length", past_length, persistent=False)
 
     @property
@@ -774,8 +774,10 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         lhidden = self.latent.calc_all_hidden(prev_latent)  # cond_hist is cond input
         T, N, H1 = lhidden.shape
         llogits = self.latent.calc_all_logits(prev_latent, lhidden)
-        llogits = llogits.transpose(0, 1)[..., 1] - llogits.transpose(0, 1)[..., 0]
-        dist = distributions.ConditionalBernoulli(given_count, logits=llogits)
+        llogits = self.latent.calc_all_logits(prev_latent, lhidden).transpose(0, 1)
+        lweights = llogits[..., 1] - llogits[..., 0]
+        denom = (llogits.logsumexp(2) - llogits[..., 0]).sum(1)
+        dist = distributions.ConditionalBernoulli(given_count, logits=lweights)
 
         L = cond_hist.size(0)
         chidden = self.conditional.calc_all_hidden(prev_cond, cond_hist[:-1])
@@ -793,9 +795,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             3, cond_hist.view(L, 1, N, 1).expand(L, T, N, 1)
         ).squeeze(3)
 
-        ll = dist.marginal_log_likelihoods(lcond.transpose(1, 2), False)
-        denom = llogits.exp().log1p().sum(1)
-        ll = ll - denom
+        ll = dist.marginal_log_likelihoods(lcond.transpose(1, 2), False) - denom
         assert (ll < 0).all()
         return ll
 
@@ -1322,8 +1322,11 @@ def test_lstm_lm():
                 lm = LstmLm(V, input_size, post_input_size, params)
                 logits_exp = lm(hist[:-1], prev)
                 for n in range(N):
-                    assert (logits_exp[length[n] :, n, 1:] == config.EPS_NINF).all()
-                    assert (logits_exp[length[n] :, n, 0] == config.EPS_0).all()
+                    assert (
+                        logits_exp[length[n] :, n, 1:]
+                        == torch.finfo(torch.float).min / 2
+                    ).all()
+                    assert (logits_exp[length[n] :, n, 0] == 0).all()
                 loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
                 g_exp = torch.autograd.grad(loss_exp, lm.parameters())
 

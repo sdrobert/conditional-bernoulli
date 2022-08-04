@@ -42,7 +42,7 @@ ALL_LMS=( lm-flatstart lm-pretrained nolm )
 INVALIDS=( 
   'full_marginal' 'full_cb' 'partial_marginal'
   'full_*_nolm' 'partial_*_nolm'
-  'ctc_lm-partial' 'ctc_lm-flatstart' 'full_ctc' 'partial_ctc'
+  'ctc_lm-pretrained' 'ctc_lm-flatstart' 'full_ctc' 'partial_ctc'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
@@ -62,6 +62,11 @@ estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
 beam_widths=( 1 2 4 8 16 32 )
 only=0
+
+# models=( "indep" )
+# estimators=( "ctc" )
+# lms=( "nolm" )
+# seeds=1
 
 while getopts "xhs:i:d:o:b:n:k:c:m:e:l:" opt; do
   case $opt in
@@ -167,7 +172,7 @@ if [ $stage -le 1 ]; then
   if [ ! -f "$data/.complete" ]; then 
     echo "Beginning stage 1"
     if [ -z "$timit" ]; then
-      echo "timit directory unset, but needed for this command (use -t)" 1>&2
+      echo "timit directory unset, but needed for this command (use -i)" 1>&2
       exit 1
     fi
     argcheck_is_writable d "$data"
@@ -282,8 +287,8 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         bdir="$hdir/$beam_width"
         mkdir -p "$bdir"
         if [ ! -f "$bdir/.complete" ]; then
-          echo "Beginning stage 4 - decoding $mname with seed $seed and" \
-            "beam width $beam_width"
+          echo "Beginning stage 4 - decoding $part using $mname with seed" \
+            "$seed and beam width $beam_width"
           python asr.py "$data" \
             --read-yaml "$yml" \
             --device "$device" \
@@ -291,22 +296,22 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
               "${xtra_args[@]}" --beam-width "$beam_width" \
               "$mdir/final.pt" "$bdir"
           touch "$bdir/.complete"
-          echo "Ending stage 4 - decoding $mname with seed $seed and" \
-            "beam width $beam_width"
+          echo "Ending stage 4 - decoding $part using $mname with seed" \
+            "$seed and beam width $beam_width"
         else
-          echo "'$bdir/.complete' exists. Skipping decoding for $mname with" \
-            "seed $seed and beam width $beam_width"
+          echo "'$bdir/.complete' exists. Skipping decoding $part using" \
+            "$mname with seed $seed and beam width $beam_width"
         fi
         if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
-          echo "Beginning stage 4 - gathering hyps for $mname with seed" \
-            "$seed and beam with $beam_width"
+          echo "Beginning stage 4 - gathering hyps for $part using $mname" \
+            "with $seed and beam with $beam_width"
           torch-token-data-dir-to-trn \
             "$bdir" "$data/ext/id2token.txt" \
             "$mdir/$part.hyp.$beam_width.utrn"
           python prep/timit.py "$data" filter \
             "$mdir/$part.hyp.$beam_width."{u,}trn
-          echo "Ending stage 4 - gathering hyps for $mname with seed" \
-            "$seed and beam with $beam_width"
+          echo "Ending stage 4 - gathering hyps for $part using $mname" \
+            "with seed $seed and beam with $beam_width"
         fi
       done
       active_files=( "$mdir/$part.hyp."*.trn )
@@ -337,7 +342,7 @@ for part in dev test; do
       awk '
 BEGIN {n=0; s=0; min=1000; max=0}
 $1 ~ /best/ {
-  x=substr($NF, 1, length($NF) - 1);
+  x=substr($NF, 1, length($NF) - 1) + 0;
   a[n++]=x; s+=x; if (x < min) min=x; if (x > max) max=x;
 }
 END {

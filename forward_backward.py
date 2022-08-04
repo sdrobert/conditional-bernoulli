@@ -17,7 +17,7 @@
 import torch
 
 
-@torch.jit.script_if_tracing
+@torch.jit.script
 def extract_relevant_odds_forward(
     w: torch.Tensor, given_count: torch.Tensor, fill: float = 0.0,
 ) -> torch.Tensor:
@@ -42,7 +42,7 @@ def extract_relevant_odds_forward(
     return w_f
 
 
-@torch.jit.script_if_tracing
+@torch.jit.script
 def R_forward(
     w_f: torch.Tensor, given_count: torch.Tensor, return_all: bool = False,
 ) -> torch.Tensor:
@@ -59,7 +59,7 @@ def R_forward(
         return r.gather(0, given_count.unsqueeze(0)).squeeze(0)
 
 
-@torch.jit.script_if_tracing
+@torch.jit.script
 def log_R_forward(
     logits_f: torch.Tensor, given_count: torch.Tensor, return_all: bool = False,
 ) -> torch.Tensor:

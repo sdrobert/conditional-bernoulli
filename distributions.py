@@ -64,7 +64,9 @@ class PoissonBinomial(torch.distributions.Distribution):
 
     def enumerate_support(self, expand=True) -> torch.Tensor:
         total = self.event_shape[0]
-        support = torch.arange(total + 1, device=self._param.device, dtype=torch.float)
+        support = torch.arange(
+            total + 1, device=self._param.device, dtype=self._param.dtype
+        )
         support = support.view((-1,) + (1,) * self.batch_shape)
         if expand:
             support = support.expand((-1,) + self.batch_shape)
@@ -208,7 +210,7 @@ def _extended_conditional_bernoulli(
     drange = torch.arange(diffmax)
     lmax_max = r_f.size(0) - 1
     tau_ellp1 = torch.full((N, 1), diffmax)
-    b = torch.zeros((N, T), device=device, dtype=torch.float)
+    b = torch.zeros((N, T), device=device, dtype=w_f.dtype)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -238,7 +240,7 @@ def _log_extended_conditional_bernoulli(
     drange = torch.arange(diffmax, device=device)
     lmax_max = log_r_f.size(0) - 1
     tau_ellp1 = torch.full((N, 1), diffmax, device=device)
-    b = torch.zeros((N, T), device=device, dtype=torch.float)
+    b = torch.zeros((N, T), device=device, dtype=logits_f.dtype)
     for _ in range(lmax_max):
         valid_ell = remainder > 0
         mask_ell = (tau_ellp1 < drange) & valid_ell.unsqueeze(1)
@@ -483,7 +485,7 @@ class ConditionalBernoulli(torch.distributions.ExponentialFamily):
             given_count = given_count.flatten()
         lcond_f = extract_relevant_odds_forward(lcond, given_count, config.EPS_NINF)
         assert lcond_f.shape == logits_f.shape
-        ll = log_R_forward(logits_f + lcond_f, given_count)
+        ll = log_R_forward((logits_f + lcond_f).double(), given_count).to(logits_f)
         if normalize:
             ll = ll - self.log_partition
         return ll.view(self.batch_shape)

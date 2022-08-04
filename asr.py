@@ -80,6 +80,10 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     mc_samples = param.Integer(1, bounds=(1, None))
     mc_burn_in = param.Integer(1, bounds=(1, None))
     dropout_prob = param.Magnitude(0.0)
+    sa_time_size_prop = param.Magnitude(0.0)
+    sa_time_num_prop = param.Magnitude(0.0)
+    sa_freq_num = param.Integer(0, bounds=(0, None))
+    sa_freq_size = param.Integer(0, bounds=(0, None))
 
 
 class LanguageModelTrainingStateParams(training.TrainingStateParams):
@@ -523,6 +527,22 @@ def train_am_for_epoch(
         ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
         return ll
 
+    if (params.sa_time_num_prop and params.sa_time_size_prop) or (
+        params.sa_freq_num and params.sa_freq_size
+    ):
+        sa = modules.SpecAugment(
+            0,
+            0,
+            100000,
+            params.sa_freq_size,
+            params.sa_time_size_prop,
+            100000,
+            params.sa_time_num_prop,
+            params.sa_freq_num,
+        )
+    else:
+        sa = lambda x, _: x
+
     total_loss = 0.0
     for feats, _, refs, feat_lens, ref_lens in loader:
         T, N = feats.shape[:2]
@@ -531,6 +551,8 @@ def train_am_for_epoch(
         feat_lens = feat_lens.to(device, non_blocking=non_blocking)
         ref_lens = ref_lens.to(device, non_blocking=non_blocking)
         optimizer.zero_grad()
+
+        feats = sa(feats.transpose(0, 1), feat_lens).transpose(0, 1)
 
         if estimator_name == "marginal":
             prev = {
@@ -768,7 +790,8 @@ def decode_am(options, dict_):
         elif dict_["am"]["decoding"].is_ctc:
             lens_ = model.compute_output_time_size(feat_lens)
             lprobs = model.calc_ctc_log_probs(feat_lens.new_empty((0, N)), prev)
-            hyps, lens = search(lprobs, lens_, prev)
+            hyps, lens, _ = search(lprobs, lens_, prev)
+            hyps, lens = hyps[..., 0], lens[..., 0]
         else:
             Tp = model.compute_output_time_size(T).item()
             hyps, lens, _ = search(N, Tp, prev)

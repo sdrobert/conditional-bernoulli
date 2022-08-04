@@ -1,28 +1,41 @@
 model:
   frontend:
-    convolutional_factor_schedule: 2
-    convolutional_initial_channels: 45
-    convolutional_kernel_freq: 8
-    convolutional_kernel_time: 9
-    convolutional_layers: 1
-    convolutional_nonlinearity: tanh
-    recurrent_bidirectional: true
-    recurrent_layers: 3
-    recurrent_size: 864
-    recurrent_type: LSTM
-    window_size: 5
-    window_stride: 3
+    ## cnn-mellin parameters
+    # convolutional_factor_schedule: 2
+    # convolutional_initial_channels: 45
+    # convolutional_kernel_freq: 8
+    # convolutional_kernel_time: 9
+    # convolutional_layers: 1
+    # convolutional_nonlinearity: tanh
+    # recurrent_bidirectional: true
+    # recurrent_layers: 3
+    # recurrent_size: 864
+    # recurrent_type: LSTM
+    # window_size: 5
+    # window_stride: 3
 
-    ## Online alignments setup
+    ## Online alignments setup (small)
+    window_size: 3
+    window_stride: 3
+    convolutional_factor_schedule: 1
+    convolutional_layers: 0
+    recurrent_type: LSTM
+    recurrent_size: 300
+    recurrent_layers: 2
+    recurrent_bidirectional: false
+
+    ## Online alignments setup (large)
     # window_size: 3
     # window_stride: 3
+    # convolutional_factor_schedule: 1
     # convolutional_layers: 0
     # recurrent_type: LSTM
-    # recurrent_size: 512
+    # recurrent_size: 300
     # recurrent_layers: 4
     # recurrent_bidirectional: false
+
   latent:
-    hidden_size: 512
+    hidden_size: 300
     num_layers: 1
     merge_method: cat
 am:
@@ -33,7 +46,7 @@ am:
       num_length_buckets: 5 # If greater than 1, elements will be batched with other elements of similar length (along the feature time dimension). Elements will be partioned roughly evenly into num_length_buckets. Increasing num_length_buckets will usually decrease the total amount of padding per batch at the cost of fewer candidates to choose from within batches.
       size_batch_by_length: true # Only matters when num_length_buckets > 1. If false, all buckets have the same batch size of batch_size. If true, buckets with shorter-length utterances will contain greater than batch_size elements per batch. Letting x be the batch size of a bucket, y be the length of the largest element in the bucket, and Y be the length of the largest element in the corpus, x is the greatest value such that x * y <= Y * batch_size
   training:
-    dropout_prob: 0.15
+    # dropout_prob: 0.15
     mc_samples: 16
     mc_burn_in: 8
     early_stopping_burnin: 20
@@ -41,3 +54,7 @@ am:
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true # If the model is being saved, keep only the model and optimizer parameters for the last and best epoch (in terms of validation loss). If False, save every epoch. See also "saved_model_fmt" and "saved_optimizer_fmt"
     log10_learning_rate: -4
+    sa_time_size_prop: 0.04
+    sa_freq_size: 4
+    sa_time_num_prop: 0.04
+    sa_freq_num: 1
