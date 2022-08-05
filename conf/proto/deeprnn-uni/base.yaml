@@ -1,0 +1,32 @@
+model:
+  frontend:
+    window_size: 1
+    window_stride: 1
+    convolutional_layers: 0
+    recurrent_type: LSTM
+    recurrent_size: 421
+    recurrent_bidirectional: false
+  latent:
+    hidden_size: 421
+  
+  conditional:
+    hidden_size: 250
+am:
+  data:
+    loader:
+      batch_size: 16
+      drop_last: false
+      size_batch_by_length: false
+  training:
+    dropout_prob: 0.0
+    mc_samples: 16
+    mc_burn_in: 8
+    early_stopping_burnin: 20
+    early_stopping_patience: 50
+    early_stopping_threshold: 1e-3
+    keep_last_and_best_only: true
+    log10_learning_rate: -4
+    # sa_time_size_prop: 0.04
+    # sa_freq_size: 4
+    # sa_time_num_prop: 0.04
+    # sa_freq_num: 1

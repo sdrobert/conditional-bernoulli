@@ -1,0 +1,14 @@
+model:
+  conditional:
+    embedding_size: 300
+    num_layers: 1
+
+lm:
+  data:
+    batch_size: 512
+    drop_last: false
+  training:
+    dropout_prob: 0.3
+    swap_prob: 0.3
+    early_stopping_patience: 10
+    early_stopping_threshold: 0.1

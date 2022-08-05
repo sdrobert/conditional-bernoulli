@@ -1,5 +1,0 @@
-model:
-  conditional:
-    embedding_size: 0
-    merge_method: cat # How to combine inputs with embeddings or hidden vectors. mix: softmax for weights then weighted mixture; cat: concatenate. Choices: "mix", "cat"
-    num_layers: 0 # The number of LSTM layers.

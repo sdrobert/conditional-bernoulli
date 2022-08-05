@@ -214,7 +214,7 @@ def train_lm_for_epoch(
     epoch: int,
     device: torch.device,
     swap_prob: float,
-    quiet: bool,
+    quiet: int,
 ) -> float:
     loader.epoch = epoch
     non_blocking = False  # device.type == "cpu" or loader.pin_memory
@@ -224,7 +224,7 @@ def train_lm_for_epoch(
 
     model.train()
 
-    if not quiet:
+    if quiet < 1:
         loader = tqdm(loader)
 
     total_loss = 0
@@ -282,9 +282,9 @@ def initialize_model(options, dict_) -> models.AcousticModel:
     if "pretrained_lm_path" in options and options.pretrained_lm_path is not None:
         state_dict = torch.load(options.pretrained_lm_path)
         model.conditional.load_state_dict(state_dict, strict=False)
-        for key, param in model.conditional.named_parameters():
-            if state_dict.get(key, None) is not None:
-                param.requires_grad = False
+        # for key, param in model.conditional.named_parameters():
+        #     if state_dict.get(key, None) is not None:
+        #         param.requires_grad = False
         # don't let the controller reset the parameters on the first epoch!
         model.conditional.reset_parameters = lambda *args, **kwargs: None
     if "am_path" in options:
@@ -300,11 +300,6 @@ def train_lm(options, dict_):
         raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
     seed = dict_["lm"]["training"].seed
 
-    if dict_["model"]["conditional"].merge_method == "cat":
-        raise NotImplementedError(
-            "merge_method == 'cat' LM pretraining not implemented"
-        )
-
     model = initialize_model(options, dict_["model"])
     model = model.conditional
     model.add_module("post_merger", None)
@@ -319,14 +314,14 @@ def train_lm(options, dict_):
         state_dir = state_csv = None
 
     controller = training.TrainingStateController(
-        dict_["lm"]["training"], state_csv, state_dir, warn=not options.quiet
+        dict_["lm"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
 
     utt_ids = sorted(LanguageModelDataSet.get_utt_ids_in_data_dir(data_dir))
     fraction_held_out = dict_["lm"]["training"].fraction_held_out
     num_val = max(1, int(len(utt_ids) * fraction_held_out))
     num_train = len(utt_ids) - num_val
-    if not options.quiet:
+    if options.quiet < 2:
         print(
             f"hold-out is {fraction_held_out:.0%} ({num_val}/{num_train})",
             file=sys.stderr,
@@ -350,7 +345,7 @@ def train_lm(options, dict_):
     epoch = controller.get_last_epoch() + 1
 
     while controller.continue_training(epoch - 1):
-        if not options.quiet:
+        if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
         train_loss = train_lm_for_epoch(
             model,
@@ -362,30 +357,31 @@ def train_lm(options, dict_):
             dict_["lm"]["training"].swap_prob,
             options.quiet,
         )
-        if not options.quiet:
+        if options.quiet < 1:
             print(
                 "Epoch completed. Determining hold-out perplexity...", file=sys.stderr
             )
         pp = lm_perplexity(model, val, options.device)
         controller.update_for_epoch(model, optimizer, train_loss, pp, epoch)
-        if not options.quiet:
+        if options.quiet < 2:
             print(
-                f"Train loss: {train_loss:.02f}, hold-out perplexity: {pp:.02f}",
+                f"Epoch {epoch}: Train loss={train_loss:.02f}, hold-out "
+                f"perplexity={pp:.02f}",
                 file=sys.stderr,
             )
         epoch += 1
 
-    if not options.quiet:
+    if options.quiet < 2:
         print(f"Finished training at epoch {epoch - 1}", file=sys.stderr)
 
     if options.model_dir is not None:
         epoch = controller.get_best_epoch()
-        if not options.quiet:
+        if options.quiet < 2:
             print(
                 f"Best epoch was {epoch}. Saving that model", file=sys.stderr,
             )
         controller.load_model_for_epoch(model, epoch)
-    elif not options.quiet:
+    elif options.quiet < 2:
         print(
             f"No history kept. Saving model from last epoch ({epoch - 1})",
             file=sys.stderr,
@@ -401,12 +397,6 @@ def eval_lm(options, dict_):
         raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
 
     if options.load_path is not None:
-        print(f"model: {options.load_path.name}, ", end="")
-        if dict_["model"]["conditional"].merge_method == "cat":
-            raise NotImplementedError(
-                "merge_method == 'cat' LM pretraining not implemented"
-            )
-
         model = initialize_model(options, dict_["model"])
         if options.full_model:
             model.load_state_dict(torch.load(options.load_path, options.device), False)
@@ -452,7 +442,7 @@ def val_error_rates(
     loader: data.SpectEvaluationDataLoader,
     device: torch.device,
     is_ctc: bool,
-    quiet: bool,
+    quiet: int,
 ):
     model.eval()
 
@@ -465,7 +455,7 @@ def val_error_rates(
         search = modules.BeamSearch(model, 1)
     rater = modules.ErrorRate(eos=config.INDEX_PAD_VALUE, norm=False)
 
-    if not quiet:
+    if quiet < 1:
         loader = tqdm(loader)
 
     for feats, _, refs, feat_lens, ref_lens, _ in loader:
@@ -500,7 +490,7 @@ def train_am_for_epoch(
     params: AcousticModelTrainingStateParams,
     epoch: int,
     device: torch.device,
-    quiet: bool,
+    quiet: int,
 ) -> float:
     loader.epoch = epoch
     non_blocking = device.type == "cpu" or loader.pin_memory
@@ -510,7 +500,7 @@ def train_am_for_epoch(
 
     model.train()
 
-    if not quiet:
+    if quiet < 1:
         loader = tqdm(loader)
 
     def func(b: torch.Tensor) -> torch.Tensor:
@@ -669,8 +659,7 @@ def train_am(options, dict_):
     num_data_workers = min(get_num_avail_cores() - 1, 4)
 
     model = initialize_model(options, dict_["model"])
-    model.latent.dropout_prob = dict_["am"]["training"].dropout_prob
-    model.conditional.dropout_prob = dict_["am"]["training"].dropout_prob
+    model.dropout_prob = dict_["am"]["training"].dropout_prob
     optimizer = torch.optim.Adam(p for p in model.parameters() if p.requires_grad)
 
     if options.model_dir is not None:
@@ -680,7 +669,7 @@ def train_am(options, dict_):
         state_dir = state_csv = None
 
     controller = training.TrainingStateController(
-        dict_["am"]["training"], state_csv, state_dir, warn=not options.quiet
+        dict_["am"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
 
     train_loader = data.SpectTrainingDataLoader(
@@ -704,7 +693,7 @@ def train_am(options, dict_):
     epoch = controller.get_last_epoch() + 1
 
     while controller.continue_training(epoch - 1):
-        if not options.quiet:
+        if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
         train_loss = train_am_for_epoch(
             model,
@@ -716,7 +705,7 @@ def train_am(options, dict_):
             options.device,
             options.quiet,
         )
-        if not options.quiet:
+        if options.quiet < 1:
             print("Epoch completed. Determining dev error rate...", file=sys.stderr)
         dev_er = val_error_rates(
             model,
@@ -726,24 +715,24 @@ def train_am(options, dict_):
             options.quiet,
         )
         controller.update_for_epoch(model, optimizer, train_loss, dev_er, epoch)
-        if not options.quiet:
+        if options.quiet < 2:
             print(
-                f"Train loss: {train_loss:e}, dev error rate: {dev_er:%}",
+                f"Epoch {epoch}: Train loss={train_loss:e}, dev error rate={dev_er:%}",
                 file=sys.stderr,
             )
         epoch += 1
 
-    if not options.quiet:
+    if options.quiet < 2:
         print(f"Finished training at epoch {epoch - 1}", file=sys.stderr)
 
     if options.model_dir is not None:
         epoch = controller.get_best_epoch()
-        if not options.quiet:
+        if options.quiet < 2:
             print(
                 f"Best epoch was {epoch}. Saving that model", file=sys.stderr,
             )
         controller.load_model_for_epoch(model, epoch)
-    elif not options.quiet:
+    elif options.quiet < 2:
         print(
             f"No history kept. Saving model from last epoch ({epoch - 1})",
             file=sys.stderr,
@@ -782,6 +771,7 @@ def decode_am(options, dict_):
         feats, feat_lens = feats.to(options.device), feat_lens.to(options.device)
         T, N = feats.shape[:2]
         prev = {"input": feats, "length": feat_lens}
+        Tp = model.compute_output_time_size(T).item()
         if dict_["am"]["decoding"].style == "beam":
             hyps = search(prev, batch_size=N, max_iters=Tp)[0][..., 0]
             hyps, lens = models.extended_hist_to_conditional(
@@ -793,7 +783,6 @@ def decode_am(options, dict_):
             hyps, lens, _ = search(lprobs, lens_, prev)
             hyps, lens = hyps[..., 0], lens[..., 0]
         else:
-            Tp = model.compute_output_time_size(T).item()
             hyps, lens, _ = search(N, Tp, prev)
             hyps, lens = hyps[..., 0], lens[..., 0]
         hyps, lens = hyps.cpu(), lens.cpu()
@@ -835,7 +824,7 @@ def main(args=None):
     parser.add_argument(
         "--seed", type=int, default=None, help="Clobber config seeds with this if set"
     )
-    parser.add_argument("--quiet", action="store_true", default=False)
+    parser.add_argument("--quiet", "-q", action="count", default=0)
     subparsers = parser.add_subparsers(title="commands", required=True, dest="command")
 
     train_lm_parser = subparsers.add_parser("train_lm")

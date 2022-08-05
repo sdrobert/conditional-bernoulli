@@ -1,6 +1,0 @@
-model:
-  conditional:
-    embedding_size: 16
-    hidden_size: 128
-    merge_method: cat
-    num_layers: 3

@@ -1,6 +1,9 @@
 model:
+  frontend:
+    recurrent_layers: 3
   latent:
-    embedding_size: 0  # The size of token embeddings.
+    num_layers: 0
+    embedding_size: 0
   merge:
     cond_input_is_post: false
 am:

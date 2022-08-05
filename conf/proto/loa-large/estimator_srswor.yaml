@@ -1,0 +1,5 @@
+am:
+  training:
+    estimator: srswor
+  decoding:
+    is_ctc: false

@@ -1,0 +1,4 @@
+model:
+  conditional:
+    embedding_size: 421
+    num_layers: 0

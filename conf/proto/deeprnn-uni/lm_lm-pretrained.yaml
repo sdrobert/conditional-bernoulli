@@ -1,9 +1,8 @@
 model:
   conditional:
-    embedding_size: 16
-    hidden_size: 128
-    merge_method: mix
-    num_layers: 3
+    embedding_size: 421
+    num_layers: 1
+
 lm:
   data:
     batch_size: 512

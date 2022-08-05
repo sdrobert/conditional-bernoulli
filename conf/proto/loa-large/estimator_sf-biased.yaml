@@ -1,0 +1,5 @@
+am:
+  training:
+    estimator: sf-biased
+  decoding:
+    is_ctc: false

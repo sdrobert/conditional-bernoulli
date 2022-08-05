@@ -30,7 +30,7 @@ run_stage() {
     (
       export CUDA_VISIBLE_DEVICES=$gpu_number;
       export TIMIT_OFFSET=$i;
-      ./timit.sh -s $stage -x "${global_args[@]}" > "logs/timit/stage-$stage-$gpu_number.log" 2>&1;
+      ./timit.sh -s $stage -x -q "${global_args[@]}" > "logs/timit/stage-$stage-$gpu_number.log" 2>&1;
     ) & 
     pids+=( $! )
   done
