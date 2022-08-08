@@ -50,6 +50,7 @@ INVALIDS=(
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
 TMPDIR="$(mktemp -d)"
+VOCAB_SIZE=60
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # variables
@@ -65,7 +66,8 @@ models=( loa-small )
 dependencies=( "${ALL_DEPENDENCIES[@]}" )
 estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
-beam_widths=( 1 2 4 8 16 32 )
+# beam_widths=( 1 2 4 8 16 32 )
+beam_widths=( 4 )
 only=0
 
 
@@ -137,7 +139,7 @@ fi
 confdir="$exp/conf"
 lmdir="$exp/lm"
 amdir="$exp/am"
-mel_combos=( $(
+dmel_combos=( $(
   echo "" |
   prod "" "${models[@]}" |
   prod _ "${dependencies[@]}" |
@@ -145,7 +147,7 @@ mel_combos=( $(
   prod _ "${lms[@]}" |
   filter is_not is_a_match "${INVALIDS[@]}"
 ) )
-ncombos="${#mel_combos[@]}"
+ncombos="${#dmel_combos[@]}"
 ncs=$((ncombos * seeds))
 ms=$((seeds * ${#models[@]}))
 ncsb=$((ncs * ${#beam_widths[@]}))
@@ -157,7 +159,7 @@ seed=
 
 unpack_nc() {
   local combo
-  IFS='_' read -ra combos <<< "${mel_combos[$1]}" 
+  IFS='_' read -ra combos <<< "${dmel_combos[$1]}" 
   model=${combos[0]}
   dependency=${combos[1]}
   estimator=${combos[2]}
@@ -193,7 +195,7 @@ combine() {
 
 # prep the dataset
 if [ $stage -le 1 ]; then
-  if [ ! -f "$data/.complete" ]; then 
+  if [ ! -f "$data/.complete" ] && [ $OFFSET -eq 0 ]; then 
     echo "Beginning stage 1"
     if [ -z "$timit" ]; then
       echo "timit directory unset, but needed for this command (use -i)" 1>&2
@@ -201,15 +203,15 @@ if [ $stage -le 1 ]; then
     fi
     argcheck_is_writable d "$data"
     argcheck_is_readable i "$timit"
-    # python prep/timit.py "$data" preamble "$timit"
-    # python prep/timit.py "$data" init_phn --lm --vocab-size 61
+    python prep/timit.py "$data" preamble "$timit"
+    python prep/timit.py "$data" init_phn --lm --vocab-size ${VOCAB_SIZE}
     # 40mel+1energy fbank features every 10ms
-    # python prep/timit.py "$data" torch_dir \
-    #   --computer-json prep/conf/feats/fbank_41.json \
-    #   --seed 0
-    cat "$data/local/phn61/lm_train.trn.gz" | \
-      gunzip -c | \
-      trn-to-torch-token-data-dir - "$data/ext/token2id.txt" "$data/lm"
+    python prep/timit.py "$data" torch_dir \
+      --computer-json prep/conf/feats/fbank_41.json \
+      --seed 0
+    cat "$data/local/phn${VOCAB_SIZE}/lm_train.trn.gz" | \
+     gunzip -c | \
+     trn-to-torch-token-data-dir - "$data/ext/token2id.txt" "$data/lm"
     touch "$data/.complete"
     echo "Finished stage 1"
   else
@@ -220,19 +222,26 @@ fi
 
 # pretrain the language dependencies (unnecessary if not doing LM pretraining)
 if [ $stage -le 2 ]; then
-  if [[ " ${lms[*]} " =~ " lm-pretrained " ]]; then
+  if [[ "${dmel_combos[*]}" =~ "lm-pretrained" ]]; then
     mkdir -p "$lmdir/$model"
-    if [ ! -f "$lmdir/results.ngram.txt" ]; then
+    if [ ! -f "$lmdir/results.ngram.txt" ] && [ $OFFSET -eq 0 ]; then
       echo "Beginning stage 2 - results.ngram.txt"
-      python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt"
+      python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt" \
+        || rm -f "$lmdir/results.ngram.txt"
       echo "Ending stage 2 - results.ngram.txt"
     fi
     for (( i = OFFSET; i < ms ; i += STRIDE )); do
       unpack_ms $i
+      # the only settings that matter are the model and lm; we put dummy
+      # configs in the rest
+      dependency="${dependencies[0]}"
+      estimator="${estimators[0]}"
+      lm=lm-pretrained
+      yml="$(combine)"
       if [ ! -f "$lmdir/$model/$seed/final.pt" ]; then
         echo "Beginning stage 2 - training LM for model $model and seed $seed"
         python asr.py "$data" $quiet \
-          --read-yaml conf/proto/${model}/lm_lm-pretrained.yaml \
+          --read-yaml "$yml" \
           --device "$device" \
           --model-dir "$lmdir/$model/$seed" \
           --seed $seed \
@@ -245,7 +254,7 @@ if [ $stage -le 2 ]; then
       if [ ! -f "$lmdir/results.$model.$seed.txt" ]; then
         echo "Beginning stage 2 - computing LM perplexity for seed $seed"
         python asr.py "$data" $quiet \
-          --read-yaml conf/proto/${model}/lm_lm-pretrained.yaml \
+          --read-yaml "$yml" \
           --device "$device" \
           eval_lm "$lmdir/$model/$seed/final.pt" \
             > "$lmdir/results.$model.$seed.txt"

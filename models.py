@@ -551,7 +551,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 idx_ = (idx - 1).clamp_min_(0)
                 tok = hist.gather(0, idx_).masked_fill_(idx == 0, V)
                 tok = tok.squeeze(0)
-            x = self.embedder(tok)
+            x = self.dropout(self.embedder(tok))
 
         if self.input_size and self.input_name in prev:
             in_ = prev[self.input_name]
@@ -560,7 +560,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 in_ = in_.gather(
                     0, idx.unsqueeze(2).expand(1, N, self.input_size)
                 ).squeeze(0)
-            x = in_ if x is None else self.input_merger(x, in_)
+            x = in_ if x is None else self.dropout(self.input_merger(x, in_))
 
         prev_hidden, prev_cell = prev[self.hidden_name], prev[self.cell_name]
         cur_hidden, cur_cell = [], []
@@ -585,7 +585,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 post_in = post_in.gather(
                     0, idx.unsqueeze(2).expand(1, N, self.post_input_size)
                 ).squeeze(0)
-            x = post_in if x is None else self.post_merger(x, post_in)
+            x = post_in if x is None else self.dropout(self.post_merger(x, post_in))
 
         assert x.size(-1) == self.logiter_input_size
         logits = self.logiter(x)
@@ -607,13 +607,13 @@ class LstmLm(MixableSequentialLanguageModel):
                 raise RuntimeError("lm is autoregressive; hist needed")
             N = hist.size(1)
             hist = torch.cat([hist.new_full((1, N), self.vocab_size), hist])
-            x = self.embedder(hist)
+            x = self.dropout(self.embedder(hist))
 
         if self.input_size and self.input_name in prev:
             in_ = prev[self.input_name]
             if in_.dim() != 3:
                 raise RuntimeError(f"full input ('{self.input_name}') must be provided")
-            x = in_ if x is None else self.input_merger(x, in_)
+            x = in_ if x is None else self.dropout(self.input_merger(x, in_))
 
         if self.lstm is not None:
             self.lstm.dropout = self.dropout.p
@@ -632,7 +632,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 raise RuntimeError(
                     f"full post input ('{self.post_input_name}') must be provided"
                 )
-            x = post_in if x is None else self.post_merger(x, post_in)
+            x = post_in if x is None else self.dropout(self.post_merger(x, post_in))
 
         assert x.size(-1) == self.logiter_input_size
 
@@ -823,7 +823,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         clogits = self.conditional.calc_all_logits(prev_cond).log_softmax(2)
         logits = torch.cat([llogits[..., 1:] + clogits, llogits[..., :1]], 2)
         return logits
-    
+
     @property
     def dropout_prob(self) -> float:
         return self.conditional.dropout_prob
@@ -1099,7 +1099,7 @@ class AcousticModel(JointLatentLstmLm):
     def reset_parameters(self) -> None:
         self.frontend.reset_parameters()
         super().reset_parameters()
-    
+
     @property
     def dropout_prob(self) -> float:
         return self.conditional.dropout_prob

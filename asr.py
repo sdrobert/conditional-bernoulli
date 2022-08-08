@@ -80,6 +80,7 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     mc_samples = param.Integer(1, bounds=(1, None))
     mc_burn_in = param.Integer(1, bounds=(1, None))
     dropout_prob = param.Magnitude(0.0)
+    dropout_er_thresh = param.Magnitude(1.0)
     sa_time_size_prop = param.Magnitude(0.0)
     sa_time_num_prop = param.Magnitude(0.0)
     sa_freq_num = param.Integer(0, bounds=(0, None))
@@ -426,6 +427,9 @@ def eval_lm(options, dict_):
                 token, id_ = line.strip().split()
                 id_ = int(id_)
                 token2id[token] = id_
+        m = max(token2id.values())
+        token2id["<s>"] = m + 1
+        token2id["</s>"] = m + 2
         with gzip.open(arpa_lm_path, mode="rt") as file_:
             prob_list = data.parse_arpa_lm(file_, token2id)
         model = modules.LookupLanguageModel(len(token2id), token2id["<s>"], prob_list)
@@ -659,7 +663,6 @@ def train_am(options, dict_):
     num_data_workers = min(get_num_avail_cores() - 1, 4)
 
     model = initialize_model(options, dict_["model"])
-    model.dropout_prob = dict_["am"]["training"].dropout_prob
     optimizer = torch.optim.Adam(p for p in model.parameters() if p.requires_grad)
 
     if options.model_dir is not None:
@@ -692,6 +695,13 @@ def train_am(options, dict_):
     dev_er = float("inf")
     epoch = controller.get_last_epoch() + 1
 
+    if (
+        epoch > 1
+        and controller.get_info(controller.get_best_epoch())["val_met"]
+        < dict_["am"]["training"].dropout_er_thresh
+    ) or dict_["am"]["training"].dropout_er_thresh == 1.0:
+        model.dropout_prob = dict_["am"]["training"].dropout_prob
+
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
@@ -714,6 +724,8 @@ def train_am(options, dict_):
             dict_["am"]["decoding"].is_ctc,
             options.quiet,
         )
+        if dev_er < dict_["am"]["training"].dropout_er_thresh:
+            model.dropout_prob = dict_["am"]["training"].dropout_prob
         controller.update_for_epoch(model, optimizer, train_loss, dev_er, epoch)
         if options.quiet < 2:
             print(
@@ -744,7 +756,6 @@ def train_am(options, dict_):
 
 def decode_am(options, dict_):
     test_dir = os.path.join(options.data_dir, "dev" if options.dev else "test")
-    num_data_workers = min(get_num_avail_cores() - 1, 4)
 
     model = initialize_model(options, dict_["model"])
     model.eval()
@@ -760,35 +771,28 @@ def decode_am(options, dict_):
             model, options.beam_width
         )
 
-    test_loader = data.SpectEvaluationDataLoader(
-        test_dir,
-        dict_["am"]["data"]["loader"],
-        data_params=dict_["am"]["data"]["dev"],
-        batch_first=False,
-        num_workers=num_data_workers,
-    )
-    for feats, _, _, feat_lens, _, uttids in test_loader:
-        feats, feat_lens = feats.to(options.device), feat_lens.to(options.device)
-        T, N = feats.shape[:2]
+    test_set = data.SpectDataSet(test_dir, params=dict_["am"]["data"]["test"])
+    for idx, (feats, _, _) in enumerate(test_set):
+        utt_id = test_set.utt_ids[idx]
+        T = feats.size(0)
+        feats = feats.to(options.device).unsqueeze(1)
+        feat_lens = torch.tensor([T]).to(options.device)
         prev = {"input": feats, "length": feat_lens}
-        Tp = model.compute_output_time_size(T).item()
+        Tp = model.compute_output_time_size(T).view(1)
         if dict_["am"]["decoding"].style == "beam":
-            hyps = search(prev, batch_size=N, max_iters=Tp)[0][..., 0]
-            hyps, lens = models.extended_hist_to_conditional(
-                hyps, vocab_size=model.vocab_size - 1
+            hyp = search(prev, batch_size=1, max_iters=Tp.item())[0][..., 0]
+            hyp, len_ = models.extended_hist_to_conditional(
+                hyp, vocab_size=model.vocab_size - 1
             )
         elif dict_["am"]["decoding"].is_ctc:
-            lens_ = model.compute_output_time_size(feat_lens)
-            lprobs = model.calc_ctc_log_probs(feat_lens.new_empty((0, N)), prev)
-            hyps, lens, _ = search(lprobs, lens_, prev)
-            hyps, lens = hyps[..., 0], lens[..., 0]
+            lprobs = model.calc_ctc_log_probs(feat_lens.new_empty((0, 1)), prev)
+            hyp, len_, _ = search(lprobs, Tp, prev)
+            hyp, len_ = hyp[..., 0], len_[..., 0]
         else:
-            hyps, lens, _ = search(N, Tp, prev)
-            hyps, lens = hyps[..., 0], lens[..., 0]
-        hyps, lens = hyps.cpu(), lens.cpu()
-        for hyp, len, uttid in zip(hyps.T, lens.T, uttids):
-            hyp = hyp[:len]
-            torch.save(hyp, f"{options.hyp_dir}/{uttid}.pt")
+            hyp, len_, _ = search(1, Tp, prev)
+            hyp, len_ = hyp[..., 0], len_[..., 0]
+        hyp = hyp.flatten()[: len_.flatten()].cpu()
+        torch.save(hyp, f"{options.hyp_dir}/{utt_id}.pt")
 
 
 class DirType(object):

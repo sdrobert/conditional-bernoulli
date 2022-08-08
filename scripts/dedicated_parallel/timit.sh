@@ -20,6 +20,8 @@ global_args=( "$@" )
 
 export TIMIT_STRIDE="$ngpus"
 
+./timit.sh -s 1 -x "${global_args[@]}" > "logs/timit/stage-01-0.log" 2>&1
+
 run_stage() {
   stage="$(printf '%02d' $1)"
   echo "Beginning stage $stage"
@@ -30,15 +32,21 @@ run_stage() {
     (
       export CUDA_VISIBLE_DEVICES=$gpu_number;
       export TIMIT_OFFSET=$i;
-      ./timit.sh -s $stage -x -q "${global_args[@]}" > "logs/timit/stage-$stage-$gpu_number.log" 2>&1;
+      ./timit.sh -s $stage -x -q "${global_args[@]}" \
+        > "logs/timit/stage-$stage-$gpu_number.log" 2>&1;
     ) & 
     pids+=( $! )
   done
-  wait "${pids[@]}"
+  for i in "${!pids[@]}"; do
+    if ! wait "${pids[i]}"; then
+      echo "Process ${gpu_numbers[i]} failed" 1>&2
+      return 1
+    fi
+  done
   echo "Done stage $stage"
 }
 
-for stage in {1..4}; do
+for stage in {2..4}; do
   run_stage $stage
 done
 
