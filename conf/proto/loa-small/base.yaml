@@ -19,7 +19,9 @@ am:
       num_length_buckets: 5
       size_batch_by_length: true
   training:
-    dropout_prob: 0.0
+    dropout_prob: 0.5
+    swap_prob: 0.3
+    aug_er_thresh: 0.9
     mc_samples: 16
     mc_burn_in: 8
     early_stopping_burnin: 20

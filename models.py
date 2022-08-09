@@ -346,6 +346,24 @@ class CombinerNetwork(torch.nn.Module):
         return self.combined_linear((first + second).tanh())
 
 
+class TokenSwapper(torch.nn.Module):
+
+    vocab_size: int
+    p: float
+
+    def __init__(self, vocab_size: int, p: float):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.p = p
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.p == 0:
+            return x
+        mask = torch.rand(x.shape, device=x.device) > self.p
+        x = mask * x + ~mask * torch.randint_like(x, self.vocab_size)
+        return x
+
+
 class LstmLm(MixableSequentialLanguageModel):
 
     input_size: int
@@ -399,6 +417,7 @@ class LstmLm(MixableSequentialLanguageModel):
         self.last_hidden_name = last_hidden_name
         self.length_name = length_name
         self.dropout = torch.nn.Dropout(0.0)
+        self.swapper = TokenSwapper(vocab_size, 0.0)
 
         if params.embedding_size > 0:
             self.embedder = torch.nn.Embedding(
@@ -468,6 +487,14 @@ class LstmLm(MixableSequentialLanguageModel):
     @dropout_prob.setter
     def dropout_prob(self, val: float):
         self.dropout.p = val
+
+    @property
+    def swap_prob(self) -> float:
+        return self.swapper.p
+
+    @swap_prob.setter
+    def swap_prob(self, val: float):
+        self.swapper.p = val
 
     def reset_parameters(self) -> None:
         if self.embedder is not None:
@@ -551,7 +578,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 idx_ = (idx - 1).clamp_min_(0)
                 tok = hist.gather(0, idx_).masked_fill_(idx == 0, V)
                 tok = tok.squeeze(0)
-            x = self.dropout(self.embedder(tok))
+            x = self.embedder(self.swapper(tok))
 
         if self.input_size and self.input_name in prev:
             in_ = prev[self.input_name]
@@ -607,7 +634,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 raise RuntimeError("lm is autoregressive; hist needed")
             N = hist.size(1)
             hist = torch.cat([hist.new_full((1, N), self.vocab_size), hist])
-            x = self.dropout(self.embedder(hist))
+            x = self.embedder(self.swapper(hist))
 
         if self.input_size and self.input_name in prev:
             in_ = prev[self.input_name]
@@ -831,6 +858,14 @@ class JointLatentLstmLm(JointLatentLanguageModel):
     @dropout_prob.setter
     def dropout_prob(self, val: float):
         self.conditional.dropout_prob = self.latent.dropout_prob = val
+
+    @property
+    def swap_prob(self) -> float:
+        return self.conditional.swap_prob
+
+    @swap_prob.setter
+    def swap_prob(self, val: float):
+        self.conditional.swap_prob = val
 
 
 class FrontendParams(param.Parameterized):

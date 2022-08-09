@@ -80,7 +80,8 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     mc_samples = param.Integer(1, bounds=(1, None))
     mc_burn_in = param.Integer(1, bounds=(1, None))
     dropout_prob = param.Magnitude(0.0)
-    dropout_er_thresh = param.Magnitude(1.0)
+    swap_prob = param.Magnitude(0.0)
+    aug_er_thresh = param.Magnitude(1.0)
     sa_time_size_prop = param.Magnitude(0.0)
     sa_time_num_prop = param.Magnitude(0.0)
     sa_freq_num = param.Integer(0, bounds=(0, None))
@@ -214,7 +215,6 @@ def train_lm_for_epoch(
     controller: training.TrainingStateController,
     epoch: int,
     device: torch.device,
-    swap_prob: float,
     quiet: int,
 ) -> float:
     loader.epoch = epoch
@@ -233,9 +233,6 @@ def train_lm_for_epoch(
         hyp = hyp.to(device, non_blocking=non_blocking)
         optimizer.zero_grad()
         hist = hyp[:-1].clamp(0, model.vocab_size - 1)
-        if swap_prob != 0:
-            mask = torch.rand(hist.shape, device=device) > swap_prob
-            hist = mask * hist + ~mask * torch.randint_like(hist, model.vocab_size)
         logits = model(hist)
         assert logits.shape[:-1] == hyp.shape
         loss = loss_fn(logits.flatten(0, 1), hyp.flatten())
@@ -283,9 +280,9 @@ def initialize_model(options, dict_) -> models.AcousticModel:
     if "pretrained_lm_path" in options and options.pretrained_lm_path is not None:
         state_dict = torch.load(options.pretrained_lm_path)
         model.conditional.load_state_dict(state_dict, strict=False)
-        # for key, param in model.conditional.named_parameters():
-        #     if state_dict.get(key, None) is not None:
-        #         param.requires_grad = False
+        for key, param in model.conditional.named_parameters():
+            if state_dict.get(key, None) is not None:
+                param.requires_grad = False
         # don't let the controller reset the parameters on the first epoch!
         model.conditional.reset_parameters = lambda *args, **kwargs: None
     if "am_path" in options:
@@ -306,6 +303,7 @@ def train_lm(options, dict_):
     model.add_module("post_merger", None)
     model.add_module("input_merger", None)
     model.dropout_prob = dict_["lm"]["training"].dropout_prob
+    model.swap_prob = dict_["lm"]["training"].swap_prob
     optimizer = torch.optim.Adam(model.parameters())
 
     if options.model_dir is not None:
@@ -349,14 +347,7 @@ def train_lm(options, dict_):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
         train_loss = train_lm_for_epoch(
-            model,
-            loader,
-            optimizer,
-            controller,
-            epoch,
-            options.device,
-            dict_["lm"]["training"].swap_prob,
-            options.quiet,
+            model, loader, optimizer, controller, epoch, options.device, options.quiet,
         )
         if options.quiet < 1:
             print(
@@ -698,9 +689,10 @@ def train_am(options, dict_):
     if (
         epoch > 1
         and controller.get_info(controller.get_best_epoch())["val_met"]
-        < dict_["am"]["training"].dropout_er_thresh
-    ) or dict_["am"]["training"].dropout_er_thresh == 1.0:
+        < dict_["am"]["training"].aug_er_thresh
+    ) or dict_["am"]["training"].aug_er_thresh == 1.0:
         model.dropout_prob = dict_["am"]["training"].dropout_prob
+        model.swap_prob = dict_["am"]["training"].swap_prob
 
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
