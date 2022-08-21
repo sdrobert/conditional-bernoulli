@@ -86,12 +86,18 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     sa_time_num_prop = param.Magnitude(0.0)
     sa_freq_num = param.Integer(0, bounds=(0, None))
     sa_freq_size = param.Integer(0, bounds=(0, None))
+    weight_noise_std = param.Number(
+        None, bounds=(0, None), inclusive_bounds=(False, True)
+    )
 
 
 class LanguageModelTrainingStateParams(training.TrainingStateParams):
     fraction_held_out = param.Magnitude(0.05)
     dropout_prob = param.Magnitude(0.0)
     swap_prob = param.Magnitude(0.0)
+    weight_noise_std = param.Number(
+        None, bounds=(0, None), inclusive_bounds=(False, True)
+    )
 
 
 class LanguageModelDataLoaderParams(param.Parameterized):
@@ -192,12 +198,7 @@ def construct_default_param_dict():
             "merge": MergeParams(name="model.merge"),
         },
         "am": {
-            "data": {
-                "train": data.SpectDataParams(name="am.data.train"),
-                "dev": data.SpectDataParams(name="am.data.dev"),
-                "test": data.SpectDataParams(name="am.data.test"),
-                "loader": data.DynamicLengthDataLoaderParams(name="am.data.loader"),
-            },
+            "data": data.SpectDataLoaderParams(name="am.data"),
             "training": AcousticModelTrainingStateParams(name="am.training"),
             "decoding": DecodingParams(name="am.decoding"),
         },
@@ -209,10 +210,11 @@ def construct_default_param_dict():
 
 
 def train_lm_for_epoch(
-    model: models.SequentialLanguageModel,
+    model: models.LstmLm,
     loader: LanguageModelDataLoader,
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
+    params: LanguageModelTrainingStateParams,
     epoch: int,
     device: torch.device,
     quiet: int,
@@ -222,6 +224,12 @@ def train_lm_for_epoch(
     if epoch == 1 or (controller.state_dir and controller.state_csv_path):
         controller.load_model_and_optimizer_for_epoch(model, optimizer, epoch - 1, True)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=config.INDEX_PAD_VALUE)
+    model.dropout_prob = params.dropout_prob
+    model.swap_prob = params.swap_prob
+    if params.weight_noise_std is not None:
+        wn = lambda: model.add_gaussian_noise(params.weight_noise_std)
+    else:
+        wn = lambda: None
 
     model.train()
 
@@ -232,6 +240,7 @@ def train_lm_for_epoch(
     for hyp in loader:
         hyp = hyp.to(device, non_blocking=non_blocking)
         optimizer.zero_grad()
+        wn()
         hist = hyp[:-1].clamp(0, model.vocab_size - 1)
         logits = model(hist)
         assert logits.shape[:-1] == hyp.shape
@@ -264,14 +273,14 @@ def lm_perplexity(
     return math.exp(-total_ll / max(total_tokens, 1))
 
 
-def initialize_model(options, dict_) -> models.AcousticModel:
+def initialize_model(options, dict_, delta_order) -> models.AcousticModel:
     device = options.device
     num_filts, num_classes = get_filts_and_classes(
         os.path.join(options.data_dir, "train")
     )
     model = models.AcousticModel(
         num_classes,
-        num_filts,
+        num_filts * (delta_order + 1),
         dict_["frontend"],
         dict_["latent"],
         dict_["conditional"],
@@ -298,12 +307,10 @@ def train_lm(options, dict_):
         raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
     seed = dict_["lm"]["training"].seed
 
-    model = initialize_model(options, dict_["model"])
+    model = initialize_model(options, dict_["model"], dict_["am"]["data"].delta_order)
     model = model.conditional
     model.add_module("post_merger", None)
     model.add_module("input_merger", None)
-    model.dropout_prob = dict_["lm"]["training"].dropout_prob
-    model.swap_prob = dict_["lm"]["training"].swap_prob
     optimizer = torch.optim.Adam(model.parameters())
 
     if options.model_dir is not None:
@@ -347,7 +354,14 @@ def train_lm(options, dict_):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
         train_loss = train_lm_for_epoch(
-            model, loader, optimizer, controller, epoch, options.device, options.quiet,
+            model,
+            loader,
+            optimizer,
+            controller,
+            dict_["lm"]["training"],
+            epoch,
+            options.device,
+            options.quiet,
         )
         if options.quiet < 1:
             print(
@@ -389,7 +403,7 @@ def eval_lm(options, dict_):
         raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
 
     if options.load_path is not None:
-        model = initialize_model(options, dict_["model"])
+        model = initialize_model(options, dict_["model"], dict_["am"]["data"].delta_order)
         if options.full_model:
             model.load_state_dict(torch.load(options.load_path, options.device), False)
         model = model.conditional
@@ -492,6 +506,30 @@ def train_am_for_epoch(
     if epoch == 1 or (controller.state_dir and controller.state_csv_path):
         controller.load_model_and_optimizer_for_epoch(model, optimizer, epoch - 1, True)
     estimator_name = params.estimator
+    sa = lambda x, _: x
+    wn = lambda: None
+    if (
+        epoch > 1
+        and controller.get_info(controller.get_best_epoch())["val_met"]
+        < params.aug_er_thresh
+    ) or params.aug_er_thresh == 1.0:
+        model.dropout_prob = params.dropout_prob
+        model.swap_prob = params.swap_prob
+        if params.weight_noise_std is not None:
+            wn = lambda: model.add_gaussian_noise(params.weight_noise_std)
+        if (params.sa_time_num_prop and params.sa_time_size_prop) or (
+            params.sa_freq_num and params.sa_freq_size
+        ):
+            sa = modules.SpecAugment(
+                0,
+                0,
+                100000,
+                params.sa_freq_size,
+                params.sa_time_size_prop,
+                100000,
+                params.sa_time_num_prop,
+                params.sa_freq_num,
+            )
 
     model.train()
 
@@ -512,22 +550,6 @@ def train_am_for_epoch(
         ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
         return ll
 
-    if (params.sa_time_num_prop and params.sa_time_size_prop) or (
-        params.sa_freq_num and params.sa_freq_size
-    ):
-        sa = modules.SpecAugment(
-            0,
-            0,
-            100000,
-            params.sa_freq_size,
-            params.sa_time_size_prop,
-            100000,
-            params.sa_time_num_prop,
-            params.sa_freq_num,
-        )
-    else:
-        sa = lambda x, _: x
-
     total_loss = 0.0
     for feats, _, refs, feat_lens, ref_lens in loader:
         T, N = feats.shape[:2]
@@ -536,6 +558,7 @@ def train_am_for_epoch(
         feat_lens = feat_lens.to(device, non_blocking=non_blocking)
         ref_lens = ref_lens.to(device, non_blocking=non_blocking)
         optimizer.zero_grad()
+        wn()
 
         feats = sa(feats.transpose(0, 1), feat_lens).transpose(0, 1)
 
@@ -653,7 +676,7 @@ def train_am(options, dict_):
     seed = dict_["am"]["training"].seed
     num_data_workers = min(get_num_avail_cores() - 1, 4)
 
-    model = initialize_model(options, dict_["model"])
+    model = initialize_model(options, dict_["model"], dict_["am"]["data"].delta_order)
     optimizer = torch.optim.Adam(p for p in model.parameters() if p.requires_grad)
 
     if options.model_dir is not None:
@@ -666,33 +689,30 @@ def train_am(options, dict_):
         dict_["am"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
 
+    stats_file = os.path.join(options.data_dir, "ext", "train.mvn.pt")
+    stats = torch.load(stats_file)
+
     train_loader = data.SpectTrainingDataLoader(
         train_dir,
-        dict_["am"]["data"]["loader"],
-        data_params=dict_["am"]["data"]["train"],
+        dict_["am"]["data"],
         batch_first=False,
         pin_memory=True,
         seed=seed,
         num_workers=num_data_workers,
+        feat_mean=stats['mean'],
+        feat_std=stats['std'],
     )
     dev_loader = data.SpectEvaluationDataLoader(
         dev_dir,
-        dict_["am"]["data"]["loader"],
-        data_params=dict_["am"]["data"]["dev"],
+        dict_["am"]["data"],
         batch_first=False,
         num_workers=num_data_workers,
+        feat_mean=stats['mean'],
+        feat_std=stats['std'],
     )
 
     dev_er = float("inf")
     epoch = controller.get_last_epoch() + 1
-
-    if (
-        epoch > 1
-        and controller.get_info(controller.get_best_epoch())["val_met"]
-        < dict_["am"]["training"].aug_er_thresh
-    ) or dict_["am"]["training"].aug_er_thresh == 1.0:
-        model.dropout_prob = dict_["am"]["training"].dropout_prob
-        model.swap_prob = dict_["am"]["training"].swap_prob
 
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
@@ -716,8 +736,6 @@ def train_am(options, dict_):
             dict_["am"]["decoding"].is_ctc,
             options.quiet,
         )
-        if dev_er < dict_["am"]["training"].dropout_er_thresh:
-            model.dropout_prob = dict_["am"]["training"].dropout_prob
         controller.update_for_epoch(model, optimizer, train_loss, dev_er, epoch)
         if options.quiet < 2:
             print(
@@ -749,7 +767,7 @@ def train_am(options, dict_):
 def decode_am(options, dict_):
     test_dir = os.path.join(options.data_dir, "dev" if options.dev else "test")
 
-    model = initialize_model(options, dict_["model"])
+    model = initialize_model(options, dict_["model"], dict_["am"]["data"].delta_order)
     model.eval()
 
     if dict_["am"]["decoding"].style == "beam":
@@ -763,7 +781,15 @@ def decode_am(options, dict_):
             model, options.beam_width
         )
 
-    test_set = data.SpectDataSet(test_dir, params=dict_["am"]["data"]["test"])
+    stats_file = os.path.join(options.data_dir, 'ext', 'train.mvn.pt')
+    stats = torch.load(stats_file)
+
+    test_set = data.SpectDataSet(
+        test_dir,
+        params=dict_["am"]["data"],
+        feat_mean=stats['mean'],
+        feat_std=stats['std'],
+    )
     for idx, (feats, _, _) in enumerate(test_set):
         utt_id = test_set.utt_ids[idx]
         T = feats.size(0)
@@ -781,7 +807,7 @@ def decode_am(options, dict_):
             hyp, len_, _ = search(lprobs, Tp, prev)
             hyp, len_ = hyp[..., 0], len_[..., 0]
         else:
-            hyp, len_, _ = search(1, Tp, prev)
+            hyp, len_, _ = search(1, Tp.item(), prev)
             hyp, len_ = hyp[..., 0], len_[..., 0]
         hyp = hyp.flatten()[: len_.flatten()].cpu()
         torch.save(hyp, f"{options.hyp_dir}/{utt_id}.pt")

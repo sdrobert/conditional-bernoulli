@@ -1,7 +1,10 @@
 #! /usr/bin/env bash
 
-gpu_numbers=( $(nvidia-smi -L | sed -n 's/^GPU \([0-9]*\):.*/\1/p') )
-# IFS=' ' read -ra gpu_numbers <<< "${1:-"$(nvidia-smi -L | sed -n 's/^GPU \([0-9]*\):.*/\1/p')"}"
+if [ ! -z "${CUDA_VISIBLE_DEVICES}" ]; then
+  IFS=',' read -ra gpu_numbers <<< "${CUDA_VISIBLE_DEVICES}"
+else
+  gpu_numbers=( $(nvidia-smi -L | sed -n 's/^GPU \([0-9]*\):.*/\1/p') )
+fi
 ngpus="${#gpu_numbers[@]}"
 timit_dir="${2:-~/Databases/TIMIT}"
 
@@ -20,7 +23,6 @@ global_args=( "$@" )
 
 export TIMIT_STRIDE="$ngpus"
 
-./timit.sh -s 1 -x "${global_args[@]}" > "logs/timit/stage-01-0.log" 2>&1
 
 run_stage() {
   stage="$(printf '%02d' $1)"
@@ -46,8 +48,9 @@ run_stage() {
   echo "Done stage $stage"
 }
 
-for stage in {2..4}; do
+for stage in {1..4}; do
   run_stage $stage
 done
 
-./timit.sh -s 10000
+# get results
+./timit.sh -s 999

@@ -496,6 +496,20 @@ class LstmLm(MixableSequentialLanguageModel):
     def swap_prob(self, val: float):
         self.swapper.p = val
 
+    def add_gaussian_noise(self, std: float):
+        params = list(self.logiter.parameters())
+        if self.embedder is not None:
+            params.extend(self.embedder.parameters())
+        if self.input_merger is not None:
+            params.extend(self.input_merger.parameters())
+        if self.lstm is not None:
+            params.extend(self.lstm.parameters())
+        if self.post_merger is not None:
+            params.extend(self.post_merger.parameters())
+        with torch.no_grad():
+            for param in params:
+                param.add_(torch.randn_like(param) * std)
+
     def reset_parameters(self) -> None:
         if self.embedder is not None:
             self.embedder.reset_parameters()
@@ -867,6 +881,10 @@ class JointLatentLstmLm(JointLatentLanguageModel):
     def swap_prob(self, val: float):
         self.conditional.swap_prob = val
 
+    def add_gaussian_noise(self, std: float):
+        self.conditional.add_gaussian_noise(std)
+        self.latent.add_gaussian_noise(std)
+
 
 class FrontendParams(param.Parameterized):
     window_size = param.Integer(
@@ -1037,16 +1055,6 @@ class Frontend(torch.nn.Module):
         if ((lens <= 0) | (lens > x.size(1))).any():
             raise RuntimeError(f"lens must all be between [1, {lens.size(2)}]")
 
-    @property
-    def dropout_prob(self) -> float:
-        return self._p
-
-    @dropout_prob.setter
-    def dropout_prob(self, p: float):
-        if p < 0 or p > 1:
-            raise ValueError(f"Invalid dropout_prob {p}")
-        self._p = p
-
     def forward(
         self, x: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1110,6 +1118,21 @@ class Frontend(torch.nn.Module):
         T = torch.as_tensor(T, dtype=torch.long)
         return (T - 1).div(self.params.window_stride, rounding_mode="trunc") + 1
 
+    @property
+    def dropout_prob(self) -> float:
+        return self._p
+
+    @dropout_prob.setter
+    def dropout_prob(self, p: float):
+        if p < 0 or p > 1:
+            raise ValueError(f"Invalid dropout_prob {p}")
+        self._p = p
+
+    def add_gaussian_noise(self, std: float):
+        with torch.no_grad():
+            for param in self.parameters():
+                param.add_(torch.randn_like(param) * std)
+
 
 class AcousticModel(JointLatentLstmLm):
     def __init__(
@@ -1143,6 +1166,10 @@ class AcousticModel(JointLatentLstmLm):
     def dropout_prob(self, val: float):
         self.conditional.dropout_prob = self.latent.dropout_prob = val
         self.frontend.dropout_prob = val
+
+    def add_gaussian_noise(self, std: float):
+        self.frontend.add_gaussian_noise(std)
+        super().add_gaussian_noise(std)
 
     def update_input(self, prev: StateDict, hist: torch.Tensor) -> StateDict:
         if "latent_input" not in prev or "latent_length" not in prev:

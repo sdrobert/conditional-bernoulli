@@ -209,6 +209,8 @@ if [ $stage -le 1 ]; then
     python prep/timit.py "$data" torch_dir \
       --computer-json prep/conf/feats/fbank_41.json \
       --seed 0
+    compute-mvn-stats-for-torch-feat-data-dir \
+      "$data/train/feat" "$data/ext/train.mvn.pt"
     cat "$data/local/phn${VOCAB_SIZE}/lm_train.trn.gz" | \
      gunzip -c | \
      trn-to-torch-token-data-dir - "$data/ext/token2id.txt" "$data/lm"
