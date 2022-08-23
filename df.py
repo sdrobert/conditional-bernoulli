@@ -152,6 +152,52 @@ class DreznerFarnumBernoulli(MixableSequentialLanguageModel):
         return lp
 
 
+class GaussianConditional(torch.nn.Module):
+    def __init__(self, in_size: int) -> None:
+        super().__init__()
+        self.W = torch.nn.Linear(in_size, 2, bias=False)
+
+    def reset_parameters(self):
+        self.W.reset_parameters()
+
+    def get_stats(
+        self, x: torch.Tensor, b: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = x.masked_select(b.unsqueeze(2).bool()).view(-1, x.size(2))
+        x = self.W(x)
+        return x[..., 0], x[..., 1].sigmoid()
+
+    def forward(
+        self, y: torch.nn.utils.rnn.PackedSequence, x: torch.Tensor, b: torch.Tensor
+    ) -> torch.Tensor:
+        T, N = x.shape[:-1]
+        assert b.shape == (T, N)
+        if y.sorted_indices is not None:
+            x = x.index_select(1, y.sorted_indices)
+            b = b.index_select(1, y.sorted_indices)
+        lens_y = (torch.arange(N).unsqueeze(1) < y.batch_sizes).sum(1)
+        lens_b = b.T.long().sum(1).cpu()
+        b = torch.where(
+            lens_y == lens_b,
+            b.bool(),
+            (torch.arange(T).unsqueeze(1) < lens_y).to(b.device),
+        )
+        mu, std = self.get_stats(x, b)
+        x = torch.nn.functional.gaussian_nll_loss(
+            y.data, mu, std, full=True, reduction="none"
+        )
+        x, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            torch.nn.utils.rnn.PackedSequence(x, *y[1:]), batch_first=True
+        ).sum(1)
+        x = x.masked_fill(lens_y != lens_b, -10_000)
+        return x
+
+    @torch.no_grad()
+    def sample(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        mu, std = self.get_stats(x, b)
+        y = torch.distributions.Normal(mu, std).sample()
+
+
 def test_drezner_farnum_bernoulli():
     torch.manual_seed(1)
     T, N, M = 5, 10, 2 ** 15

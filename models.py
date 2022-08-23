@@ -16,7 +16,7 @@
 
 import itertools
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from itertools import chain
 
 import torch
@@ -496,7 +496,7 @@ class LstmLm(MixableSequentialLanguageModel):
     def swap_prob(self, val: float):
         self.swapper.p = val
 
-    def add_gaussian_noise(self, std: float):
+    def get_unique_params(self) -> List[torch.nn.parameter.Parameter]:
         params = list(self.logiter.parameters())
         if self.embedder is not None:
             params.extend(self.embedder.parameters())
@@ -506,9 +506,7 @@ class LstmLm(MixableSequentialLanguageModel):
             params.extend(self.lstm.parameters())
         if self.post_merger is not None:
             params.extend(self.post_merger.parameters())
-        with torch.no_grad():
-            for param in params:
-                param.add_(torch.randn_like(param) * std)
+        return params
 
     def reset_parameters(self) -> None:
         if self.embedder is not None:
@@ -881,9 +879,10 @@ class JointLatentLstmLm(JointLatentLanguageModel):
     def swap_prob(self, val: float):
         self.conditional.swap_prob = val
 
-    def add_gaussian_noise(self, std: float):
-        self.conditional.add_gaussian_noise(std)
-        self.latent.add_gaussian_noise(std)
+    def get_unique_params(self) -> List[torch.nn.parameter.Parameter]:
+        params = self.conditional.get_unique_params()
+        params.extend(self.latent.get_unique_params())
+        return params
 
 
 class FrontendParams(param.Parameterized):
@@ -1128,10 +1127,8 @@ class Frontend(torch.nn.Module):
             raise ValueError(f"Invalid dropout_prob {p}")
         self._p = p
 
-    def add_gaussian_noise(self, std: float):
-        with torch.no_grad():
-            for param in self.parameters():
-                param.add_(torch.randn_like(param) * std)
+    def get_unique_params(self) -> List[torch.nn.parameter.Parameter]:
+        return list(self.parameters())
 
 
 class AcousticModel(JointLatentLstmLm):
@@ -1167,9 +1164,10 @@ class AcousticModel(JointLatentLstmLm):
         self.conditional.dropout_prob = self.latent.dropout_prob = val
         self.frontend.dropout_prob = val
 
-    def add_gaussian_noise(self, std: float):
-        self.frontend.add_gaussian_noise(std)
-        super().add_gaussian_noise(std)
+    def get_unique_params(self) -> List[torch.nn.parameter.Parameter]:
+        params = super().get_unique_params()
+        params.extend(self.frontend.get_unique_params())
+        return params
 
     def update_input(self, prev: StateDict, hist: torch.Tensor) -> StateDict:
         if "latent_input" not in prev or "latent_length" not in prev:

@@ -75,6 +75,16 @@ is_a_match() {
   return 1
 }
 
+# does one of the preceding arguments match the final argument, which is a
+# regular expression?
+is_a_match_back() {
+  local i
+  for (( i = 0; i < $#; i++ )); do
+    [[ "${!i}" =~ ${!#} ]] && return 0
+  done
+  return 1
+}
+
 # A cartesian product of incoming lines with arguments. For each incoming line,
 # takes the first argument to this function as a delimiter, then prints one
 # line for every remaining argument of the form

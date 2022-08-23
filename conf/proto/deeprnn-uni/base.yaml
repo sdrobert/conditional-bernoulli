@@ -13,12 +13,15 @@ model:
     hidden_size: 250
 am:
   data:
-    loader:
-      batch_size: 16
-      drop_last: false
-      size_batch_by_length: false
+    delta_order: 2
+    do_mvn: true
+    batch_size: 1
   training:
     dropout_prob: 0.0
+    swap_prob: 0.3
+    weight_noise_std: 0.075
+    aug_er_patience: 5
+    aug_er_thresh: 1e-3
     mc_samples: 16
     mc_burn_in: 8
     early_stopping_burnin: 20
@@ -30,3 +33,12 @@ am:
     # sa_freq_size: 4
     # sa_time_num_prop: 0.04
     # sa_freq_num: 1
+lm:
+  data:
+    batch_size: 512
+    drop_last: false
+  training:
+    dropout_prob: 0.3
+    swap_prob: 0.3
+    early_stopping_patience: 10
+    early_stopping_threshold: 0.1

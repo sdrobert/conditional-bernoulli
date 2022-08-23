@@ -17,9 +17,9 @@ Usage: $0
                   Value: '$exp'
   -b 'A [B ...]'  The beam widths to test for decoding
   -n N            Number of repeated trials to perform.
-                  Value: '$seeds'
-  -k N            Offset (inclusive) of the seed to start from.
-                  Value: '$offset'
+                  Value: '$nseeds'
+  -k N            Positive offset (inclusive) of the seed to start from.
+                  Value: '$kseeds'
   -c DEVICE       Device to run experiments on.
                   Value: '$device'
   -m 'A [B ...]'  Model configurations to experiment with.
@@ -30,8 +30,11 @@ Usage: $0
                   Value: '${estimators[*]}'
   -l 'A [B ...]'  LM combinations to experiment with.
                   Value: '${lms[*]}'
+  -p 'A [B]'      Training regimes to experiment with.
+                  Value: '${regimes[*]}'
   -q              Add one to quiet level.
   -x              Run only the current stage.
+  -j              Exclude recommended combinations.
   -h              Display usage info and exit.
 EOF
   exit ${1:-1}
@@ -39,13 +42,20 @@ EOF
 
 
 # constants
-ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
+# ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
+ALL_MODELS=( deeprnn-uni )
 ALL_DEPENDENCIES=( full indep partial )
 ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc )
-ALL_LMS=( lm-flatstart lm-pretrained lm-embedding nolm )
-INVALIDS=( 
+ALL_LMS=( lm-rnn lm-embedding nolm )
+ALL_REGIMES=( pretrained flatstart )
+CORE_INVALIDS=(
   'full_marginal' 'full_cb' 'full_ctc' 'partial_marginal' 'partial_ctc'
-  'ctc_lm-pretrained' 'ctc_lm-flatstart' 'ctc_lm-embedding'
+  'ctc_lm-rnn' 'ctc_lm-embedding' '^[^_]*_nolm_pretrained'
+)
+RECOMMENDED_INVALIDS=(
+  'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
+  'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
+  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
@@ -59,19 +69,21 @@ stage=1
 timit=
 data=data/timit
 exp=exp/timit
-seeds=20
-offset=1
+nseeds=20
+kseeds=1
 device=cuda
-models=( loa-small )
+invalids=( "${CORE_INVALIDS[@]}" )
+models=( "${ALL_MODELS[@]}" )
 dependencies=( "${ALL_DEPENDENCIES[@]}" )
 estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
+regimes=( "${ALL_REGIMES[@]}" )
 # beam_widths=( 1 2 4 8 16 32 )
 beam_widths=( 4 )
 only=0
 
 
-while getopts "xqhs:i:d:o:b:n:k:c:m:z:e:l:" opt; do
+while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:" opt; do
   case $opt in
     s)
       argcheck_is_nat $opt "$OPTARG"
@@ -79,7 +91,7 @@ while getopts "xqhs:i:d:o:b:n:k:c:m:z:e:l:" opt; do
       ;;
     k)
       argcheck_is_nat $opt "$OPTARG"
-      offset=$OPTARG
+      kseeds=$OPTARG
       ;;
     i)
       argcheck_is_readable $opt "$OPTARG"
@@ -97,7 +109,7 @@ while getopts "xqhs:i:d:o:b:n:k:c:m:z:e:l:" opt; do
       ;;
     n)
       argcheck_is_nat $opt "$OPTARG"
-      seeds=$OPTARG
+      nseeds=$OPTARG
       ;;
     c)
       device="$OPTARG"
@@ -118,11 +130,18 @@ while getopts "xqhs:i:d:o:b:n:k:c:m:z:e:l:" opt; do
       argcheck_all_a_choice $opt "${ALL_LMS[@]}" "$OPTARG"
       lms=( $OPTARG )
       ;;
+    p)
+      argcheck_all_a_choice $opt "${ALL_REGIMES[@]}" "$OPTARG"
+      regimes=( $OPTARG )
+      ;;
     x)
       only=1
       ;;
     q)
       quiet="$quiet -q"
+      ;;
+    j)
+      invalids+=( "${RECOMMENDED_INVALIDS[@]}" )
       ;;
     h)
       echo "Shell recipe to perform experiments on TIMIT." 1>&2
@@ -139,49 +158,55 @@ fi
 confdir="$exp/conf"
 lmdir="$exp/lm"
 amdir="$exp/am"
-dmel_combos=( $(
-  echo "" |
-  prod "" "${models[@]}" |
-  prod _ "${dependencies[@]}" |
-  prod _ "${estimators[@]}" |
-  prod _ "${lms[@]}" |
-  filter is_not is_a_match "${INVALIDS[@]}"
-) )
-ncombos="${#dmel_combos[@]}"
-ncs=$((ncombos * seeds))
-ms=$((seeds * ${#models[@]}))
-ncsb=$((ncs * ${#beam_widths[@]}))
+encdir="$exp/enc"
 model=
 dependency=
 estimator=
 lm=
 seed=
+pretrain=
 
-unpack_nc() {
+get_combos() {
+  local x=""
+  local del=""
+  local name
+  local array
+  while (($#)); do
+    name="$1"
+    shift
+    if [ "$name" = "model" ]; then
+      array=( "${models[@]}" )
+    elif [ "$name" = "dependency" ]; then
+      array=( "${dependencies[@]}" )
+    elif [ "$name" = "estimator" ]; then
+      array=( "${estimators[@]}" )
+    elif [ "$name" = "lm" ]; then
+      array=( "${lms[@]}" )
+    elif [ "$name" = "regime" ]; then
+      array=( "${regimes[@]}" )
+    elif [ "$name" = "seed" ]; then
+      array=( $(seq $kseeds $nseeds) )
+    else
+      array=( "$name" )
+    fi
+    x="$(echo "$x" | prod "$del" "${array[@]}")"
+    del="_"
+  done
+  echo "$x" | filter is_not is_a_match "${invalids[@]}"
+}
+
+
+unpack_combo() {
+  local i=$1
+  shift
   local combo
-  IFS='_' read -ra combos <<< "${dmel_combos[$1]}" 
-  model=${combos[0]}
-  dependency=${combos[1]}
-  estimator=${combos[2]}
-  lm=${combos[3]}
-}
-
-unpack_m() {
-  model="${models[(( $1 % ${#models[@]} ))]}"
-}
-
-unpack_s() {
-  seed=$(printf '%02d' $(( $1 % seeds + 1)))
-}
-
-unpack_ncs() {
-  unpack_s $1
-  unpack_nc $(( $1 / seeds ))
-}
-
-unpack_ms() {
-  unpack_s $1
-  unpack_m $(( $1 / seeds ))
+  local value
+  IFS='_' read -ra combo <<< "$(get_combos "$@" | sed $((i + 1))'q;d')" 
+  for ((i = 0; i < $#; i++)); do
+    name="${@:i+1:1}"
+    value="${combo[i]}"
+    [ "$name" = "$value" ] || eval "$name=$value"
+  done
 }
 
 combine() {
@@ -224,86 +249,142 @@ fi
 
 # pretrain the language dependencies (unnecessary if not doing LM pretraining)
 if [ $stage -le 2 ]; then
-  if [[ "${dmel_combos[*]}" =~ "lm-pretrained" ]]; then
-    mkdir -p "$lmdir/$model"
-    if [ ! -f "$lmdir/results.ngram.txt" ] && [ $OFFSET -eq 0 ]; then
-      echo "Beginning stage 2 - results.ngram.txt"
-      python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt" \
-        || rm -f "$lmdir/results.ngram.txt"
-      echo "Ending stage 2 - results.ngram.txt"
+  if [[ "${regimes[*]}" =~ "pretrained" ]]; then
+    N=$(get_combos model lm pretrained seed | wc -l)
+    if [ $N -gt 0 ]; then
+      mkdir -p "$lmdir"
+      if [ ! -f "$lmdir/results.ngram.txt" ] && [ $OFFSET -eq 0 ]; then
+        echo "Beginning stage 2 - results.ngram.txt"
+        python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt" \
+          || rm -f "$lmdir/results.ngram.txt"
+        echo "Ending stage 2 - results.ngram.txt"
+      fi
     fi
-    for (( i = OFFSET; i < ms ; i += STRIDE )); do
-      unpack_ms $i
-      # the only settings that matter are the model and lm; we put dummy
-      # configs in the rest
-      dependency="${dependencies[0]}"
-      estimator="${estimators[0]}"
-      lm=lm-pretrained
+    for (( i = OFFSET; i < N ; i += STRIDE )); do
+      # the only settings that matter are the model, lm, and pretrained; we put
+      # dummy configs in the rest
+      unpack_combo $i model lm pretrained seed
+      dependency=indep
+      estimator=marginal
       yml="$(combine)"
-      if [ ! -f "$lmdir/$model/$seed/final.pt" ]; then
-        echo "Beginning stage 2 - training LM for model $model and seed $seed"
+      mdir="$lmdir/${model}_${lm}/$seed"
+      mkdir -p "$mdir"
+      if [ ! -f "$mdir/final.pt" ]; then
+        echo "Beginning stage 2 - training LM for $model, $lm and seed $seed"
         python asr.py "$data" $quiet \
           --read-yaml "$yml" \
           --device "$device" \
-          --model-dir "$lmdir/$model/$seed" \
+          --model-dir "$mdir" \
           --seed $seed \
-          train_lm "$lmdir/$model/$seed/final.pt"
-        echo "Ending stage 2 - training LM for model $model and seed $seed"
+          train_lm "$mdir/final.pt"
+        echo "Ending stage 2 - training LM for $model, $lm, and seed $seed"
       else
-        echo "Stage 2 - $lmdir/$seed/final.pt exists. Skipping"
+        echo "Stage 2 - $mdir/final.pt exists. Skipping"
       fi
 
-      if [ ! -f "$lmdir/results.$model.$seed.txt" ]; then
-        echo "Beginning stage 2 - computing LM perplexity for seed $seed"
+      if [ ! -f "$lmdir/results.${model}_${lm}.$seed.txt" ]; then
+        echo "Beginning stage 2 - computing LM perplexity $model, $lm, and seed $seed"
         python asr.py "$data" $quiet \
           --read-yaml "$yml" \
           --device "$device" \
-          eval_lm "$lmdir/$model/$seed/final.pt" \
-            > "$lmdir/results.$model.$seed.txt"
-        echo "Ending stage 2 - computing LM perplexity for seed $seed"
+          eval_lm "$mdir/final.pt" \
+            > "$lmdir/results.${model}_${lm}.$seed.txt"
+        echo "Ending stage 2 - computing LM perplexity $model, $lm, and seed $seed"
       fi
     done
+  else
+    echo "'pretrained' not in selected regimes - skipping stage 2"
   fi
   ((only)) && exit 0
 fi
 
-# train the acoustic models
+# pretrain up to the latent part of the model (the "encoder")
 if [ $stage -le 3 ]; then
-  for (( i = OFFSET; i < ncs; i += STRIDE )); do
-    unpack_ncs $i
-    mname="${model}_${dependency}_${estimator}_${lm}"
+  if [[ "${regimes[*]}" =~ "pretrained" ]]; then
+    N=$(get_combos model dependency estimator pretrained seed | wc -l)
+    for (( i = OFFSET; i < N; i += STRIDE )); do
+      unpack_combo $i model dependency estimator pretrained seed
+      lm=nolm
+      yml="$(combine)"
+      mname="${model}_${dependency}_${estimator}"
+      mdir="$encdir/$mname/$seed"
+      mkdir -p "$mdir"
+      if [ ! -f "$mdir/final.pt" ]; then
+        echo "Beginning stage 3 - pretraining $mname with seed $seed"
+        python asr.py "$data" $quiet \
+          --read-yaml "$yml" \
+          --device "$device" \
+          --model-dir "$mdir" \
+          --seed $seed \
+          train_am "$mdir/final.pt" --pretraining
+        echo "Ending stage 3 - pretraining $mname with seed $seed"
+      else
+        echo "Stage 3 - $mdir/final.pt exists. Skipping"
+      fi
+    done
+  else
+    echo "'pretrained' not in selected regimes - skipping stage 3"
+  fi
+  ((only)) && exit 0
+fi
+
+
+# train everything
+if [ $stage -le 4 ]; then
+  N=$(get_combos model dependency estimator lm regime seed | wc -l)
+  for (( i = OFFSET; i < N; i += STRIDE )); do
+    unpack_combo $i model dependency estimator lm regime seed
+    mname="${model}_${dependency}_${estimator}_${lm}_${regime}"
     yml="$(combine)"
     mdir="$amdir/$mname/$seed"
     mkdir -p "$mdir"
     xtra_args=( )
-    if [ "$lm" = "lm-pretrained" ]; then
-      xtra_args=( "--pretrained-lm-path" "$lmdir/$model/$seed/final.pt" )
+    if [ "$regime" = "pretrained" ]; then
+      if [ "$lm" != "nolm" ]; then
+        lmpth="$lmdir/${model}_${lm}/$seed/final.pt"
+        if [ ! -f "$lmpth" ]; then
+          echo "Cannot train $mname with seed $seed: '$lmpth' does not exist" \
+            "(did you finish stage 2?)" 1>&2
+          exit 1
+        fi
+        xtra_args+=( "--pretrained-lm-path" "$lmpth" )
+      fi
+      encpth="$encdir/${model}_${dependency}_${estimator}/$seed/final.pt"
+      if [ ! -f "$encpth" ]; then
+          echo "Cannot train $mname with seed $seed: '$encpth' does not exist"\
+            "(did you finish stage 3?)" 1>&2
+          exit 1
+      fi
+      xtra_args+=( "--pretrained-enc-path" "$encpth" )
     fi
     if [ ! -f "$mdir/final.pt" ]; then
-      echo "Beginning stage 3 - training $mname with seed $seed"
+      echo "Beginning stage 4 - training $mname with seed $seed"
       python asr.py "$data" $quiet \
         --read-yaml "$yml" \
         --device "$device" \
         --model-dir "$mdir" \
         --seed $seed \
         train_am "${xtra_args[@]}" "$mdir/final.pt"
-      echo "Ending stage 3 - training $mname with seed $seed"
+      echo "Ending stage 4 - training $mname with seed $seed"
     else
-      echo "Stage 3 - $mdir/final.pt exists. Skipping"
+      echo "Stage 4 - $mdir/final.pt exists. Skipping"
     fi
   done
   ((only)) && exit 0
 fi
 
 # decode and compute error rates
-if [ $stage -le 4 ]; then
+if [ $stage -le 5 ]; then
+  N=$(get_combos model dependency estimator lm regime seed | wc -l)
   for (( i = $OFFSET; i < ncs; i += $STRIDE )); do
-    unpack_ncs $i
-    mname="${model}_${dependency}_${estimator}_${lm}"
+    unpack_combo $i model dependency estimator lm regime seed
+    mname="${model}_${dependency}_${estimator}_${lm}_${regime}"
     yml="$(combine)"
     mdir="$amdir/$mname/$seed"
-    if [ ! -f "$mdir/final.pt" ]; then
-      echo "$mdir/final.pt doesn't exist (did stage 3 finish?)" 1>&2
+    mpth="$mdir/final.pt"
+    if [ ! -f "$mpth" ]; then
+          echo "Cannot decode $mname with seed $seed: '$mpth' does not exist" \
+            "(did you finish stage 4?)" 1>&2
       exit 1
     fi
     for part in dev test; do
@@ -322,30 +403,30 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         bdir="$hdir/$beam_width"
         mkdir -p "$bdir"
         if [ ! -f "$bdir/.complete" ]; then
-          echo "Beginning stage 4 - decoding $part using $mname with seed" \
+          echo "Beginning stage 5 - decoding $part using $mname with seed" \
             "$seed and beam width $beam_width"
           python asr.py "$data" $quiet \
             --read-yaml "$yml" \
             --device "$device" \
             decode_am \
               "${xtra_args[@]}" --beam-width "$beam_width" \
-              "$mdir/final.pt" "$bdir"
+              "$mpth" "$bdir"
           touch "$bdir/.complete"
-          echo "Ending stage 4 - decoding $part using $mname with seed" \
+          echo "Ending stage 5 - decoding $part using $mname with seed" \
             "$seed and beam width $beam_width"
         else
           echo "'$bdir/.complete' exists. Skipping decoding $part using" \
             "$mname with seed $seed and beam width $beam_width"
         fi
         if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
-          echo "Beginning stage 4 - gathering hyps for $part using $mname" \
+          echo "Beginning stage 5 - gathering hyps for $part using $mname" \
             "with $seed and beam with $beam_width"
           torch-token-data-dir-to-trn \
             "$bdir" "$data/ext/id2token.txt" \
             "$mdir/$part.hyp.$beam_width.utrn"
           python prep/timit.py "$data" filter \
             "$mdir/$part.hyp.$beam_width."{u,}trn
-          echo "Ending stage 4 - gathering hyps for $part using $mname" \
+          echo "Ending stage 5 - gathering hyps for $part using $mname" \
             "with seed $seed and beam with $beam_width"
         fi
       done
@@ -355,7 +436,7 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
           "of hypothesis files for partition '$part' in '$mdir'. This could" \
           "mean you changed the -b parameter after running once or you reran" \
           "experiments with different parameters and the partition is" \
-          "'test'. Delete all hyp files in '$amdir' and try runing this step" \
+          "'test'. Delete all hyp files in '$amdir' and try running this step"\
           "again" 1>&2
         exit 1
       fi
