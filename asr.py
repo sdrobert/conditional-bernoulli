@@ -294,7 +294,7 @@ def init_model(options, dict_, delta_order, pretraining=False) -> models.Acousti
     if "pretrained_enc_path" in options and options.pretrained_enc_path is not None:
         state_dict = torch.load(options.pretrained_enc_path)
         assert not any(k.startswith("conditional.") for k in state_dict)
-        model.load_state_dict(options.pretrained_enc_path, strict=False)
+        model.load_state_dict(state_dict, strict=False)
         # don't let the controller reset the parameters on the first epoch!
         model.frontend.reset_parameters = (
             model.latent.reset_parameters
@@ -417,6 +417,7 @@ def eval_lm(options, dict_):
         raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
 
     if options.load_path is not None:
+        print(f"model: {options.load_path.name}, ", end="")
         model = init_model(options, dict_["model"], dict_["am"]["data"].delta_order)
         if options.full_model:
             model.load_state_dict(torch.load(options.load_path, options.device), False)
@@ -526,8 +527,8 @@ def train_am_for_epoch(
     estimator_name = params.estimator
     sa = lambda x, _: x
     wn_setup = wn_teardown = lambda: None
-    aug_er_patience_cd = controller.get_info(epoch - 1)["aug_er_patience_cd"]
-    if aug_er_patience_cd == 0:  # None on first epoch
+    do_aug = controller.get_info(epoch - 1)["do_aug"]
+    if do_aug:
         model.dropout_prob = params.dropout_prob
         model.swap_prob = params.swap_prob
         if (params.sa_time_num_prop and params.sa_time_size_prop) or (
@@ -719,7 +720,8 @@ def train_am(options, dict_):
     controller = training.TrainingStateController(
         dict_["am"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
-    controller.add_entry("aug_er_patience_cd", int)
+    # controller.add_entry("aug_er_patience_cd", int)
+    controller.add_entry("do_aug", int)
 
     stats_file = os.path.join(options.data_dir, "ext", "train.mvn.pt")
     stats = torch.load(stats_file)
@@ -743,16 +745,12 @@ def train_am(options, dict_):
         feat_std=stats["std"],
     )
 
-    aug_er_patience = dict_["am"]["training"].aug_er_patience
+    # aug_er_patience = dict_["am"]["training"].aug_er_patience
     aug_er_thresh = dict_["am"]["training"].aug_er_thresh
 
-    dev_er = float("inf")
+    # dev_er = float("inf")
     epoch = controller.get_last_epoch() + 1
-    best_er = controller.get_info(controller.get_best_epoch())["val_met"]
-    aug_er_patience_cd = controller.get_info(epoch - 1)["aug_er_patience_cd"]
-    if aug_er_patience_cd is None:
-        aug_er_patience_cd = aug_er_patience + 1
-
+    do_aug = bool(controller.get_info(epoch - 1)["do_aug"])
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
@@ -777,11 +775,13 @@ def train_am(options, dict_):
             options.quiet,
             options.pretraining,
         )
-        if aug_er_patience_cd:
-            if max(dev_er - best_er, 0) < aug_er_thresh:
-                aug_er_patience_cd -= 1
-            else:
-                aug_er_patience_cd = aug_er_patience
+        do_aug |= dev_er < aug_er_thresh
+        # if aug_er_patience_cd > 0:
+        #     if max(best_er - dev_er, 0) < aug_er_thresh:
+        #         aug_er_patience_cd -= 1
+        #     else:
+        #         aug_er_patience_cd = aug_er_patience
+        # best_er = min(dev_er, best_er)
 
         controller.update_for_epoch(
             model,
@@ -789,7 +789,8 @@ def train_am(options, dict_):
             train_loss,
             dev_er,
             epoch,
-            aug_er_patience_cd=aug_er_patience_cd,
+            do_aug=int(do_aug),
+            # aug_er_patience_cd=aug_er_patience_cd,
         )
         if options.quiet < 2:
             print(
@@ -814,7 +815,7 @@ def train_am(options, dict_):
             file=sys.stderr,
         )
 
-    state_dict = model.state_dict()
+    state_dict = model.to("cpu").state_dict()
     if options.pretraining:
         for key in tuple(state_dict.keys()):
             if key.startswith("conditional."):

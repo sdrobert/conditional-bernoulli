@@ -1561,23 +1561,27 @@ def test_acoustic_model():
     loss_fn = torch.nn.CrossEntropyLoss()
 
     am = AcousticModel(V, F)
-    h, lens_ = am.frontend(in_.transpose(0, 1), lens)
-    hist = torch.randint(V + 1, h.shape[:-1])
-    given_count = (torch.rand(N) * lens_).long().clamp_min_(1)
-    count_mask = torch.arange(h.size(0)).unsqueeze(1) >= given_count
-    hist = hist.masked_fill_(count_mask, config.INDEX_PAD_VALUE)
-
     latent = am.latent
     conditional = am.conditional
     lm_exp = JointLatentLanguageModel(latent, conditional)
 
-    logits_exp = lm_exp(
-        hist[:-1].clamp_min(0), {"latent_input": h, "latent_length": lens_}
-    )
+    hist, logits_exp = [], []
+    for (in_n, lens_n) in zip(in_.transpose(0, 1), lens):
+        h_n, lens_n_ = am.frontend(in_n.unsqueeze(0), lens_n.view(1))
+        hist_n = torch.randint(V + 1, h_n.shape[:-1])
+        hist.append(hist_n.squeeze(1))
+        given_count_n = (torch.rand(1) * lens_n_).long().clamp_min_(1)
+        hist_n[given_count_n.item() :].fill_(config.INDEX_PAD_VALUE)
+        logits_exp_n = lm_exp(
+            hist_n[:-1].clamp_min(0), {"latent_input": h_n, "latent_length": lens_n_}
+        )
+        logits_exp.append(logits_exp_n.squeeze(1))
+    hist = torch.nn.utils.rnn.pad_sequence(hist, padding_value=config.INDEX_PAD_VALUE)
+    logits_exp = torch.nn.utils.rnn.pad_sequence(logits_exp)
     assert logits_exp.shape[1:] == (N, V + 1)
+    assert logits_exp.shape[:-1] == hist.shape
     loss_exp = loss_fn(logits_exp.flatten(end_dim=-2), hist.flatten())
     logits_act = am(hist[:-1].clamp_min(0), {"input": in_, "length": lens})
     loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
     assert logits_exp.shape == logits_act.shape
     assert torch.allclose(loss_exp, loss_act)
-
