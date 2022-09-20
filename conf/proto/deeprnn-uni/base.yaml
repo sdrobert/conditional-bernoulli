@@ -16,14 +16,17 @@ am:
     delta_order: 2
     do_mvn: true
     batch_size: 1
+    drop_last: true
+    # num_length_buckets: 5
+    # size_batch_by_length: true
   training:
     dropout_prob: 0.0
     swap_prob: 0.3
     weight_noise_std: 0.075
     aug_er_patience: 5
-    aug_er_thresh: 1e-3
-    mc_samples: 16
-    mc_burn_in: 8
+    aug_er_thresh: 0.4
+    mc_samples: 32
+    mc_burn_in: 16
     early_stopping_burnin: 20
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3

@@ -32,6 +32,8 @@ Usage: $0
                   Value: '${lms[*]}'
   -p 'A [B]'      Training regimes to experiment with.
                   Value: '${regimes[*]}'
+  -f N            Run distributed over N nodes.
+                  Value: '$world_size'
   -q              Add one to quiet level.
   -x              Run only the current stage.
   -j              Exclude recommended combinations.
@@ -72,6 +74,7 @@ exp=exp/timit
 nseeds=20
 kseeds=1
 device=cuda
+world_size=0
 invalids=( "${CORE_INVALIDS[@]}" )
 models=( "${ALL_MODELS[@]}" )
 dependencies=( "${ALL_DEPENDENCIES[@]}" )
@@ -82,8 +85,10 @@ regimes=( "${ALL_REGIMES[@]}" )
 beam_widths=( 4 )
 only=0
 
+# for determinism
+# export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:" opt; do
+while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:f:" opt; do
   case $opt in
     s)
       argcheck_is_nat $opt "$OPTARG"
@@ -133,6 +138,10 @@ while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:" opt; do
     p)
       argcheck_all_a_choice $opt "${ALL_REGIMES[@]}" "$OPTARG"
       regimes=( $OPTARG )
+      ;;
+    f)
+      argcheck_is_nat $opt "$OPTARG"
+      world_size=$OPTARG
       ;;
     x)
       only=1
@@ -316,7 +325,7 @@ if [ $stage -le 3 ]; then
           --device "$device" \
           --model-dir "$mdir" \
           --seed $seed \
-          train_am "$mdir/final.pt" --pretraining
+          train_am "$mdir/final.pt" --pretraining --ddp-world-size $world_size
         echo "Ending stage 3 - pretraining $mname with seed $seed"
       else
         echo "Stage 3 - $mdir/final.pt exists. Skipping"
@@ -364,7 +373,8 @@ if [ $stage -le 4 ]; then
         --device "$device" \
         --model-dir "$mdir" \
         --seed $seed \
-        train_am "${xtra_args[@]}" "$mdir/final.pt"
+        train_am "${xtra_args[@]}" "$mdir/final.pt" \
+          --ddp-world-size $world_size
       echo "Ending stage 4 - training $mname with seed $seed"
     else
       echo "Stage 4 - $mdir/final.pt exists. Skipping"

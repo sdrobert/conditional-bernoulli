@@ -7,11 +7,7 @@ import glob
 import gzip
 
 from typing import Optional, Set, Tuple
-
-try:
-    from typing import Literal
-except ImportError:
-    from typing_extensions import Literal
+from typing_extensions import Literal
 
 import torch
 import param
@@ -483,11 +479,11 @@ def val_error_rates(
     if quiet < 1:
         loader = tqdm(loader)
 
-    for feats, _, refs, feat_lens, ref_lens, _ in loader:
+    for feats, refs, feat_lens, ref_lens in loader:
         # feats = feats[::3]
         # feat_lens = torch.div(feat_lens - 1, 3, rounding_mode="floor") + 1
         total_toks += ref_lens.sum().item()
-        feats, refs = feats.to(device), refs[..., 0].to(device)
+        feats, refs = feats.to(device), refs.to(device)
         feat_lens, ref_lens = feat_lens.to(device), ref_lens.to(device)
         if pretraining:
             refs = torch.zeros_like(refs)
@@ -509,8 +505,145 @@ def val_error_rates(
     return total_errs / total_toks
 
 
+class TrainingAmWrapper(torch.nn.Module):
+
+    estimator_name: str
+    M: int
+    B: int
+
+    def __init__(self, am: models.AcousticModel, estimator_name: str, M: int, B: int):
+        super().__init__()
+        self.am = am
+        self.estimator_name, self.M, self.B = estimator_name, M, B
+
+    def forward(
+        self,
+        feats: torch.Tensor,
+        refs: torch.Tensor,
+        feat_lens: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        T, N = feats.shape[:2]
+
+        def func(b: torch.Tensor) -> torch.Tensor:
+            M = b.size(0)
+            mismatch = b.sum(-1) != func.ref_lens  # (M, N)
+            h = func.h.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
+            h_lens = func.h_lens.unsqueeze(0).expand(M, -1).flatten()
+            refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
+            ll = self.am.calc_log_likelihood_given_latents(
+                b.flatten(0, 1).T.long(),
+                refs,
+                {"latent_input": h, "latent_length": h_lens},
+            )
+            ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
+            return ll
+
+        if self.estimator_name == "marginal":
+            prev = {
+                "input": feats,
+                "length": feat_lens,
+            }
+            v = self.am.calc_marginal_log_likelihoods(refs, ref_lens, prev)
+        elif self.estimator_name == "ctc":
+            prev = {
+                "input": feats,
+                "length": feat_lens,
+            }
+            lens_ = self.am.compute_output_time_size(feat_lens)
+            lprobs = self.am.calc_ctc_log_probs(refs, prev)
+            v = -torch.nn.functional.ctc_loss(
+                lprobs, refs.T, lens_, ref_lens, self.am.vocab_size - 1, "mean"
+            )
+        else:
+            Tp = self.am.compute_output_time_size(T).item()
+            h, lens_ = self.am.frontend(feats.transpose(0, 1), feat_lens)
+            func.h = h
+            func.h_lens = lens_
+            func.refs = refs
+            func.ref_lens = ref_lens
+            prev = {
+                "input": h,
+                "post": h,
+                "length": lens_,
+                "given": ref_lens,
+            }
+            prev = self.am.latent.update_input(prev, refs)
+            v = 0
+            if self.estimator_name == "cb":
+                hidden = self.am.latent.calc_all_hidden(prev)
+                logits = self.am.latent.calc_all_logits(prev, hidden)
+                logits = logits[..., 1] - logits[..., 0]
+                dist = distributions.ConditionalBernoulli(ref_lens, logits=logits.T)
+                v = distributions.PoissonBinomial(logits=logits.T).log_prob(ref_lens)
+            else:
+                if self.estimator_name == "sf-biased":
+                    model_ = models.SuffixForcingWrapper(self.am.latent, "length")
+                    walk = modules.RandomWalk(model_)
+                else:
+                    walk = modules.RandomWalk(self.am.latent)
+                dist = pdistributions.SequentialLanguageModelDistribution(
+                    walk,
+                    N,
+                    prev,
+                    Tp,
+                    self.estimator_name in {"direct", "cb", "sf-biased"},
+                )
+            if self.estimator_name in {"direct", "cb", "sf-biased"}:
+                estimator = pestimators.DirectEstimator(dist, func, self.M, is_log=True)
+                # estimator = estimators.SerialMCWrapper(estimator)
+            elif self.estimator_name in {"srswor", "sf-is"}:
+                if self.estimator_name == "srswor":
+                    proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
+                        ref_lens, lens_, Tp
+                    )
+                else:
+                    model_ = models.SuffixForcingWrapper(self.am.latent, "length")
+                    walk = modules.RandomWalk(model_)
+                    proposal = pdistributions.SequentialLanguageModelDistribution(
+                        walk, N, prev, Tp, True
+                    )
+                estimator = pestimators.ImportanceSamplingEstimator(
+                    proposal, func, self.M, dist, is_log=True,
+                )
+                # estimator = estimators.SerialMCWrapper(estimator)
+            elif self.estimator_name.startswith("ais-"):
+                proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
+                    ref_lens, lens_, Tp
+                )
+                maker = estimators.ConditionalBernoulliProposalMaker(ref_lens)
+                density = pdistributions.SequentialLanguageModelDistribution(
+                    walk, N, prev, Tp
+                )
+                if self.estimator_name == "ais-c":
+                    adaptation_func = lambda x: x
+                elif self.estimator_name == "ais-g":
+                    adaptation_func = estimators.FixedCardinalityGibbsStatistic(
+                        func, density, True
+                    )
+                else:
+                    assert False
+                estimator = estimators.AisImhEstimator(
+                    proposal,
+                    func,
+                    self.M,
+                    density,
+                    adaptation_func,
+                    maker,
+                    self.B,
+                    is_log=True,
+                )
+            else:
+                assert False
+            v = v + estimator()
+        return -v.mean()
+
+    def reset_parameters(self):
+        self.am.reset_parameters()
+
+
 def train_am_for_epoch(
-    model: models.AcousticModel,
+    model: TrainingAmWrapper,
     loader: data.SpectTrainingDataLoader,
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
@@ -524,7 +657,7 @@ def train_am_for_epoch(
     non_blocking = device.type == "cpu" or loader.pin_memory
     if epoch == 1 or (controller.state_dir and controller.state_csv_path):
         controller.load_model_and_optimizer_for_epoch(model, optimizer, epoch - 1, True)
-    estimator_name = params.estimator
+    torch.manual_seed((epoch + 5) * (controller.params.seed + 113))
     sa = lambda x, _: x
     wn_setup = wn_teardown = lambda: None
     do_aug = controller.get_info(epoch - 1)["do_aug"]
@@ -548,12 +681,12 @@ def train_am_for_epoch(
             param_data = []
 
             def wn_setup():
-                for p in model.get_unique_params():
+                for p in model.parameters():
                     param_data.append(p.data.clone())
                     p.data += torch.randn_like(p) * params.weight_noise_std
 
             def wn_teardown():
-                for p, p_ in zip(model.get_unique_params(), param_data):
+                for p, p_ in zip(model.parameters(), param_data):
                     # we copy so that RNN parameters remain contiguous in memory
                     p.data.copy_(p_)
                 param_data.clear()
@@ -563,140 +696,41 @@ def train_am_for_epoch(
     if quiet < 1:
         loader = tqdm(loader)
 
-    def func(b: torch.Tensor) -> torch.Tensor:
-        M = b.size(0)
-        mismatch = b.sum(-1) != func.ref_lens  # (M, N)
-        h = func.h.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
-        h_lens = func.h_lens.unsqueeze(0).expand(M, -1).flatten()
-        refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
-        ll = model.calc_log_likelihood_given_latents(
-            b.flatten(0, 1).T.long(),
-            refs,
-            {"latent_input": h, "latent_length": h_lens},
-        )
-        ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
-        return ll
-
     total_loss = 0.0
-    for feats, _, refs, feat_lens, ref_lens in loader:
-        T, N = feats.shape[:2]
+    for feats, refs, feat_lens, ref_lens in loader:
         feats = feats.to(device, non_blocking=non_blocking)
         if pretraining:
             refs = torch.zeros_like(refs)
-        refs = refs[..., 0].to(device, non_blocking=non_blocking)
+        refs = refs.to(device, non_blocking=non_blocking)
         feat_lens = feat_lens.to(device, non_blocking=non_blocking)
         ref_lens = ref_lens.to(device, non_blocking=non_blocking)
-        optimizer.zero_grad()
-        wn_setup()
-
         feats = sa(feats.transpose(0, 1), feat_lens).transpose(0, 1)
 
-        if estimator_name == "marginal":
-            prev = {
-                "input": feats,
-                "length": feat_lens,
-            }
-            v = model.calc_marginal_log_likelihoods(refs, ref_lens, prev)
-        elif estimator_name == "ctc":
-            prev = {
-                "input": feats,
-                "length": feat_lens,
-            }
-            lens_ = model.compute_output_time_size(feat_lens)
-            lprobs = model.calc_ctc_log_probs(refs, prev)
-            v = -torch.nn.functional.ctc_loss(
-                lprobs, refs.T, lens_, ref_lens, model.vocab_size - 1, "mean"
-            )
-        else:
-            Tp = model.compute_output_time_size(T).item()
-            h, lens_ = model.frontend(feats.transpose(0, 1), feat_lens)
-            func.h = h
-            func.h_lens = lens_
-            func.refs = refs
-            func.ref_lens = ref_lens
-            prev = {
-                "input": h,
-                "post": h,
-                "length": lens_,
-                "given": ref_lens,
-            }
-            prev = model.latent.update_input(prev, refs)
-            v = 0
-            if estimator_name == "cb":
-                hidden = model.latent.calc_all_hidden(prev)
-                logits = model.latent.calc_all_logits(prev, hidden)
-                logits = logits[..., 1] - logits[..., 0]
-                dist = distributions.ConditionalBernoulli(ref_lens, logits=logits.T)
-                v = distributions.PoissonBinomial(logits=logits.T).log_prob(ref_lens)
-            else:
-                if estimator_name == "sf-biased":
-                    model_ = models.SuffixForcingWrapper(model.latent, "length")
-                    walk = modules.RandomWalk(model_)
-                else:
-                    walk = modules.RandomWalk(model.latent)
-                dist = pdistributions.SequentialLanguageModelDistribution(
-                    walk, N, prev, Tp, estimator_name in {"direct", "cb", "sf-biased"}
-                )
-            if estimator_name in {"direct", "cb", "sf-biased"}:
-                estimator = pestimators.DirectEstimator(
-                    dist, func, params.mc_samples, is_log=True
-                )
-                # estimator = estimators.SerialMCWrapper(estimator)
-            elif estimator_name in {"srswor", "sf-is"}:
-                if estimator_name == "srswor":
-                    proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                        ref_lens, lens_, Tp
-                    )
-                else:
-                    model_ = models.SuffixForcingWrapper(model.latent, "length")
-                    walk = modules.RandomWalk(model_)
-                    proposal = pdistributions.SequentialLanguageModelDistribution(
-                        walk, N, prev, Tp, True
-                    )
-                estimator = pestimators.ImportanceSamplingEstimator(
-                    proposal, func, params.mc_samples, dist, is_log=True,
-                )
-                # estimator = estimators.SerialMCWrapper(estimator)
-            elif estimator_name.startswith("ais-"):
-                proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                    ref_lens, lens_, Tp
-                )
-                maker = estimators.ConditionalBernoulliProposalMaker(ref_lens)
-                density = pdistributions.SequentialLanguageModelDistribution(
-                    walk, N, prev, Tp
-                )
-                if estimator_name == "ais-c":
-                    adaptation_func = lambda x: x
-                elif estimator_name == "ais-g":
-                    adaptation_func = estimators.FixedCardinalityGibbsStatistic(
-                        func, density, True
-                    )
-                else:
-                    assert False
-                estimator = estimators.AisImhEstimator(
-                    proposal,
-                    func,
-                    params.mc_samples,
-                    density,
-                    adaptation_func,
-                    maker,
-                    params.mc_burn_in,
-                    is_log=True,
-                )
-            else:
-                assert False
-            v = v + estimator()
-
-        loss = -v.mean()
-        total_loss += loss.detach() * N
+        optimizer.zero_grad()
+        wn_setup()
+        loss = model(feats, refs, feat_lens, ref_lens)
         loss.backward()
+        total_loss += loss.detach() * feat_lens.size(0)
         wn_teardown()
         optimizer.step()
 
     return total_loss.item()
 
 
-def train_am(options, dict_):
+def _train_am_helper(rank, options, dict_):
+    if options.ddp_world_size:
+        if options.device.type == "cuda":
+            options.device = torch.device(rank % torch.cuda.device_count())
+            torch.distributed.init_process_group(
+                "nccl", rank=rank, world_size=options.ddp_world_size
+            )
+        else:
+            torch.distributed.init_process_group(
+                "gloo", rank=rank, world_size=options.ddp_world_size
+            )
+        num_data_workers = 0
+    else:
+        num_data_workers = min(get_num_avail_cores() - 1, 4)
     train_dir = os.path.join(options.data_dir, "train")
     if not os.path.isdir(train_dir):
         raise ValueError(f"'{train_dir}' is not a directory. Did you initialize it?")
@@ -704,11 +738,18 @@ def train_am(options, dict_):
     if not os.path.isdir(dev_dir):
         raise ValueError(f"'{dev_dir}' is not a directory. Did you initialize it?")
     seed = dict_["am"]["training"].seed
-    num_data_workers = min(get_num_avail_cores() - 1, 4)
 
-    model = init_model(
+    model_ = model = init_model(
         options, dict_["model"], dict_["am"]["data"].delta_order, options.pretraining
     )
+    model = TrainingAmWrapper(
+        model,
+        dict_["am"]["training"].estimator,
+        dict_["am"]["training"].mc_samples,
+        dict_["am"]["training"].mc_burn_in,
+    )
+    if options.ddp_world_size:
+        model = torch.nn.parallel.DistributedDataParallel(model)
     optimizer = torch.optim.Adam(p for p in model.parameters() if p.requires_grad)
 
     if options.model_dir is not None:
@@ -726,19 +767,22 @@ def train_am(options, dict_):
     stats_file = os.path.join(options.data_dir, "ext", "train.mvn.pt")
     stats = torch.load(stats_file)
 
-    train_loader = data.SpectTrainingDataLoader(
+    train_loader = data.SpectDataLoader(
         train_dir,
         dict_["am"]["data"],
-        batch_first=False,
-        pin_memory=True,
+        shuffle=True,
         seed=seed,
         num_workers=num_data_workers,
+        batch_first=False,
+        pin_memory=True,
         feat_mean=stats["mean"],
         feat_std=stats["std"],
     )
-    dev_loader = data.SpectEvaluationDataLoader(
+
+    dev_loader = data.SpectDataLoader(
         dev_dir,
         dict_["am"]["data"],
+        shuffle=False,
         batch_first=False,
         num_workers=num_data_workers,
         feat_mean=stats["mean"],
@@ -768,7 +812,7 @@ def train_am(options, dict_):
         if options.quiet < 1:
             print("Epoch completed. Determining dev error rate...", file=sys.stderr)
         dev_er = val_error_rates(
-            model,
+            model_,
             dev_loader,
             options.device,
             dict_["am"]["decoding"].is_ctc,
@@ -815,12 +859,24 @@ def train_am(options, dict_):
             file=sys.stderr,
         )
 
-    state_dict = model.to("cpu").state_dict()
-    if options.pretraining:
-        for key in tuple(state_dict.keys()):
-            if key.startswith("conditional."):
-                state_dict.pop(key)
-    torch.save(state_dict, options.save_path)
+    if rank == 0:
+        state_dict = model_.to("cpu").state_dict()
+        if options.pretraining:
+            for key in tuple(state_dict.keys()):
+                if key.startswith("conditional."):
+                    state_dict.pop(key)
+        torch.save(state_dict, options.save_path)
+
+
+def train_am(options, dict_):
+    if options.ddp_world_size:
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "12355")
+        torch.multiprocessing.spawn(
+            _train_am_helper, (options, dict_), options.ddp_world_size, True
+        )
+    else:
+        _train_am_helper(0, options, dict_)
 
 
 def decode_am(options, dict_):
@@ -855,7 +911,7 @@ def decode_am(options, dict_):
         feats = feats.to(options.device).unsqueeze(1)
         feat_lens = torch.tensor([T]).to(options.device)
         prev = {"input": feats, "length": feat_lens}
-        Tp = model.compute_output_time_size(T).view(1)
+        Tp = model.compute_output_time_size(T)
         if dict_["am"]["decoding"].style == "beam":
             hyp = search(prev, batch_size=1, max_iters=Tp.item())[0][..., 0]
             hyp, len_ = models.extended_hist_to_conditional(
@@ -877,8 +933,10 @@ class DirType(object):
     mode: str
 
     def __init__(self, mode: Literal["r", "w"]):
-        super().__init__()
         self.mode = mode
+
+    def __repr__(self) -> str:
+        return f"Dir('{self.mode}')"
 
     def __call__(self, path: str) -> str:
         if self.mode == "r":
@@ -886,6 +944,25 @@ class DirType(object):
                 raise TypeError(f"path '{path}' is not an existing directory")
         else:
             os.makedirs(path, exist_ok=True)
+        return path
+
+
+class FileType(object):
+
+    mode: str
+
+    def __init__(self, mode: Literal["r", "w"]):
+        self.mode = mode
+
+    def __repr__(self) -> str:
+        return f"File('{self.mode}')"
+
+    def __call__(self, path: str) -> str:
+        if self.mode == "r":
+            if not os.path.isfile(path):
+                raise TypeError(f"path '{path}' is not an existing file")
+        elif not os.path.isdir(os.dirname(path)):
+            raise TypeError(f"path '{path}' parent folder does not exist")
         return path
 
 
@@ -918,15 +995,14 @@ def main(args=None):
     eval_lm_parser.add_argument("--full-model", action="store_true", default=False)
 
     train_am_parser = subparsers.add_parser("train_am")
-    train_am_parser.add_argument("save_path")
+    train_am_parser.add_argument("save_path", type=FileType("w"))
     train_am_parser.add_argument(
-        "--pretrained-enc-path", type=argparse.FileType("rb"), default=None
+        "--pretrained-enc-path", type=FileType("r"), default=None
     )
+    train_am_parser.add_argument("--ddp-world-size", default=0, type=int)
     encoder_group = train_am_parser.add_mutually_exclusive_group()
     encoder_group.add_argument("--pretraining", action="store_true", default=False)
-    encoder_group.add_argument(
-        "--pretrained-lm-path", type=argparse.FileType("rb"), default=None
-    )
+    encoder_group.add_argument("--pretrained-lm-path", type=FileType("r"), default=None)
 
     decode_am_parser = subparsers.add_parser("decode_am")
     decode_am_parser.add_argument("am_path", type=argparse.FileType("rb"))
