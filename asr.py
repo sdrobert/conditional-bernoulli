@@ -225,6 +225,8 @@ def train_lm_for_epoch(
 
     model.train()
 
+    num_samples = len(loader.batch_sampler.sampler)
+
     if quiet < 1:
         loader = tqdm(loader)
 
@@ -240,7 +242,7 @@ def train_lm_for_epoch(
         optimizer.step()
         total_loss += loss.detach() * hyp.size(1)
 
-    return total_loss.item()
+    return total_loss.item() / num_samples
 
 
 @torch.no_grad()
@@ -693,6 +695,8 @@ def train_am_for_epoch(
 
     model.train()
 
+    num_samples = len(loader.batch_sampler.sampler)
+
     if quiet < 1:
         loader = tqdm(loader)
 
@@ -714,7 +718,7 @@ def train_am_for_epoch(
         wn_teardown()
         optimizer.step()
 
-    return total_loss.item()
+    return total_loss.item() / num_samples
 
 
 def _train_am_helper(rank, options, dict_):
@@ -961,7 +965,7 @@ class FileType(object):
         if self.mode == "r":
             if not os.path.isfile(path):
                 raise TypeError(f"path '{path}' is not an existing file")
-        elif not os.path.isdir(os.dirname(path)):
+        elif not os.path.isdir(os.path.dirname(path)):
             raise TypeError(f"path '{path}' parent folder does not exist")
         return path
 
