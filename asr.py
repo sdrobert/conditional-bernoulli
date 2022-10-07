@@ -1,3 +1,4 @@
+from copy import deepcopy
 import sys
 import argparse
 import os
@@ -81,108 +82,29 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     mc_burn_in = param.Integer(1, bounds=(1, None))
     dropout_prob = param.Magnitude(0.0)
     swap_prob = param.Magnitude(0.0)
-    aug_er_patience = param.Integer(1, bounds=(1, None))
     aug_er_thresh = param.Magnitude(0.0)
     sa_time_size_prop = param.Magnitude(0.0)
     sa_time_num_prop = param.Magnitude(0.0)
     sa_freq_num = param.Integer(0, bounds=(0, None))
     sa_freq_size = param.Integer(0, bounds=(0, None))
     weight_noise_std = param.Number(0, bounds=(0, None))
+    optimizer = param.ObjectSelector("sgd", ["adam", "sgd"])
+    momentum = param.Magnitude(0.0)
 
 
 class LanguageModelTrainingStateParams(training.TrainingStateParams):
     fraction_held_out = param.Magnitude(0.05)
+    aug_pp_thresh = param.Number(0.0, bounds=(0, None))
     dropout_prob = param.Magnitude(0.0)
     swap_prob = param.Magnitude(0.0)
-
-
-class LanguageModelDataLoaderParams(param.Parameterized):
-    batch_size = param.Integer(10, bounds=(1, None))
-    drop_last = param.Boolean(False)
+    weight_noise_std = param.Number(0, bounds=(0, None))
+    optimizer = param.ObjectSelector("sgd", ["adam", "sgd"])
+    momentum = param.Magnitude(0.0)
 
 
 class DecodingParams(param.Parameterized):
     style = param.ObjectSelector("beam", objects=["beam", "prefix", "ctc"])
     is_ctc = param.Boolean(False)
-
-
-class LanguageModelDataSet(torch.utils.data.Dataset):
-
-    data_dir: str
-    utt_ids: Tuple[str, ...]
-
-    def __init__(self, data_dir: str, subset_ids: Optional[Set[str]] = None) -> None:
-        super().__init__()
-        self.data_dir = data_dir
-        self.subset_ids = subset_ids
-        utt_ids = self.get_utt_ids_in_data_dir(data_dir)
-        if subset_ids is not None:
-            assert subset_ids & utt_ids == subset_ids
-            utt_ids = subset_ids
-        self.utt_ids = sorted(utt_ids)
-
-    @staticmethod
-    def get_utt_ids_in_data_dir(data_dir: str) -> Set[str]:
-        assert os.path.isdir(data_dir)
-        return {u[:-3] for u in os.listdir(data_dir) if u.endswith(".pt")}
-
-    def __len__(self) -> int:
-        return len(self.utt_ids)
-
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        path = os.path.join(self.data_dir, self.utt_ids[idx] + ".pt")
-        return torch.load(path)[..., 0]
-
-
-class LanguageModelDataLoader(torch.utils.data.DataLoader):
-
-    params: LanguageModelDataLoaderParams
-    init_epoch: int
-
-    def __init__(
-        self,
-        data_dir: str,
-        params: LanguageModelDataLoaderParams,
-        init_epoch: int = 0,
-        subset_ids: Optional[Set[str]] = None,
-        seed: Optional[int] = None,
-        **kwargs,
-    ) -> None:
-        for bad_kwarg in (
-            "batch_size",
-            "sampler",
-            "batch_sampler",
-            "shuffle",
-            "collate_fn",
-        ):
-            if bad_kwarg in kwargs:
-                raise TypeError(
-                    'keyword argument "{}" invalid for {} types'.format(
-                        bad_kwarg, type(self)
-                    )
-                )
-        self.params = params
-        data_source = LanguageModelDataSet(data_dir, subset_ids)
-        epoch_sampler = data.EpochRandomSampler(data_source, init_epoch, seed)
-        batch_sampler = torch.utils.data.BatchSampler(
-            epoch_sampler, params.batch_size, drop_last=params.drop_last
-        )
-        super().__init__(
-            data_source,
-            batch_sampler=batch_sampler,
-            collate_fn=lambda x: torch.nn.utils.rnn.pad_sequence(
-                x, padding_value=config.INDEX_PAD_VALUE
-            ),
-            **kwargs,
-        )
-
-    @property
-    def epoch(self) -> int:
-        return self.batch_sampler.sampler.epoch
-
-    @epoch.setter
-    def epoch(self, val: int):
-        self.batch_sampler.sampler.epoch = val
 
 
 def construct_default_param_dict():
@@ -199,7 +121,7 @@ def construct_default_param_dict():
             "decoding": DecodingParams(name="am.decoding"),
         },
         "lm": {
-            "data": LanguageModelDataLoaderParams(name="lm.data"),
+            "data": data.LangDataLoaderParams(name="lm.data"),
             "training": LanguageModelTrainingStateParams(name="lm.training"),
         },
     }
@@ -207,7 +129,7 @@ def construct_default_param_dict():
 
 def train_lm_for_epoch(
     model: models.LstmLm,
-    loader: LanguageModelDataLoader,
+    loader: data.LangDataLoader,
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
     params: LanguageModelTrainingStateParams,
@@ -220,8 +142,24 @@ def train_lm_for_epoch(
     if epoch == 1 or (controller.state_dir and controller.state_csv_path):
         controller.load_model_and_optimizer_for_epoch(model, optimizer, epoch - 1, True)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=config.INDEX_PAD_VALUE)
-    model.dropout_prob = params.dropout_prob
-    model.swap_prob = params.swap_prob
+    wn_setup = wn_teardown = lambda: None
+    do_aug = controller.get_info(epoch - 1)["do_aug"]
+    if do_aug:
+        model.dropout_prob = params.dropout_prob
+        model.swap_prob = params.swap_prob
+        if params.weight_noise_std:
+            param_data = []
+
+            def wn_setup():
+                for p in model.parameters():
+                    param_data.append(p.data.clone())
+                    p.data += torch.randn_like(p) * params.weight_noise_std
+
+            def wn_teardown():
+                for p, p_ in zip(model.parameters(), param_data):
+                    # we copy so that RNN parameters remain contiguous in memory
+                    p.data.copy_(p_)
+                param_data.clear()
 
     model.train()
 
@@ -231,14 +169,17 @@ def train_lm_for_epoch(
         loader = tqdm(loader)
 
     total_loss = 0
-    for hyp in loader:
+    for hyp, _ in loader:
         hyp = hyp.to(device, non_blocking=non_blocking)
-        optimizer.zero_grad()
         hist = hyp[:-1].clamp(0, model.vocab_size - 1)
+
+        optimizer.zero_grad()
+        wn_setup()
         logits = model(hist)
         assert logits.shape[:-1] == hyp.shape
         loss = loss_fn(logits.flatten(0, 1), hyp.flatten())
         loss.backward()
+        wn_teardown()
         optimizer.step()
         total_loss += loss.detach() * hyp.size(1)
 
@@ -247,9 +188,7 @@ def train_lm_for_epoch(
 
 @torch.no_grad()
 def lm_perplexity(
-    model: models.SequentialLanguageModel,
-    val: LanguageModelDataSet,
-    device: torch.device,
+    model: models.SequentialLanguageModel, val: data.LangDataSet, device: torch.device,
 ) -> float:
 
     model.eval()
@@ -314,16 +253,28 @@ def init_model(options, dict_, delta_order, pretraining=False) -> models.Acousti
 
 
 def train_lm(options, dict_):
-    data_dir = os.path.join(options.data_dir, "lm")
-    if not os.path.isdir(data_dir):
-        raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
+    train_data_dir = os.path.join(options.data_dir, "lm")
+    if not os.path.isdir(train_data_dir):
+        raise ValueError(
+            f"'{train_data_dir}' is not a directory. Did you initialize it?"
+        )
+    dev_data_dir = os.path.join(options.data_dir, "dev", "ref")
+    if not os.path.isdir(dev_data_dir):
+        raise ValueError(f"'{dev_data_dir}' is not a directory. Did you initialize it?")
     seed = dict_["lm"]["training"].seed
 
     model = init_model(options, dict_["model"], dict_["am"]["data"].delta_order)
     model = model.conditional
     model.add_module("post_merger", None)
     model.add_module("input_merger", None)
-    optimizer = torch.optim.Adam(model.parameters())
+    if dict_["lm"]["training"].optimizer == "sgd":
+        optimizer = torch.optim.SGD(
+            model.parameters(), 1e-4, momentum=dict_["lm"]["training"].momentum
+        )
+    elif dict_["lm"]["training"].optimizer == "adam":
+        optimizer = torch.optim.Adam(model.parameters())
+    else:
+        assert False
 
     if options.model_dir is not None:
         state_dir = os.path.join(options.model_dir, "training")
@@ -334,34 +285,22 @@ def train_lm(options, dict_):
     controller = training.TrainingStateController(
         dict_["lm"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
+    controller.add_entry("do_aug", int)
 
-    utt_ids = sorted(LanguageModelDataSet.get_utt_ids_in_data_dir(data_dir))
-    fraction_held_out = dict_["lm"]["training"].fraction_held_out
-    num_val = max(1, int(len(utt_ids) * fraction_held_out))
-    num_train = len(utt_ids) - num_val
-    if options.quiet < 2:
-        print(
-            f"hold-out is {fraction_held_out:.0%} ({num_val}/{num_train})",
-            file=sys.stderr,
-        )
-    random.Random(seed).shuffle(utt_ids)
-    train_utt_ids, val_utt_ids = set(utt_ids[:-num_val]), set(utt_ids[-num_val:])
-    assert train_utt_ids and val_utt_ids
-
-    loader = LanguageModelDataLoader(
-        data_dir,
+    loader = data.LangDataLoader(
+        train_data_dir,
         dict_["lm"]["data"],
-        0,
-        train_utt_ids,
-        seed,
+        shuffle=True,
+        seed=seed,
+        batch_first=False,
         num_workers=min(get_num_avail_cores() - 1, 4),
     )
 
-    val = LanguageModelDataSet(data_dir, val_utt_ids)
+    val = data.LangDataSet(dev_data_dir, dict_["lm"]["data"])
 
-    pp = float("inf")
     epoch = controller.get_last_epoch() + 1
-
+    do_aug = bool(controller.get_info(epoch - 1)["do_aug"])
+    aug_pp_thresh = dict_["lm"]["training"].aug_pp_thresh
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
@@ -380,7 +319,10 @@ def train_lm(options, dict_):
                 "Epoch completed. Determining hold-out perplexity...", file=sys.stderr
             )
         pp = lm_perplexity(model, val, options.device)
-        controller.update_for_epoch(model, optimizer, train_loss, pp, epoch)
+        do_aug |= pp < aug_pp_thresh
+        controller.update_for_epoch(
+            model, optimizer, train_loss, pp, epoch, do_aug=int(do_aug)
+        )
         if options.quiet < 2:
             print(
                 f"Epoch {epoch}: Train loss={train_loss:.02f}, hold-out "
@@ -410,7 +352,7 @@ def train_lm(options, dict_):
 
 
 def eval_lm(options, dict_):
-    data_dir = os.path.join(options.data_dir, "dev", "ref")
+    data_dir = os.path.join(options.data_dir, "test", "ref")
     if not os.path.isdir(data_dir):
         raise ValueError(f"'{data_dir}' is not a directory. Did you initialize it?")
 
@@ -453,7 +395,7 @@ def eval_lm(options, dict_):
         model = modules.LookupLanguageModel(len(token2id), token2id["<s>"], prob_list)
         model = model.to(options.device)
 
-    dev = LanguageModelDataSet(data_dir)
+    dev = data.LangDataSet(data_dir)
     lm_pp = lm_perplexity(model, dev, options.device)
     print(f"perplexity: {lm_pp:.02f}")
 
@@ -654,6 +596,7 @@ def train_am_for_epoch(
     device: torch.device,
     quiet: int,
     pretraining: bool,
+    world_size: int,
 ) -> float:
     loader.epoch = epoch
     non_blocking = device.type == "cpu" or loader.pin_memory
@@ -685,7 +628,11 @@ def train_am_for_epoch(
             def wn_setup():
                 for p in model.parameters():
                     param_data.append(p.data.clone())
-                    p.data += torch.randn_like(p) * params.weight_noise_std
+                    p.data += (
+                        torch.randn_like(p)
+                        * params.weight_noise_std
+                        / math.sqrt(max(world_size, 1))
+                    )
 
             def wn_teardown():
                 for p, p_ in zip(model.parameters(), param_data):
@@ -754,7 +701,13 @@ def _train_am_helper(rank, options, dict_):
     )
     if options.ddp_world_size:
         model = torch.nn.parallel.DistributedDataParallel(model)
-    optimizer = torch.optim.Adam(p for p in model.parameters() if p.requires_grad)
+    ps = (p for p in model.parameters() if p.requires_grad)
+    if dict_["am"]["training"].optimizer == "sgd":
+        optimizer = torch.optim.SGD(ps, 1e-4, momentum=dict_["am"]["training"].momentum)
+    elif dict_["am"]["training"].optimizer == "adam":
+        optimizer = torch.optim.Adam(ps)
+    else:
+        assert False
 
     if options.model_dir is not None:
         state_dir = os.path.join(options.model_dir, "training")
@@ -765,7 +718,6 @@ def _train_am_helper(rank, options, dict_):
     controller = training.TrainingStateController(
         dict_["am"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
-    # controller.add_entry("aug_er_patience_cd", int)
     controller.add_entry("do_aug", int)
 
     stats_file = os.path.join(options.data_dir, "ext", "train.mvn.pt")
@@ -793,12 +745,10 @@ def _train_am_helper(rank, options, dict_):
         feat_std=stats["std"],
     )
 
-    # aug_er_patience = dict_["am"]["training"].aug_er_patience
-    aug_er_thresh = dict_["am"]["training"].aug_er_thresh
-
     # dev_er = float("inf")
     epoch = controller.get_last_epoch() + 1
     do_aug = bool(controller.get_info(epoch - 1)["do_aug"])
+    aug_er_thresh = dict_["am"]["training"].aug_er_thresh
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
@@ -812,6 +762,7 @@ def _train_am_helper(rank, options, dict_):
             options.device,
             options.quiet,
             options.pretraining,
+            options.ddp_world_size,
         )
         if options.quiet < 1:
             print("Epoch completed. Determining dev error rate...", file=sys.stderr)
@@ -824,12 +775,6 @@ def _train_am_helper(rank, options, dict_):
             options.pretraining,
         )
         do_aug |= dev_er < aug_er_thresh
-        # if aug_er_patience_cd > 0:
-        #     if max(best_er - dev_er, 0) < aug_er_thresh:
-        #         aug_er_patience_cd -= 1
-        #     else:
-        #         aug_er_patience_cd = aug_er_patience
-        # best_er = min(dev_er, best_er)
 
         controller.update_for_epoch(
             model,
@@ -908,9 +853,11 @@ def decode_am(options, dict_):
         params=dict_["am"]["data"],
         feat_mean=stats["mean"],
         feat_std=stats["std"],
+        suppress_alis=True,
+        suppress_uttids=False,
+        tokens_only=False,
     )
-    for idx, (feats, _, _) in enumerate(test_set):
-        utt_id = test_set.utt_ids[idx]
+    for feats, _, utt_id in test_set:
         T = feats.size(0)
         feats = feats.to(options.device).unsqueeze(1)
         feat_lens = torch.tensor([T]).to(options.device)
@@ -923,7 +870,7 @@ def decode_am(options, dict_):
             )
         elif dict_["am"]["decoding"].is_ctc:
             lprobs = model.calc_ctc_log_probs(feat_lens.new_empty((0, 1)), prev)
-            hyp, len_, _ = search(lprobs, Tp, prev)
+            hyp, len_, _ = search(lprobs, Tp.view(1), prev)
             hyp, len_ = hyp[..., 0], len_[..., 0]
         else:
             hyp, len_, _ = search(1, Tp.item(), prev)

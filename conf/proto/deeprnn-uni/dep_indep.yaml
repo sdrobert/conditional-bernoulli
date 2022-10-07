@@ -1,6 +1,7 @@
 model:
   frontend:
     recurrent_layers: 3
+    recurrent_size: 421
   latent:
     num_layers: 0
     embedding_size: 0

@@ -1,5 +1,0 @@
-am:
-  training:
-    estimator: cb
-  decoding:
-    is_ctc: false

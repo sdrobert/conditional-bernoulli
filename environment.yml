@@ -20,4 +20,4 @@ dependencies:
   - pydrobert-speech
   - pip:
     - jiwer
-    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@ec7cd3bd8566e21233f5a2e5ec05ea52225c317f"
+    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@3ea92e2e8a2d622e7029ec7bb5b3a9c058c56223"

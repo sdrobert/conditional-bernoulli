@@ -81,8 +81,8 @@ dependencies=( "${ALL_DEPENDENCIES[@]}" )
 estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
 regimes=( "${ALL_REGIMES[@]}" )
-# beam_widths=( 1 2 4 8 16 32 )
-beam_widths=( 4 )
+beam_widths=( 1 2 4 8 16 32 64 128 )
+# beam_widths=( 4 )
 only=0
 
 # for determinism
@@ -386,7 +386,7 @@ fi
 # decode and compute error rates
 if [ $stage -le 5 ]; then
   N=$(get_combos model dependency estimator lm regime seed | wc -l)
-  for (( i = $OFFSET; i < ncs; i += $STRIDE )); do
+  for (( i = OFFSET; i < N; i += STRIDE )); do
     unpack_combo $i model dependency estimator lm regime seed
     mname="${model}_${dependency}_${estimator}_${lm}_${regime}"
     yml="$(combine)"

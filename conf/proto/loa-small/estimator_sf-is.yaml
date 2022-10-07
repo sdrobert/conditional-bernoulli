@@ -1,5 +1,0 @@
-am:
-  training:
-    estimator: sf-is
-  decoding:
-    is_ctc: false

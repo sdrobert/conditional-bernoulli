@@ -1,5 +1,0 @@
-am:
-  training:
-    estimator: ais-c
-  decoding:
-    is_ctc: false
