@@ -231,8 +231,8 @@ def test_drezner_farnum_bernoulli():
 
     # now plug into the distribution
     p, omp = df_bernoulli.prob_1, 1 - df_bernoulli.prob_1
-    walk = RandomWalk(df_bernoulli, max_iters=T)
-    dist = SequentialLanguageModelDistribution(walk)
+    walk = RandomWalk(df_bernoulli)
+    dist = SequentialLanguageModelDistribution(walk, max_iters=T)
     sample = dist.sample([M])
     assert torch.allclose(sample.float().mean(0), p, atol=1e-2)
     lp_act = dist.log_prob(sample)

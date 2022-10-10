@@ -460,9 +460,30 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
 fi
 
 # compute descriptives for all the dependencies
+echo "LM Perplexities on test set:"
+[ -f "$lmdir/results.ngram.txt" ] && cat "$lmdir/results.ngram.txt"
+for mname in $(find "$lmdir" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; | sort ); do
+  results=( $(find "$lmdir" -name "results.$mname.*.txt" -print) )
+  if [ "${#results[@]}" -gt 0 ]; then
+    echo -n "$mname: "
+    awk '
+BEGIN {n=0; s=0; min=1000; max=0}
+{
+  x=$NF + 0;
+  a[n++]=x; s+=x; if (x < min) min=x; if (x > max) max=x;
+}
+END {
+  mean=s/n; med=a[int(n/2)];
+  var=0; for (i=0;i<n;i++) var+=(a[i] - mean) * (a[i] - mean) / n; std=sqrt(var);
+  printf "n=%d, mean=%.1f, std=%.1f, med=%.1f, min=%.1f, max=%.1f\n", n, mean, std, med, min, max;
+}' "${results[@]}"
+  fi
+done
+
+echo
 echo "Phone Error Rates:"
 for part in dev test; do
-  for mdir in $(find "$amdir" -maxdepth 1 -mindepth 1 -type d); do
+  for mdir in $(find "$amdir" -maxdepth 1 -mindepth 1 -type d | sort ); do
     results=( $(find "$mdir" -name "results.$part.*.txt" -print) )
     if [ "${#results[@]}" -gt 0 ]; then
       echo -n "$part ${mdir##*/}: "
