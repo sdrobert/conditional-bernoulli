@@ -1,13 +1,11 @@
-from copy import deepcopy
 import sys
 import argparse
 import os
-import random
 import math
 import glob
 import gzip
 
-from typing import Optional, Set, Tuple
+from typing import Tuple
 from typing_extensions import Literal
 
 import torch
@@ -24,6 +22,8 @@ import pydrobert.torch.distributions as pdistributions
 import pydrobert.param.argparse as pargparse
 
 from tqdm import tqdm
+from torch.distributed.elastic.multiprocessing.errors import record
+
 
 import models
 import distributions
@@ -90,6 +90,10 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     weight_noise_std = param.Number(0, bounds=(0, None))
     optimizer = param.ObjectSelector("sgd", ["adam", "sgd"])
     momentum = param.Magnitude(0.0)
+    entropy_decay = param.Magnitude(0.97 ** (1 / 10000))
+    entropy_floor = param.Magnitude(0.1)
+    use_entropy = param.Boolean(False)
+    world_size = param.Integer(1, bounds=(1, None))
 
 
 class LanguageModelTrainingStateParams(training.TrainingStateParams):
@@ -370,7 +374,7 @@ def eval_lm(options, dict_):
     else:
         print("model: arpa.lm.gz, ", end="")
         # FIXME(sdrobert): windows
-        arpa_lm_path = glob.glob(f"{options.data_dir}/local/**/lm.arpa.gz")
+        arpa_lm_path = glob.glob(f"{options.data_dir}//**/lm.arpa.gz")
         if len(arpa_lm_path) == 0:
             raise ValueError(
                 f"Could not find lm.arpa.gz in '{data_dir}'. Did you make it?"
@@ -454,11 +458,13 @@ class TrainingAmWrapper(torch.nn.Module):
     estimator_name: str
     M: int
     B: int
+    ec: float
 
     def __init__(self, am: models.AcousticModel, estimator_name: str, M: int, B: int):
         super().__init__()
         self.am = am
         self.estimator_name, self.M, self.B = estimator_name, M, B
+        self.ec = 0.0
 
     def forward(
         self,
@@ -481,6 +487,7 @@ class TrainingAmWrapper(torch.nn.Module):
                 {"latent_input": h, "latent_length": h_lens},
             )
             ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
+            ll = ll - self.ec
             return ll
 
         if self.estimator_name == "marginal":
@@ -609,6 +616,11 @@ def train_am_for_epoch(
     if do_aug:
         model.dropout_prob = params.dropout_prob
         model.swap_prob = params.swap_prob
+        if params.use_entropy:
+            model.ec = (
+                params.entropy_decay ** ((epoch - 1) * len(loader))
+                + params.entropy_floor
+            )
         if (params.sa_time_num_prop and params.sa_time_size_prop) or (
             params.sa_freq_num and params.sa_freq_size
         ):
@@ -640,6 +652,9 @@ def train_am_for_epoch(
                     p.data.copy_(p_)
                 param_data.clear()
 
+    elif params.use_entropy:
+        model.ec = 1.0
+
     model.train()
 
     num_samples = len(loader.batch_sampler.sampler)
@@ -668,20 +683,27 @@ def train_am_for_epoch(
     return total_loss.item() / num_samples
 
 
-def _train_am_helper(rank, options, dict_):
-    if options.ddp_world_size:
+def train_am(options, dict_):
+    rank = int(os.environ.get("LOCAL_RANK", -1))
+    if rank >= 0:
+        if rank != 0:
+            options.quiet = 100
         if options.device.type == "cuda":
-            options.device = torch.device(rank % torch.cuda.device_count())
-            torch.distributed.init_process_group(
-                "nccl", rank=rank, world_size=options.ddp_world_size
-            )
+            torch.cuda.set_device(rank)
+            torch.distributed.init_process_group("nccl")
         else:
-            torch.distributed.init_process_group(
-                "gloo", rank=rank, world_size=options.ddp_world_size
-            )
-        num_data_workers = 0
-    else:
-        num_data_workers = min(get_num_avail_cores() - 1, 4)
+            torch.distributed.init_process_group("gloo")
+    try:
+        world_size = max(torch.distributed.get_world_size(), 1)
+    except:
+        world_size = 1
+    if world_size != dict_["am"]["training"].world_size:
+        raise ValueError(
+            f'Configured world size ({dict_["am"]["training"].world_size}) is not the '
+            f"same as actual world size ({world_size})"
+        )
+
+    num_data_workers = min(get_num_avail_cores() - 1, 4)
     train_dir = os.path.join(options.data_dir, "train")
     if not os.path.isdir(train_dir):
         raise ValueError(f"'{train_dir}' is not a directory. Did you initialize it?")
@@ -699,7 +721,7 @@ def _train_am_helper(rank, options, dict_):
         dict_["am"]["training"].mc_samples,
         dict_["am"]["training"].mc_burn_in,
     )
-    if options.ddp_world_size:
+    if rank >= 0:
         model = torch.nn.parallel.DistributedDataParallel(model)
     ps = (p for p in model.parameters() if p.requires_grad)
     if dict_["am"]["training"].optimizer == "sgd":
@@ -808,24 +830,13 @@ def _train_am_helper(rank, options, dict_):
             file=sys.stderr,
         )
 
-    if rank == 0:
+    if rank <= 0:
         state_dict = model_.to("cpu").state_dict()
         if options.pretraining:
             for key in tuple(state_dict.keys()):
                 if key.startswith("conditional."):
                     state_dict.pop(key)
         torch.save(state_dict, options.save_path)
-
-
-def train_am(options, dict_):
-    if options.ddp_world_size:
-        os.environ.setdefault("MASTER_ADDR", "localhost")
-        os.environ.setdefault("MASTER_PORT", "12355")
-        torch.multiprocessing.spawn(
-            _train_am_helper, (options, dict_), options.ddp_world_size, True
-        )
-    else:
-        _train_am_helper(0, options, dict_)
 
 
 def decode_am(options, dict_):
@@ -917,6 +928,7 @@ class FileType(object):
         return path
 
 
+@record
 def main(args=None):
 
     parser = argparse.ArgumentParser(description="Commands for running ASR experiments")

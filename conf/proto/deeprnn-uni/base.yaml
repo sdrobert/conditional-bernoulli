@@ -1,7 +1,7 @@
 model:
   frontend:
-    window_size: 1
-    window_stride: 1
+    window_size: 3
+    window_stride: 3
     convolutional_layers: 0
     recurrent_type: LSTM
     recurrent_bidirectional: false
@@ -12,32 +12,30 @@ am:
   data:
     delta_order: 2
     do_mvn: true
-    batch_size: 5
     drop_last: true
-    # num_length_buckets: 5
-    # size_batch_by_length: true
   training:
-    dropout_prob: 0.1
-    swap_prob: 0.3
-    weight_noise_std: 0.075
+    dropout_prob: 0.0
+    swap_prob: 0.0
     aug_er_thresh: 0.8
-    mc_samples: 32
-    mc_burn_in: 16
-    early_stopping_burnin: 20
+    mc_samples: 64
+    mc_burn_in: 32
+    early_stopping_burnin: 40
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true
     log10_learning_rate: -4
     optimizer: adam
     momentum: 0.9
+    # entropy_decay: 0.97 ** (1/10000)
+    # entropy_floor: 0.1
 lm:
   data:
-    batch_size: 512
+    batch_size: 64
     drop_last: true
   training:
-    dropout_prob: 0.1
-    swap_prob: 0.3
-    aug_pp_thresh: 20
+    dropout_prob: 0.0
+    swap_prob: 0.0
+    aug_pp_thresh: 17
     weight_noise_std: 0.075
     early_stopping_patience: 50
     early_stopping_threshold: 0.1

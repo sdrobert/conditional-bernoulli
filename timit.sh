@@ -52,17 +52,17 @@ ALL_LMS=( lm-rnn lm-embedding nolm )
 ALL_REGIMES=( pretrained flatstart )
 CORE_INVALIDS=(
   'full_marginal' 'full_cb' 'full_ctc' 'partial_marginal' 'partial_ctc'
-  'ctc_lm-rnn' 'ctc_lm-embedding' '^[^_]*_nolm_pretrained'
+  'ctc_lm-rnn' 'ctc_lm-embedding' #'^[^_]*_nolm_pretrained'
 )
 RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
   'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
-  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is'
+  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'pretrained' 'embedding'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
 TMPDIR="$(mktemp -d)"
-VOCAB_SIZE=60
+VOCAB_SIZE=61
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # variables
@@ -227,6 +227,12 @@ combine() {
   echo "$yml"
 }
 
+if [ $world_size = 0 ]; then
+  train_cmd=python
+else
+  train_cmd="torchrun --nproc_per_node=$world_size"
+fi
+
 # prep the dataset
 if [ $stage -le 1 ]; then
   if [ ! -f "$data/.complete" ] && [ $OFFSET -eq 0 ]; then 
@@ -368,13 +374,14 @@ if [ $stage -le 4 ]; then
     fi
     if [ ! -f "$mdir/final.pt" ]; then
       echo "Beginning stage 4 - training $mname with seed $seed"
-      python asr.py "$data" $quiet \
-        --read-yaml "$yml" \
-        --device "$device" \
-        --model-dir "$mdir" \
-        --seed $seed \
-        train_am "${xtra_args[@]}" "$mdir/final.pt" \
-          --ddp-world-size $world_size
+      $train_cmd \
+        asr.py \
+          "$data" $quiet \
+          --read-yaml "$yml" \
+          --device "$device" \
+          --model-dir "$mdir" \
+          --seed $seed \
+          train_am "${xtra_args[@]}" "$mdir/final.pt"
       echo "Ending stage 4 - training $mname with seed $seed"
     else
       echo "Stage 4 - $mdir/final.pt exists. Skipping"
@@ -415,9 +422,14 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         if [ ! -f "$bdir/.complete" ]; then
           echo "Beginning stage 5 - decoding $part using $mname with seed" \
             "$seed and beam width $beam_width"
+          if [ $beam_width -le 8 ]; then
+            device_="$device"
+          else
+            device_=cpu
+          fi
           python asr.py "$data" $quiet \
             --read-yaml "$yml" \
-            --device "$device" \
+            --device "$device_" \
             decode_am \
               "${xtra_args[@]}" --beam-width "$beam_width" \
               "$mpth" "$bdir"

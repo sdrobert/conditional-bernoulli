@@ -231,6 +231,10 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         prev_latent = self.latent.extract_by_src(prev_latent, src)
         prev_cond = self.conditional.extract_by_src(prev_cond, src)
         prev_old = self.conditional.extract_by_src(prev_old, src)
+        if "cond_hist" in prev_rest and "cond_lens" in prev_rest:
+            prev_rest = prev_rest.copy()
+            prev_rest["cond_hist"] = prev_rest["cond_hist"].index_select(1, src)
+            prev_rest["cond_lens"] = prev_rest["cond_lens"][src]
         return self.merge_dicts(prev_latent, prev_cond, prev_old, prev_rest)
 
     def calc_idx_log_probs(
@@ -244,13 +248,26 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         if T == 0:
             cond_idx = idx
             cond_hist = torch.empty((0, N), dtype=torch.long, device=device)
+            cond_lens = torch.zeros((N,), device=device, dtype=torch.long)
         else:
-            cond_hist, cond_lens = extended_hist_to_conditional(
-                hist, idx, latent_hist=latent_hist
-            )
             idx_ = (idx - 1).clamp_min(0).unsqueeze(0)
             gt_0 = idx > 0
             is_new = latent_hist.gather(0, idx_).squeeze(0) & gt_0
+            # if "cond_hist" in prev_rest and "cond_lens" in prev_rest:
+            #     cond_hist = prev_rest["cond_hist"]
+            #     cond_lens = prev_rest["cond_lens"]
+            #     tok = hist.gather(0, idx_)
+            #     if cond_lens.max() >= cond_hist.shape[0]:
+            #         cond_hist = torch.cat(
+            #             [cond_hist, cond_hist.new_empty(1, N)], 0
+            #         ).scatter_(0, cond_lens.unsqueeze(0), tok)
+            #     else:
+            #         cond_hist = cond_hist.scatter(0, cond_lens.unsqueeze, tok)
+            #     cond_lens = cond_lens + is_new
+            # else:
+            cond_hist, cond_lens = extended_hist_to_conditional(
+                hist, idx, latent_hist=latent_hist
+            )
             cond_idx = cond_lens * gt_0
             prev_cond = self.conditional.mix_by_mask(prev_cond, prev_old, is_new)
         llogits, cur_latent = self.latent.calc_idx_log_probs(
@@ -265,6 +282,9 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         )
         clogits = clogits.log_softmax(1)
         logits = torch.cat([llogits[:, 1:] + clogits, llogits[:, :1]], 1)
+        # cur_rest = prev_rest.copy()
+        # cur_rest["cond_hist"] = cond_hist
+        # cur_rest["cond_lens"] = cond_lens
         cur = self.merge_dicts(cur_latent, cur_cond, prev_cond, prev_rest)
         return logits, cur
 

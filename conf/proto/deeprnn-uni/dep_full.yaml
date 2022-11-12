@@ -9,5 +9,9 @@ model:
   merge:
     cond_input_is_post: false
 am:
+  data:
+    batch_size: 4
+  training:
+    world_size: 4
   decoding:
     style: beam

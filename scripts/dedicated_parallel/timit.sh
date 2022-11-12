@@ -29,14 +29,14 @@ run_stage() {
   echo "Beginning stage $stage"
   shift
   pids=( )
-  rm -f logs/timit/stage-$stage-*.log
+  # rm -f logs/timit/stage-$stage-*.log
   for i in "${!gpu_numbers[@]}"; do
     gpu_number="${gpu_numbers[$i]}"
     (
       export CUDA_VISIBLE_DEVICES=$gpu_number;
       export TIMIT_OFFSET=$i;
       ./timit.sh -s $stage -x -q "${global_args[@]}" \
-        > "logs/timit/stage-$stage-$i.log" 2>&1;
+        > "logs/timit/stage-$stage-$i-$$.log" 2>&1;
     ) & 
     pids+=( $! )
   done

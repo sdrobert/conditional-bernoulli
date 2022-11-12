@@ -8,5 +8,7 @@ model:
   merge:
     cond_input_is_post: false
 am:
+  data:
+    batch_size: 16
   decoding:
     style: beam
