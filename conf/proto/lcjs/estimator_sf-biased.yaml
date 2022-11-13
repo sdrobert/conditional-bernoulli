@@ -1,9 +1,9 @@
 am:
   data:
-    batch_size: 16
+    batch_size: 4
   training:
-    world_size: 1
-    estimator: cb
+    world_size: 4
+    estimator: sf-biased
     use_entropy: true
   decoding:
     is_ctc: false

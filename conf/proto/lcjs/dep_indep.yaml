@@ -1,7 +1,6 @@
 model:
   frontend:
-    recurrent_layers: 3
-    recurrent_size: 421
+    recurrent_layers: 5
   latent:
     num_layers: 0
     embedding_size: 0
@@ -9,6 +8,8 @@ model:
     cond_input_is_post: true
 am:
   training:
-    weight_noise_std: 0.075
+    weight_noise_std: 0.0
+  data:
+    batch_size: 16
   decoding:
     style: prefix

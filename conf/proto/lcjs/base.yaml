@@ -1,24 +1,28 @@
 model:
   frontend:
-    window_size: 1
-    window_stride: 1
+    window_size: 3
+    window_stride: 3
     convolutional_layers: 0
     recurrent_type: LSTM
     recurrent_bidirectional: false
+    recurrent_size: 300
+
+  latent:
+    hidden_size: 300
   
   conditional:
-    hidden_size: 250
+    hidden_size: 300
 am:
   data:
-    delta_order: 2
-    do_mvn: true
+    delta_order: 0
+    do_mvn: false
     drop_last: true
   training:
     dropout_prob: 0.0
     swap_prob: 0.0
-    aug_er_thresh: 0.8
-    mc_samples: 32
-    mc_burn_in: 16
+    aug_er_thresh: 0.0
+    mc_samples: 64
+    mc_burn_in: 32
     early_stopping_burnin: 40
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3
