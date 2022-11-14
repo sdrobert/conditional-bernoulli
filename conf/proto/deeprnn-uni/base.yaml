@@ -23,7 +23,6 @@ am:
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true
-    log10_learning_rate: -4
     optimizer: adam
     momentum: 0.9
     # entropy_decay: 0.97 ** (1/10000)

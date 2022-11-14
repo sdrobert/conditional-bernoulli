@@ -45,7 +45,7 @@ EOF
 
 # constants
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
-ALL_MODELS=( lcjs )
+ALL_MODELS=( deeprnn-uni )
 ALL_DEPENDENCIES=( full indep partial )
 ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc )
 ALL_LMS=( lm-rnn lm-embedding nolm )
@@ -326,12 +326,14 @@ if [ $stage -le 3 ]; then
       mkdir -p "$mdir"
       if [ ! -f "$mdir/final.pt" ]; then
         echo "Beginning stage 3 - pretraining $mname with seed $seed"
-        python asr.py "$data" $quiet \
-          --read-yaml "$yml" \
-          --device "$device" \
-          --model-dir "$mdir" \
-          --seed $seed \
-          train_am "$mdir/final.pt" --pretraining --ddp-world-size $world_size
+        $train_cmd \
+          asr.py \
+            "$data" $quiet \
+            --read-yaml "$yml" \
+            --device "$device" \
+            --model-dir "$mdir" \
+            --seed $seed \
+            train_am "$mdir/final.pt" --pretraining --ddp-world-size $world_size
         echo "Ending stage 3 - pretraining $mname with seed $seed"
       else
         echo "Stage 3 - $mdir/final.pt exists. Skipping"
