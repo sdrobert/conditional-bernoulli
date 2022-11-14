@@ -4,6 +4,6 @@ am:
   training:
     world_size: 2
     estimator: srswor
-    use_entropy: true
+    #use_entropy: true
   decoding:
     is_ctc: false

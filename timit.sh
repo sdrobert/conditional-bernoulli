@@ -52,7 +52,7 @@ ALL_LMS=( lm-rnn lm-embedding nolm )
 ALL_REGIMES=( pretrained flatstart )
 CORE_INVALIDS=(
   'full_marginal' 'full_cb' 'full_ctc' 'partial_marginal' 'partial_ctc'
-  'ctc_lm-rnn' 'ctc_lm-embedding' #'^[^_]*_nolm_pretrained'
+  'ctc_lm-rnn' 'ctc_lm-embedding' 'nolm_pretrained'
 )
 RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
@@ -279,6 +279,10 @@ if [ $stage -le 2 ]; then
       # the only settings that matter are the model, lm, and pretrained; we put
       # dummy configs in the rest
       unpack_combo $i model lm pretrained seed
+      if [ "$lm" = nolm ]; then
+        echo "Stage 2 - Skipping LM pretraining for $model, $lm and seed $seed"
+        continue
+      fi
       dependency=indep
       estimator=marginal
       yml="$(combine)"
@@ -316,14 +320,25 @@ fi
 # pretrain up to the latent part of the model (the "encoder")
 if [ $stage -le 3 ]; then
   if [[ "${regimes[*]}" =~ "pretrained" ]]; then
-    N=$(get_combos model dependency estimator pretrained seed | wc -l)
+    N=$(get_combos model dependency pretrained seed | wc -l)
     for (( i = OFFSET; i < N; i += STRIDE )); do
       unpack_combo $i model dependency estimator pretrained seed
       lm=nolm
-      yml="$(combine)"
-      mname="${model}_${dependency}_${estimator}"
-      mdir="$encdir/$mname/$seed"
+      mname="${model}_${dependency}"
+      if [ "$dependency" = "full" ]; then
+        estimator=srswor
+        mdir="$encdir/$mname/$seed"
+      else
+        estimator=marginal
+        mdir="$encdir/${model}_indep/$seed"
+        if [ "$dependency" = "partial" ]; then
+          mkdir -p "$encdir/$mname"
+          ln -sf "$mdir" "$encdir/$mname/$seed"
+          [[ "${dependencies[*]}" =~ "indep" ]] && continue
+        fi
+      fi
       mkdir -p "$mdir"
+      yml="$(combine)"
       if [ ! -f "$mdir/final.pt" ]; then
         echo "Beginning stage 3 - pretraining $mname with seed $seed"
         $train_cmd \
@@ -333,7 +348,7 @@ if [ $stage -le 3 ]; then
             --device "$device" \
             --model-dir "$mdir" \
             --seed $seed \
-            train_am "$mdir/final.pt" --pretraining --ddp-world-size $world_size
+            train_am "$mdir/final.pt" --pretraining
         echo "Ending stage 3 - pretraining $mname with seed $seed"
       else
         echo "Stage 3 - $mdir/final.pt exists. Skipping"
@@ -366,7 +381,7 @@ if [ $stage -le 4 ]; then
         fi
         xtra_args+=( "--pretrained-lm-path" "$lmpth" )
       fi
-      encpth="$encdir/${model}_${dependency}_${estimator}/$seed/final.pt"
+      encpth="$encdir/${model}_${dependency}/$seed/final.pt"
       if [ ! -f "$encpth" ]; then
           echo "Cannot train $mname with seed $seed: '$encpth' does not exist"\
             "(did you finish stage 3?)" 1>&2

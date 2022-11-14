@@ -231,6 +231,7 @@ def init_model(options, dict_, delta_order, pretraining=False) -> models.Acousti
     )
     if pretraining:
         for p in model.conditional.parameters():
+            p.data.fill_(1.0)
             p.requires_grad_(False)
     if "pretrained_enc_path" in options and options.pretrained_enc_path is not None:
         state_dict = torch.load(options.pretrained_enc_path)
@@ -434,7 +435,7 @@ def val_error_rates(
         feats, refs = feats.to(device), refs.to(device)
         feat_lens, ref_lens = feat_lens.to(device), ref_lens.to(device)
         if pretraining:
-            refs = torch.zeros_like(refs)
+            refs = refs.clamp_max_(0)
         T, N = feats.shape[:2]
         Tp = model.compute_output_time_size(T)
         prev = {"input": feats, "length": feat_lens}
@@ -459,14 +460,17 @@ class TrainingAmWrapper(torch.nn.Module):
     M: int
     B: int
     ec: float
+    pretraining: bool
+    mse: bool
 
     def __init__(self, am: models.AcousticModel, estimator_name: str, M: int, B: int):
         super().__init__()
         self.am = am
         self.estimator_name, self.M, self.B = estimator_name, M, B
         self.ec = 0.0
+        self.pretraining = self.mse = False
 
-    def forward(
+    def forward_regular(
         self,
         feats: torch.Tensor,
         refs: torch.Tensor,
@@ -589,6 +593,61 @@ class TrainingAmWrapper(torch.nn.Module):
             v = v + estimator()
         return -v.mean()
 
+    def forward_pretrain(
+        self,
+        feats: torch.Tensor,
+        refs: torch.Tensor,
+        feat_lens: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        T, N = feats.shape[:2]
+
+        def func(b: torch.Tensor) -> torch.Tensor:
+            M = b.size(0)
+            out_lens = b.sum(-1)
+            return (out_lens - func.ref_lens).float() ** 2
+
+        Tp = self.am.compute_output_time_size(T).item()
+        h, lens_ = self.am.frontend(feats.transpose(0, 1), feat_lens)
+        func.ref_lens = ref_lens
+        prev = {
+            "input": h,
+            "post": h,
+            "length": lens_,
+            "given": ref_lens,
+        }
+        prev = self.am.latent.update_input(prev, refs)
+
+        if self.estimator_name in {"marginal", "cb"}:
+            hidden = self.am.latent.calc_all_hidden(prev)
+            logits = self.am.latent.calc_all_logits(prev, hidden)
+            logits = logits[..., 1] - logits[..., 0]
+            v = distributions.PoissonBinomial(logits=logits.T).log_prob(ref_lens)
+        elif self.estimator_name == "ctc":
+            hidden = self.am.latent.calc_all_hidden(prev)
+            lprobs = self.am.latent.calc_all_logits(prev, hidden).log_softmax(2).flip(2)
+            v = -torch.nn.functional.ctc_loss(
+                lprobs, refs.T, lens_, ref_lens, 1, "mean"
+            )
+        else:
+            walk = modules.RandomWalk(self.am.latent)
+            dist = pdistributions.SequentialLanguageModelDistribution(walk, N, prev, Tp)
+            estimator = pestimators.DirectEstimator(dist, func, self.M, is_log=False)
+            v = estimator()
+        return -v.mean()
+
+    def forward(
+        self,
+        feats: torch.Tensor,
+        refs: torch.Tensor,
+        feat_lens: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.pretraining:
+            return self.forward_regular(feats, refs, feat_lens, ref_lens)
+        else:
+            return self.forward_pretrain(feats, refs, feat_lens, ref_lens)
+
     def reset_parameters(self):
         self.am.reset_parameters()
 
@@ -665,9 +724,9 @@ def train_am_for_epoch(
     total_loss = 0.0
     for feats, refs, feat_lens, ref_lens in loader:
         feats = feats.to(device, non_blocking=non_blocking)
-        if pretraining:
-            refs = torch.zeros_like(refs)
         refs = refs.to(device, non_blocking=non_blocking)
+        if pretraining:
+            refs = refs.clamp_max_(0)
         feat_lens = feat_lens.to(device, non_blocking=non_blocking)
         ref_lens = ref_lens.to(device, non_blocking=non_blocking)
         feats = sa(feats.transpose(0, 1), feat_lens).transpose(0, 1)
@@ -721,6 +780,7 @@ def train_am(options, dict_):
         dict_["am"]["training"].mc_samples,
         dict_["am"]["training"].mc_burn_in,
     )
+    model.pretraining = options.pretraining
     if rank >= 0:
         model = torch.nn.parallel.DistributedDataParallel(model)
     ps = (p for p in model.parameters() if p.requires_grad)
