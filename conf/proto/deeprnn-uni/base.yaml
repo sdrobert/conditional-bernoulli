@@ -17,7 +17,7 @@ am:
     do_mvn: true
     drop_last: true
   training:
-    mc_samples: 32
+    mc_samples: 64
     mc_burn_in: 16
     dropout_prob: 0.0
     swap_prob: 0.0
