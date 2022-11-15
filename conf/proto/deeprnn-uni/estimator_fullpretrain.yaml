@@ -2,7 +2,7 @@ am:
   data:
     batch_size: 8
   training:
-    world_size: 2
-    estimator: srswor
+    world_size: 4
+    estimator: direct
   decoding:
     is_ctc: false

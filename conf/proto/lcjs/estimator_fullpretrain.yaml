@@ -3,6 +3,6 @@ am:
     batch_size: 4
   training:
     world_size: 4
-    estimator: sf-biased
+    estimator: direct
   decoding:
     is_ctc: false

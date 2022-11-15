@@ -1,3 +1,4 @@
+import datetime
 import sys
 import argparse
 import os
@@ -92,7 +93,7 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     momentum = param.Magnitude(0.0)
     entropy_decay = param.Magnitude(0.97 ** (1 / 10000))
     entropy_floor = param.Magnitude(0.1)
-    use_entropy = param.Boolean(False)
+    entropy_init = param.Magnitude(0.0)
     world_size = param.Integer(1, bounds=(1, None))
 
 
@@ -258,6 +259,7 @@ def init_model(options, dict_, delta_order, pretraining=False) -> models.Acousti
 
 
 def train_lm(options, dict_):
+    os.makedirs(options.model_dir, exist_ok=True)
     train_data_dir = os.path.join(options.data_dir, "lm")
     if not os.path.isdir(train_data_dir):
         raise ValueError(
@@ -281,11 +283,11 @@ def train_lm(options, dict_):
     else:
         assert False
 
-    if options.model_dir is not None:
-        state_dir = os.path.join(options.model_dir, "training")
-        state_csv = os.path.join(options.model_dir, "hist.csv")
-    else:
-        state_dir = state_csv = None
+    state_csv = os.path.join(options.model_dir, "hist.csv")
+    state_dir = os.path.join(
+        options.model_dir if options.ckpt_dir is None else options.ckpt_dir, "training"
+    )
+    os.makedirs(state_dir, exist_ok=True)
 
     controller = training.TrainingStateController(
         dict_["lm"]["training"], state_csv, state_dir, warn=options.quiet < 1
@@ -353,7 +355,7 @@ def train_lm(options, dict_):
         )
 
     state_dict = model.state_dict()
-    torch.save(state_dict, options.save_path)
+    torch.save(state_dict, os.path.join(options.model_dir, "final.pt"))
 
 
 def eval_lm(options, dict_):
@@ -485,13 +487,20 @@ class TrainingAmWrapper(torch.nn.Module):
             h = func.h.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
             h_lens = func.h_lens.unsqueeze(0).expand(M, -1).flatten()
             refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
+            b_ = b.flatten(0, 1).T.long()
             ll = self.am.calc_log_likelihood_given_latents(
-                b.flatten(0, 1).T.long(),
-                refs,
-                {"latent_input": h, "latent_length": h_lens},
+                b_, refs, {"latent_input": h, "latent_length": h_lens}, self.ec,
             )
+            if self.ec:
+                ll, hidden = ll
+                ll_ = self.am.latent.calc_all_logits(
+                    {"input": h, "length": h_lens}, hidden
+                )
+                ll_ = ll_.gather(2, b_.unsqueeze(2)).squeeze(2).sum(0) / h_lens
+                ll = ll - self.ec * ll_
+                del ll_, hidden
             ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
-            ll = ll - self.ec
+            ll = ll
             return ll
 
         if self.estimator_name == "marginal":
@@ -603,9 +612,8 @@ class TrainingAmWrapper(torch.nn.Module):
         T, N = feats.shape[:2]
 
         def func(b: torch.Tensor) -> torch.Tensor:
-            M = b.size(0)
             out_lens = b.sum(-1)
-            return (out_lens - func.ref_lens).float() ** 2
+            return -(out_lens - func.ref_lens).float() ** 2
 
         Tp = self.am.compute_output_time_size(T).item()
         h, lens_ = self.am.frontend(feats.transpose(0, 1), feat_lens)
@@ -675,9 +683,10 @@ def train_am_for_epoch(
     if do_aug:
         model.dropout_prob = params.dropout_prob
         model.swap_prob = params.swap_prob
-        if params.use_entropy:
+        if params.entropy_init:
             model.ec = (
-                params.entropy_decay ** ((epoch - 1) * len(loader))
+                params.entropy_init
+                * params.entropy_decay ** ((epoch - 1) * len(loader))
                 + params.entropy_floor
             )
         if (params.sa_time_num_prop and params.sa_time_size_prop) or (
@@ -711,8 +720,8 @@ def train_am_for_epoch(
                     p.data.copy_(p_)
                 param_data.clear()
 
-    elif params.use_entropy:
-        model.ec = 1.0
+    elif params.entropy_init:
+        model.ec = params.entropy_init
 
     model.train()
 
@@ -743,19 +752,32 @@ def train_am_for_epoch(
 
 
 def train_am(options, dict_):
-    rank = int(os.environ.get("LOCAL_RANK", -1))
+    os.makedirs(options.model_dir, exist_ok=True)
+    rank = int(os.environ.get("RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if options.device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
     if rank >= 0:
         if rank != 0:
             options.quiet = 100
         if options.device.type == "cuda":
-            torch.cuda.set_device(rank)
-            torch.distributed.init_process_group("nccl")
+            if local_rank >= 0:
+                options.device = torch.device(local_rank)
+                torch.cuda.set_device(local_rank)
+            torch.distributed.init_process_group(
+                "nccl",
+                rank=rank,
+                world_size=world_size,
+                timeout=datetime.timedelta(0, 10),
+            )
         else:
-            torch.distributed.init_process_group("gloo")
-    try:
-        world_size = max(torch.distributed.get_world_size(), 1)
-    except:
-        world_size = 1
+            torch.distributed.init_process_group(
+                "gloo",
+                rank=rank,
+                world_size=world_size,
+                timeout=datetime.timedelta(0, 10),
+            )
     if world_size != dict_["am"]["training"].world_size:
         raise ValueError(
             f'Configured world size ({dict_["am"]["training"].world_size}) is not the '
@@ -782,7 +804,12 @@ def train_am(options, dict_):
     )
     model.pretraining = options.pretraining
     if rank >= 0:
-        model = torch.nn.parallel.DistributedDataParallel(model)
+        if local_rank >= 0:
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[local_rank]
+            )
+        else:
+            model = torch.nn.parallel.DistributedDataParallel(model)
     ps = (p for p in model.parameters() if p.requires_grad)
     if dict_["am"]["training"].optimizer == "sgd":
         optimizer = torch.optim.SGD(ps, 1e-4, momentum=dict_["am"]["training"].momentum)
@@ -791,11 +818,11 @@ def train_am(options, dict_):
     else:
         assert False
 
-    if options.model_dir is not None:
-        state_dir = os.path.join(options.model_dir, "training")
-        state_csv = os.path.join(options.model_dir, "hist.csv")
-    else:
-        state_dir = state_csv = None
+    state_csv = os.path.join(options.model_dir, "hist.csv")
+    state_dir = os.path.join(
+        options.model_dir if options.ckpt_dir is None else options.ckpt_dir, "training"
+    )
+    os.makedirs(state_dir, exist_ok=True)
 
     controller = training.TrainingStateController(
         dict_["am"]["training"], state_csv, state_dir, warn=options.quiet < 1
@@ -896,7 +923,7 @@ def train_am(options, dict_):
             for key in tuple(state_dict.keys()):
                 if key.startswith("conditional."):
                     state_dict.pop(key)
-        torch.save(state_dict, options.save_path)
+        torch.save(state_dict, os.path.join(options.model_dir, "final.pt"))
 
 
 def decode_am(options, dict_):
@@ -1001,7 +1028,7 @@ def main(args=None):
     )
     parser.add_argument("data_dir", type=DirType("r"))
     parser.add_argument("--device", type=torch.device, default=torch.device("cpu"))
-    parser.add_argument("--model-dir", type=DirType("w"), default=None)
+    parser.add_argument("--ckpt-dir", type=DirType("w"), default=None)
     parser.add_argument(
         "--seed", type=int, default=None, help="Clobber config seeds with this if set"
     )
@@ -1009,7 +1036,7 @@ def main(args=None):
     subparsers = parser.add_subparsers(title="commands", required=True, dest="command")
 
     train_lm_parser = subparsers.add_parser("train_lm")
-    train_lm_parser.add_argument("save_path")
+    train_lm_parser.add_argument("model_dir", type=DirType("w"))
 
     eval_lm_parser = subparsers.add_parser("eval_lm")
     eval_lm_parser.add_argument(
@@ -1018,7 +1045,7 @@ def main(args=None):
     eval_lm_parser.add_argument("--full-model", action="store_true", default=False)
 
     train_am_parser = subparsers.add_parser("train_am")
-    train_am_parser.add_argument("save_path", type=FileType("w"))
+    train_am_parser.add_argument("model_dir", type=DirType("w"))
     train_am_parser.add_argument(
         "--pretrained-enc-path", type=FileType("r"), default=None
     )

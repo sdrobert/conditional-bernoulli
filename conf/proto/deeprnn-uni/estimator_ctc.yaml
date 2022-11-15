@@ -4,6 +4,5 @@ am:
   training:
     world_size: 1
     estimator: ctc
-    weight_noise_std: 0.075
   decoding:
     is_ctc: true

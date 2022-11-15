@@ -7,8 +7,6 @@ model:
   merge:
     cond_input_is_post: true
 am:
-  training:
-    weight_noise_std: 0.075
   data:
     batch_size: 16
   decoding:

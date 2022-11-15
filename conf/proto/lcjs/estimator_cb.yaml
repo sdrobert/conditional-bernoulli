@@ -2,8 +2,6 @@ am:
   data:
     batch_size: 16
   training:
-    world_size: 1
     estimator: cb
-    use_entropy: true
   decoding:
     is_ctc: false

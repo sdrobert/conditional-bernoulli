@@ -3,7 +3,6 @@ am:
     batch_size: 16
   training:
     world_size: 1
-    weight_noise_std: 0.075
     estimator: marginal
   decoding:
     is_ctc: false

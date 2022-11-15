@@ -14,19 +14,18 @@ am:
     do_mvn: true
     drop_last: true
   training:
+    mc_samples: 32
+    mc_burn_in: 16
     dropout_prob: 0.0
     swap_prob: 0.0
     aug_er_thresh: 0.8
-    mc_samples: 32
-    mc_burn_in: 16
-    early_stopping_burnin: 40
+    weight_noise_std: 0.075
+    early_stopping_burnin: 20
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true
     optimizer: adam
     momentum: 0.9
-    # entropy_decay: 0.97 ** (1/10000)
-    # entropy_floor: 0.1
 lm:
   data:
     batch_size: 64

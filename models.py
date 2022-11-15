@@ -793,6 +793,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         latent_hist: torch.Tensor,
         cond_hist: torch.Tensor,
         prev: StateDict = dict(),
+        include_latent_hidden: bool = False,
     ) -> torch.Tensor:
         # we're in a better position than when calculating the log probabilities b/c
         # we don't need to worry about the rest of the pdf when the latent variable
@@ -809,7 +810,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             Lmax = L
         prev = self.update_input(prev.copy(), latent_hist)
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
-        hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
+        hidden_r = hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
 
         H = hidden.size(2)
         assert hidden.shape == (T, N, H)
@@ -826,8 +827,15 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         hidden = self.conditional.calc_all_hidden(prev_cond, cond_hist[:-1])
         clogits = self.conditional.calc_all_logits(prev_cond, hidden).log_softmax(2)
         ll = clogits.gather(2, cond_hist.unsqueeze(2)).squeeze(2)
-        ll = ll.masked_fill(~hidden_mask.T, 0).sum(0)
-        return ll.masked_fill(cond_lens > L, torch.finfo(torch.float).min)
+        ll = (
+            ll.masked_fill(~hidden_mask.T, 0)
+            .sum(0)
+            .masked_fill(cond_lens > L, torch.finfo(torch.float).min)
+        )
+        if include_latent_hidden:
+            return ll, hidden_r
+        else:
+            return ll
 
     def calc_marginal_log_likelihoods(
         self,

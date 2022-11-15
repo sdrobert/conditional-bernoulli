@@ -4,6 +4,5 @@ am:
   training:
     world_size: 4
     estimator: sf-biased
-    use_entropy: true
   decoding:
     is_ctc: false

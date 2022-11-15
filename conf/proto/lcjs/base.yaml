@@ -23,13 +23,14 @@ am:
     aug_er_thresh: 0.8
     mc_samples: 64
     mc_burn_in: 32
-    early_stopping_burnin: 40
+    early_stopping_burnin: 20
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true
     log10_learning_rate: -4
     optimizer: adam
     momentum: 0.9
+    entropy_init: 1.0
     # entropy_decay: 0.97 ** (1/10000)
     # entropy_floor: 0.1
 lm:
@@ -40,7 +41,6 @@ lm:
     dropout_prob: 0.0
     swap_prob: 0.0
     aug_pp_thresh: 17
-    weight_noise_std: 0.075
     early_stopping_patience: 50
     early_stopping_threshold: 0.1
     optimizer: adam

@@ -15,6 +15,8 @@ Usage: $0
                   Value: '$data'
   -o PTH          Location to store experiment artifacts.
                   Value: '$exp'
+  -O PTH          Location to store checkpoints, if different from
+                  rest of experiment artifacts.
   -b 'A [B ...]'  The beam widths to test for decoding
   -n N            Number of repeated trials to perform.
                   Value: '$nseeds'
@@ -34,6 +36,7 @@ Usage: $0
                   Value: '${regimes[*]}'
   -f N            Run distributed over N nodes.
                   Value: '$world_size'
+  -w              Clean up checkpoints after training completes.
   -q              Add one to quiet level.
   -x              Run only the current stage.
   -j              Exclude recommended combinations.
@@ -45,7 +48,7 @@ EOF
 
 # constants
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
-ALL_MODELS=( deeprnn-uni )
+ALL_MODELS=( deeprnn-uni lcjs )
 ALL_DEPENDENCIES=( full indep partial )
 ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc )
 ALL_LMS=( lm-rnn lm-embedding nolm )
@@ -57,7 +60,7 @@ CORE_INVALIDS=(
 RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
   'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
-  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'pretrained' 'embedding'
+  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
@@ -67,11 +70,11 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 # variables
 quiet=""
-stage=1
+stage=0
 timit=
 data=data/timit
 exp=exp/timit
-nseeds=20
+nseeds=1
 kseeds=1
 device=cuda
 world_size=0
@@ -82,13 +85,14 @@ estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
 regimes=( "${ALL_REGIMES[@]}" )
 beam_widths=( 1 2 4 8 )
-# beam_widths=( 4 )
 only=0
+onlycount=0
+cleanup=0
 
 # for determinism
 # export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:f:" opt; do
+while getopts "xwqhjs:i:d:o:O:b:n:k:c:m:z:e:l:p:f:" opt; do
   case $opt in
     s)
       argcheck_is_nat $opt "$OPTARG"
@@ -107,6 +111,10 @@ while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:f:" opt; do
       ;;
     o)
       exp="$OPTARG"
+      ;;
+    O)
+      argcheck_is_writable $opt "$OPTARG"
+      ckpt_dir="$OPTARG"
       ;;
     b)
       argcheck_all_nat $opt "$OPTARG"
@@ -144,7 +152,10 @@ while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:f:" opt; do
       world_size=$OPTARG
       ;;
     x)
-      only=1
+      ((only+=1))
+      ;;
+    w)
+      cleanup=1
       ;;
     q)
       quiet="$quiet -q"
@@ -159,8 +170,14 @@ while getopts "xqhjs:i:d:o:b:n:k:c:m:z:e:l:p:f:" opt; do
   esac
 done
 
+
 if [ $# -ne $(($OPTIND - 1)) ]; then
   echo "Expected no positional arguments but found one" 1>&2
+  usage
+fi
+
+if ((only)) && [ $stage = 0 ]; then
+  echo "Stage must be set if using -x" 1>&2
   usage
 fi
 
@@ -236,29 +253,32 @@ fi
 # prep the dataset
 if [ $stage -le 1 ]; then
   if [ ! -f "$data/.complete" ] && [ $OFFSET -eq 0 ]; then 
-    echo "Beginning stage 1"
     if [ -z "$timit" ]; then
       echo "timit directory unset, but needed for this command (use -i)" 1>&2
       exit 1
     fi
     argcheck_is_writable d "$data"
-    argcheck_is_readable i "$timit"
-    python prep/timit.py "$data" preamble "$timit"
-    python prep/timit.py "$data" init_phn --lm --vocab-size ${VOCAB_SIZE}
-    # 40mel+1energy fbank features every 10ms
-    python prep/timit.py "$data" torch_dir \
-      --computer-json prep/conf/feats/fbank_41.json \
-      --seed 0
-    compute-mvn-stats-for-torch-feat-data-dir \
-      "$data/train/feat" "$data/ext/train.mvn.pt"
-    cat "$data/local/phn${VOCAB_SIZE}/lm_train.trn.gz" | \
-     gunzip -c | \
-     trn-to-torch-token-data-dir - "$data/ext/token2id.txt" "$data/lm"
-    touch "$data/.complete"
-    echo "Finished stage 1"
-  else
+    ((onlycount+=1))
+    if ((only<2)); then
+      echo "Beginning stage 1"
+      python prep/timit.py "$data" preamble "$timit"
+      python prep/timit.py "$data" init_phn --lm --vocab-size ${VOCAB_SIZE}
+      # 40mel+1energy fbank features every 10ms
+      python prep/timit.py "$data" torch_dir \
+        --computer-json prep/conf/feats/fbank_41.json \
+        --seed 0
+      compute-mvn-stats-for-torch-feat-data-dir \
+        "$data/train/feat" "$data/ext/train.mvn.pt"
+      cat "$data/local/phn${VOCAB_SIZE}/lm_train.trn.gz" | \
+      gunzip -c | \
+      trn-to-torch-token-data-dir - "$data/ext/token2id.txt" "$data/lm"
+      touch "$data/.complete"
+      echo "Finished stage 1"
+    fi
+  elif ((only<2)); then
     echo "$data/.complete exists already. Skipping stage 1."
   fi
+  ((only>1)) && echo "$onlycount"
   ((only)) && exit 0
 fi
 
@@ -266,54 +286,75 @@ fi
 if [ $stage -le 2 ]; then
   if [[ "${regimes[*]}" =~ "pretrained" ]]; then
     N=$(get_combos model lm pretrained seed | wc -l)
+    onlycountmin=0
     if [ $N -gt 0 ]; then
       mkdir -p "$lmdir"
       if [ ! -f "$lmdir/results.ngram.txt" ] && [ $OFFSET -eq 0 ]; then
-        echo "Beginning stage 2 - results.ngram.txt"
-        python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt" \
-          || rm -f "$lmdir/results.ngram.txt"
-        echo "Ending stage 2 - results.ngram.txt"
+        onlycountmin=1
+        if ((only<2)); then
+          echo "Beginning stage 2 - results.ngram.txt"
+          python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt" \
+            || rm -f "$lmdir/results.ngram.txt"
+          echo "Ending stage 2 - results.ngram.txt"
+        fi
       fi
     fi
     for (( i = OFFSET; i < N ; i += STRIDE )); do
       # the only settings that matter are the model, lm, and pretrained; we put
       # dummy configs in the rest
       unpack_combo $i model lm pretrained seed
-      if [ "$lm" = nolm ]; then
-        echo "Stage 2 - Skipping LM pretraining for $model, $lm and seed $seed"
-        continue
-      fi
       dependency=indep
       estimator=marginal
-      yml="$(combine)"
       mdir="$lmdir/${model}_${lm}/$seed"
-      mkdir -p "$mdir"
+      curonlycount=0
       if [ ! -f "$mdir/final.pt" ]; then
-        echo "Beginning stage 2 - training LM for $model, $lm and seed $seed"
-        python asr.py "$data" $quiet \
-          --read-yaml "$yml" \
-          --device "$device" \
-          --model-dir "$mdir" \
-          --seed $seed \
-          train_lm "$mdir/final.pt"
-        echo "Ending stage 2 - training LM for $model, $lm, and seed $seed"
-      else
+        rm -f "$lmdir/results.${model}_${lm}.$seed.txt" || true
+        curonlycount=1
+        if ((only<2)); then
+          echo "Beginning stage 2 - training LM for $model, $lm and seed $seed"
+          yml="$(combine)"
+          python asr.py "$data" \
+             ${ckpt_dir+--ckpt-dir "$ckpt_dir/${model}_${lm}/$seed"} \
+            --read-yaml "$yml" \
+            --device "$device" \
+            --seed $seed \
+            train_lm "$mdir"
+          if ((cleanup)); then
+            echo "Cleaning up checkpoints"
+            if [ -z "$ckpt_dir" ]; then
+              rm -rf "$ckpt_dir/${model}_${lm}/$seed" || true
+            else
+              rm -rf "$mdir/training" || true
+            fi
+          fi
+          echo "Ending stage 2 - training LM for $model, $lm, and seed $seed"
+        fi
+      elif ((only<2)); then
         echo "Stage 2 - $mdir/final.pt exists. Skipping"
       fi
 
       if [ ! -f "$lmdir/results.${model}_${lm}.$seed.txt" ]; then
-        echo "Beginning stage 2 - computing LM perplexity $model, $lm, and seed $seed"
-        python asr.py "$data" $quiet \
-          --read-yaml "$yml" \
-          --device "$device" \
-          eval_lm "$mdir/final.pt" \
-            > "$lmdir/results.${model}_${lm}.$seed.txt"
-        echo "Ending stage 2 - computing LM perplexity $model, $lm, and seed $seed"
+        curonlycount=1
+        if ((only<2)); then
+          echo "Beginning stage 2 - computing LM perplexity $model, $lm, and seed $seed"
+          yml="$(combine)"
+          python asr.py "$data" $quiet \
+            --read-yaml "$yml" \
+            --device "$device" \
+            eval_lm "$mdir/final.pt" \
+              > "$lmdir/results.${model}_${lm}.$seed.txt"
+          echo "Ending stage 2 - computing LM perplexity $model, $lm, and seed $seed"
+        fi
       fi
+      ((onlycount+=curonlycount)) || true
     done
-  else
+    if [ $onlycount = 0 ]; then
+      onlycount=$onlycountmin
+    fi
+  elif ((only<2)); then
     echo "'pretrained' not in selected regimes - skipping stage 2"
   fi
+  ((only>1)) && echo "$onlycount"
   ((only)) && exit 0
 fi
 
@@ -322,41 +363,54 @@ if [ $stage -le 3 ]; then
   if [[ "${regimes[*]}" =~ "pretrained" ]]; then
     N=$(get_combos model dependency pretrained seed | wc -l)
     for (( i = OFFSET; i < N; i += STRIDE )); do
-      unpack_combo $i model dependency estimator pretrained seed
+      unpack_combo $i model dependency pretrained seed
       lm=nolm
       mname="${model}_${dependency}"
       if [ "$dependency" = "full" ]; then
-        estimator=srswor
+        estimator=fullpretrain
         mdir="$encdir/$mname/$seed"
       else
-        estimator=marginal
+        estimator=marginalpretrain
         mdir="$encdir/${model}_indep/$seed"
         if [ "$dependency" = "partial" ]; then
           mkdir -p "$encdir/$mname"
-          ln -sf "$mdir" "$encdir/$mname/$seed"
+          rm -f "$encdir/$mname/$seed" || true
+          ln -sf "../${model}_indep/$seed" "$encdir/$mname/$seed"
           [[ "${dependencies[*]}" =~ "indep" ]] && continue
         fi
       fi
-      mkdir -p "$mdir"
-      yml="$(combine)"
       if [ ! -f "$mdir/final.pt" ]; then
-        echo "Beginning stage 3 - pretraining $mname with seed $seed"
-        $train_cmd \
-          asr.py \
-            "$data" $quiet \
-            --read-yaml "$yml" \
-            --device "$device" \
-            --model-dir "$mdir" \
-            --seed $seed \
-            train_am "$mdir/final.pt" --pretraining
-        echo "Ending stage 3 - pretraining $mname with seed $seed"
-      else
+        ((onlycount+=1))
+        if ((only<2)); then
+          echo "Beginning stage 3 - pretraining $mname with seed $seed"
+          yml="$(combine)"
+          # set -x
+          $train_cmd \
+            asr.py \
+              ${ckpt_dir+--ckpt-dir "$ckpt_dir/${model}_${dependency}/$seed"} \
+              "$data" $quiet \
+              --read-yaml "$yml" \
+              --device "$device" \
+              --seed $seed \
+              train_am "$mdir" --pretraining
+          if ((cleanup)); then
+            echo "Cleaning up checkpoints"
+            if [ -z "$ckpt_dir" ]; then
+              rm -rf "$ckpt_dir/${model}_${dependency}/$seed" || true
+            else
+              rm -rf "$mdir/training" || true
+            fi
+          fi
+          echo "Ending stage 3 - pretraining $mname with seed $seed"
+        fi
+      elif ((only<2)); then
         echo "Stage 3 - $mdir/final.pt exists. Skipping"
       fi
     done
-  else
+  elif ((only<2)); then
     echo "'pretrained' not in selected regimes - skipping stage 3"
   fi
+  ((only>1)) && echo "$onlycount"
   ((only)) && exit 0
 fi
 
@@ -367,7 +421,6 @@ if [ $stage -le 4 ]; then
   for (( i = OFFSET; i < N; i += STRIDE )); do
     unpack_combo $i model dependency estimator lm regime seed
     mname="${model}_${dependency}_${estimator}_${lm}_${regime}"
-    yml="$(combine)"
     mdir="$amdir/$mname/$seed"
     mkdir -p "$mdir"
     xtra_args=( )
@@ -390,20 +443,33 @@ if [ $stage -le 4 ]; then
       xtra_args+=( "--pretrained-enc-path" "$encpth" )
     fi
     if [ ! -f "$mdir/final.pt" ]; then
-      echo "Beginning stage 4 - training $mname with seed $seed"
-      $train_cmd \
-        asr.py \
-          "$data" $quiet \
-          --read-yaml "$yml" \
-          --device "$device" \
-          --model-dir "$mdir" \
-          --seed $seed \
-          train_am "${xtra_args[@]}" "$mdir/final.pt"
-      echo "Ending stage 4 - training $mname with seed $seed"
-    else
+      ((onlycount+=1))
+      if ((only<2)); then
+        yml="$(combine)"
+        echo "Beginning stage 4 - training $mname with seed $seed"
+        $train_cmd \
+          asr.py \
+            ${ckpt_dir+--ckpt-dir "$ckpt_dir/$mname/$seed"} \
+            "$data" $quiet \
+            --read-yaml "$yml" \
+            --device "$device" \
+            --seed $seed \
+            train_am "${xtra_args[@]}" "$mdir"
+        if ((cleanup)); then
+          echo "Cleaning up checkpoints"
+          if [ -z "$ckpt_dir" ]; then
+            rm -rf "$ckpt_dir/$mdir/$seed" || true
+          else
+            rm -rf "$mdir/training" || true
+          fi
+        fi
+        echo "Ending stage 4 - training $mname with seed $seed"
+      fi
+    elif ((only<2)); then
       echo "Stage 4 - $mdir/final.pt exists. Skipping"
     fi
   done
+  ((only>1)) && echo "$onlycount"
   ((only)) && exit 0
 fi
 
@@ -421,6 +487,7 @@ if [ $stage -le 5 ]; then
             "(did you finish stage 4?)" 1>&2
       exit 1
     fi
+    curonlycount=0
     for part in dev test; do
       hdir="$mdir/hyp/$part"
       if [ "$part" = dev ]; then
@@ -437,54 +504,63 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         bdir="$hdir/$beam_width"
         mkdir -p "$bdir"
         if [ ! -f "$bdir/.complete" ]; then
-          echo "Beginning stage 5 - decoding $part using $mname with seed" \
-            "$seed and beam width $beam_width"
-          if [ $beam_width -le 8 ]; then
-            device_="$device"
-          else
-            device_=cpu
+          curonlycount=1
+          if ((only<2)); then
+            echo "Beginning stage 5 - decoding $part using $mname with seed" \
+              "$seed and beam width $beam_width"
+            python asr.py "$data" $quiet \
+              --read-yaml "$yml" \
+              --device "$device" \
+              decode_am \
+                "${xtra_args[@]}" --beam-width "$beam_width" \
+                "$mpth" "$bdir"
+            touch "$bdir/.complete"
+            echo "Ending stage 5 - decoding $part using $mname with seed" \
+              "$seed and beam width $beam_width"
           fi
-          python asr.py "$data" $quiet \
-            --read-yaml "$yml" \
-            --device "$device_" \
-            decode_am \
-              "${xtra_args[@]}" --beam-width "$beam_width" \
-              "$mpth" "$bdir"
-          touch "$bdir/.complete"
-          echo "Ending stage 5 - decoding $part using $mname with seed" \
-            "$seed and beam width $beam_width"
-        else
+        elif ((only<2)); then
           echo "'$bdir/.complete' exists. Skipping decoding $part using" \
             "$mname with seed $seed and beam width $beam_width"
         fi
         if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
-          echo "Beginning stage 5 - gathering hyps for $part using $mname" \
-            "with $seed and beam with $beam_width"
-          torch-token-data-dir-to-trn \
-            "$bdir" "$data/ext/id2token.txt" \
-            "$mdir/$part.hyp.$beam_width.utrn"
-          python prep/timit.py "$data" filter \
-            "$mdir/$part.hyp.$beam_width."{u,}trn
-          echo "Ending stage 5 - gathering hyps for $part using $mname" \
-            "with seed $seed and beam with $beam_width"
+          curonlycount=1
+          if ((only<2)); then
+            echo "Beginning stage 5 - gathering hyps for $part using $mname" \
+              "with $seed and beam with $beam_width"
+            torch-token-data-dir-to-trn \
+              "$bdir" "$data/ext/id2token.txt" \
+              "$mdir/$part.hyp.$beam_width.utrn"
+            python prep/timit.py "$data" filter \
+              "$mdir/$part.hyp.$beam_width."{u,}trn
+            echo "Ending stage 5 - gathering hyps for $part using $mname" \
+              "with seed $seed and beam with $beam_width"
+          fi
         fi
       done
-      active_files=( "$mdir/$part.hyp."*.trn )
-      if [ ${#active_files[@]} -ne ${#active_widths[@]} ]; then
-        echo "The number of evaluated beam widths does not equal the number" \
-          "of hypothesis files for partition '$part' in '$mdir'. This could" \
-          "mean you changed the -b parameter after running once or you reran" \
-          "experiments with different parameters and the partition is" \
-          "'test'. Delete all hyp files in '$amdir' and try running this step"\
-          "again" 1>&2
-        exit 1
+      if ((only<2)); then
+        active_files=( "$mdir/$part.hyp."*.trn )
+        if [ ${#active_files[@]} -ne ${#active_widths[@]} ]; then
+          echo "The number of evaluated beam widths does not equal the number" \
+            "of hypothesis files for partition '$part' in '$mdir'. This could" \
+            "mean you changed the -b parameter after running once or you reran" \
+            "experiments with different parameters and the partition is" \
+            "'test'. Delete all hyp files in '$amdir' and try running this step"\
+            "again" 1>&2
+          exit 1
+        fi
       fi
-      [ -f "$amdir/$mname/results.$part.$seed.txt" ] || \
-        python prep/error-rates-from-trn.py \
-          "$data/ext/$part.ref.trn" "$mdir/$part.hyp."*.trn \
-          --suppress-warning > "$amdir/$mname/results.$part.$seed.txt"
+      if [ ! -f "$amdir/$mname/results.$part.$seed.txt" ]; then
+        curonlycount=1
+        if ((only<2)); then
+          python prep/error-rates-from-trn.py \
+            "$data/ext/$part.ref.trn" "$mdir/$part.hyp."*.trn \
+            --suppress-warning > "$amdir/$mname/results.$part.$seed.txt"
+        fi
+      fi
+      ((onlycount+=curonlycount)) || true
     done
   done
+  ((only>1)) && echo "$onlycount"
   ((only)) && exit 0
 fi
 
