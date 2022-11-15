@@ -12,10 +12,10 @@ if [ ! -z "${SLURM_ARRAY_TASK_ID}" ]; then
 fi
 
 if [ "${SLURM_NTASKS}" != "1" ]; then
-  export NCCL_IB_DISABLE=1
-  export NCCL_DEBUG=INFO
   export MASTER_ADDR"=$(hostname --fqdn)"
   export MASTER_PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')"
+  export NCCL_IB_DISABLE=1
+  export NCCL_DEBUG=INFO
   export WORLD_SIZE="${SLURM_NTASKS}"
   for ((i=0; i < SLURM_NTASKS; i++)); do
     /opt/slurm/bin/srun \
@@ -28,7 +28,7 @@ if [ "${SLURM_NTASKS}" != "1" ]; then
   done
   wait
 else
-  ./scripts/slurm/timit_wrapper_inner.sh "$@" -f "${SLURM_GPUS:-1}"
+  ./scripts/slurm/timit_wrapper_inner.sh "$@" -f "${SLURM_GPUS_PER_TASK:-1}"
 fi
 
 exit $!

@@ -247,7 +247,7 @@ combine() {
 if [ $world_size = 0 ]; then
   train_cmd=python
 else
-  train_cmd="torchrun --nproc_per_node=$world_size"
+  train_cmd="torchrun --nnodes=1 --nproc_per_node=$world_size --rdzv_backend=c10d --rdzv_endpoint=localhost:0"
 fi
 
 # prep the dataset

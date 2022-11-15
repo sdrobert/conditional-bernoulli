@@ -22,8 +22,8 @@ am:
     dropout_prob: 0.15
     swap_prob: 0.0
     aug_er_thresh: 0.8
-    mc_samples: 64
-    mc_burn_in: 32
+    mc_samples: 32
+    mc_burn_in: 16
     early_stopping_burnin: 20
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3

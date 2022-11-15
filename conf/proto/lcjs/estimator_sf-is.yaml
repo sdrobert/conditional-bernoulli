@@ -1,8 +1,8 @@
 am:
   data:
-    batch_size: 5
+    batch_size: 10
   training:
-    world_size: 4
+    world_size: 2
     estimator: sf-is
   decoding:
     is_ctc: false
