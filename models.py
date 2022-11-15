@@ -333,6 +333,7 @@ class LstmLmParams(param.Parameterized):
     hidden_size = param.Integer(
         300, bounds=(1, None), doc="The size of the LSTM's hidden states."
     )
+    merge_cat = param.Boolean(False)
     num_layers = param.Integer(3, bounds=(0, None), doc="The number of LSTM layers.")
 
 
@@ -351,19 +352,17 @@ class CombinerNetwork(torch.nn.Module):
         else:
             self.add_module("first_linear", None)
         self.second_linear = torch.nn.Linear(second_size, first_size)
-        self.combined_linear = torch.nn.Linear(first_size, first_size)
 
     def reset_parameters(self):
         if self.first_linear is not None:
             self.first_linear.reset_parameters()
         self.second_linear.reset_parameters()
-        self.combined_linear.reset_parameters()
 
     def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
         if self.first_linear is not None:
             first = self.first_linear(first)
         second = self.second_linear(second)
-        return self.combined_linear((first + second).tanh())
+        return (first + second).tanh()
 
 
 class TokenSwapper(torch.nn.Module):
@@ -448,7 +447,7 @@ class LstmLm(MixableSequentialLanguageModel):
 
         # we force the input to match the embedding size so that we can pretrain using
         # only the embeddings
-        if input_size > 0 and params.embedding_size > 0:
+        if not params.merge_cat and input_size > 0 and params.embedding_size > 0:
             self.input_merger = CombinerNetwork(
                 params.embedding_size, input_size, False
             )
@@ -619,7 +618,12 @@ class LstmLm(MixableSequentialLanguageModel):
                 in_ = in_.gather(
                     0, idx.unsqueeze(2).expand(1, N, self.input_size)
                 ).squeeze(0)
-            x = in_ if x is None else self.dropout(self.input_merger(x, in_))
+            if x is None:
+                x = in_
+            elif self.input_merger is None:
+                x = self.dropout(torch.cat([x, in_], -1))
+            else:
+                x = self.dropout(self.input_merger(x, in_))
 
         prev_hidden, prev_cell = prev[self.hidden_name], prev[self.cell_name]
         cur_hidden, cur_cell = [], []
@@ -672,7 +676,12 @@ class LstmLm(MixableSequentialLanguageModel):
             in_ = prev[self.input_name]
             if in_.dim() != 3:
                 raise RuntimeError(f"full input ('{self.input_name}') must be provided")
-            x = in_ if x is None else self.dropout(self.input_merger(x, in_))
+            if x is None:
+                x = in_
+            elif self.input_merger is None:
+                x = self.dropout(torch.cat([x, in_], -1))
+            else:
+                x = self.dropout(self.input_merger(x, in_))
 
         if self.lstm is not None:
             self.lstm.dropout = self.dropout.p

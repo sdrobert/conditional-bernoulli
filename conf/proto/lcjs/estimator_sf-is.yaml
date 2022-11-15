@@ -1,6 +1,6 @@
 am:
   data:
-    batch_size: 4
+    batch_size: 5
   training:
     world_size: 4
     estimator: sf-is

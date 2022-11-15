@@ -8,6 +8,7 @@ model:
     recurrent_size: 300
 
   latent:
+    merge_cat: true
     hidden_size: 300
   
   conditional:

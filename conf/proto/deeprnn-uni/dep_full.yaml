@@ -4,7 +4,7 @@ model:
     recurrent_size: 250
   latent:
     num_layers: 3
-    embedding_size: 123
+    embedding_size: 1
     hidden_size: 250
   merge:
     cond_input_is_post: false

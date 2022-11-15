@@ -23,12 +23,12 @@ if [ "${SLURM_NTASKS}" != "1" ]; then
       --mem-per-cpu=$SLURM_MEM_PER_CPU \
       --cpus-per-task=$SLURM_CPUS_PER_TASK \
       --ntasks=1 \
-      --gres=gpu:1 \
+      --gpus-per-task=${SLURM_GPUS_PER_TASK:-0} \
       ./scripts/slurm/timit_wrapper_inner.sh "$@" &
   done
   wait
 else
-  ./scripts/slurm/timit_wrapper_inner.sh "$@"
+  ./scripts/slurm/timit_wrapper_inner.sh "$@" -f "${SLURM_GPUS:-1}"
 fi
 
 exit $!

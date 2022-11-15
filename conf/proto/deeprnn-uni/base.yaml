@@ -6,6 +6,9 @@ model:
     recurrent_type: LSTM
     recurrent_bidirectional: false
   
+  latent:
+    merge_cat: true
+
   conditional:
     hidden_size: 250
 am:

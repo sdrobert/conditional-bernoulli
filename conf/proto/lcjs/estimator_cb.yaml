@@ -1,6 +1,6 @@
 am:
   data:
-    batch_size: 16
+    batch_size: 20
   training:
     estimator: cb
   decoding:
