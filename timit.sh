@@ -489,6 +489,9 @@ if [ $stage -le 5 ]; then
     fi
     curonlycount=0
     for part in dev test; do
+      if ((curonlycount)) && ((only>1)); then
+        break
+      fi
       hdir="$mdir/hyp/$part"
       if [ "$part" = dev ]; then
         xtra_args=( "--dev" )
