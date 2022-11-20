@@ -31,9 +31,16 @@ am:
     log10_learning_rate: -4
     optimizer: adam
     momentum: 0.9
-    entropy_init: 1.0
+    # entropy_init: 1.0
     # entropy_decay: 0.97 ** (1/10000)
     # entropy_floor: 0.1
+    pcb:
+      window_size: 3
+      window_stride: 3
+      recurrent_layers: 4
+      recurrent_size: 250
+      recurrent_type: LSTM
+      recurrent_bidirectional: true
 lm:
   data:
     batch_size: 64

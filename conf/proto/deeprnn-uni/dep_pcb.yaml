@@ -1,0 +1,11 @@
+model:
+  frontend:
+    recurrent_layers: 3
+    recurrent_size: 250
+    recurrent_bidirectional: true
+latent:
+  num_layers: 0
+  embedding_size: 0
+am:
+  decoding:
+    style: beam

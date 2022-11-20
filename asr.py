@@ -6,7 +6,7 @@ import math
 import glob
 import gzip
 
-from typing import Tuple
+from typing import Optional, Tuple
 from typing_extensions import Literal
 
 import torch
@@ -77,6 +77,7 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
             "sf-biased",
             "sf-is",
             "ctc",
+            "pcb",
         ],
     )
     mc_samples = param.Integer(1, bounds=(1, None))
@@ -124,6 +125,7 @@ def construct_default_param_dict():
             "data": data.SpectDataLoaderParams(name="am.data"),
             "training": AcousticModelTrainingStateParams(name="am.training"),
             "decoding": DecodingParams(name="am.decoding"),
+            "pcb": models.FrontendParams(name="am.pcb"),
         },
         "lm": {
             "data": data.LangDataLoaderParams(name="lm.data"),
@@ -256,6 +258,30 @@ def init_model(options, dict_, delta_order, pretraining=False) -> models.Acousti
         state_dict = torch.load(options.am_path)
         model.load_state_dict(state_dict)
     return model.to(device)
+
+
+def init_pcb(options, frontend_params, delta_order) -> models.AcousticModel:
+    device = options.device
+    num_filts, num_classes = get_filts_and_classes(
+        os.path.join(options.data_dir, "train")
+    )
+    if options.pcb_path is None:
+        raise ValueError("pcb estimator chosen but --pcb-path not specified")
+    state_dict = torch.load(options.pcb_path)
+    for k in tuple(state_dict):
+        if k.startswith("conditional."):
+            state_dict.remove(k)
+    other_params = models.LstmLmParams(embedding_size=0, num_layers=0)
+    model = models.AcousticModel(
+        num_classes,
+        num_filts * (delta_order + 1),
+        frontend_params,
+        other_params,
+        other_params,
+        True,
+    )
+    model.load_state_dict(state_dict, strict=False)
+    return model.eval().to(device)
 
 
 def train_lm(options, dict_):
@@ -464,13 +490,22 @@ class TrainingAmWrapper(torch.nn.Module):
     ec: float
     pretraining: bool
     mse: bool
+    pcb: Optional[models.AcousticModel]
 
-    def __init__(self, am: models.AcousticModel, estimator_name: str, M: int, B: int):
+    def __init__(
+        self,
+        am: models.AcousticModel,
+        estimator_name: str,
+        M: int,
+        B: int,
+        pcb: models.AcousticModel = None,
+    ):
         super().__init__()
         self.am = am
         self.estimator_name, self.M, self.B = estimator_name, M, B
         self.ec = 0.0
         self.pretraining = self.mse = False
+        self.pcb = pcb
 
     def forward_regular(
         self,
@@ -556,11 +591,24 @@ class TrainingAmWrapper(torch.nn.Module):
             if self.estimator_name in {"direct", "cb", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(dist, func, self.M, is_log=True)
                 # estimator = estimators.SerialMCWrapper(estimator)
-            elif self.estimator_name in {"srswor", "sf-is"}:
+            elif self.estimator_name in {"srswor", "sf-is", "pcb"}:
                 if self.estimator_name == "srswor":
                     proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
                         ref_lens, lens_, Tp
                     )
+                elif self.estimator_name == "pcb":
+                    assert self.pcb is not None
+                    self.pcb.eval()
+                    with torch.no_grad():
+                        h, lens_ = self.pcb.frontend(feats.transpose(0, 1), feat_lens)
+                        prev = {"input": h, "length": lens_, "given": ref_lens}
+                        hidden = self.pcb.latent.calc_all_hidden(prev)
+                        logits = self.pcb.latent.calc_all_logits(prev, hidden)
+                        del h, lens_, hidden, prev
+                        logits = logits[..., 1] - logits[..., 0]
+                        proposal = distributions.ConditionalBernoulli(
+                            ref_lens, logits=logits.T
+                        )
                 else:
                     model_ = models.SuffixForcingWrapper(self.am.latent, "length")
                     walk = modules.RandomWalk(model_)
@@ -796,17 +844,22 @@ def train_am(options, dict_):
     model_ = model = init_model(
         options, dict_["model"], dict_["am"]["data"].delta_order, options.pretraining
     )
+    if dict_["am"]["training"].estimator == "pcb":
+        pcb = init_pcb(options, dict_["am"]["pcb"], dict_["am"]["data"].delta_order)
+    else:
+        pcb = None
     model = TrainingAmWrapper(
         model,
         dict_["am"]["training"].estimator,
         dict_["am"]["training"].mc_samples,
         dict_["am"]["training"].mc_burn_in,
+        pcb,
     )
     model.pretraining = options.pretraining
     if rank >= 0:
         if local_rank >= 0:
             model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[local_rank]
+                model, device_ids=[local_rank], find_unused_parameters=True
             )
         else:
             model = torch.nn.parallel.DistributedDataParallel(model)
@@ -1049,6 +1102,7 @@ def main(args=None):
     train_am_parser.add_argument(
         "--pretrained-enc-path", type=FileType("r"), default=None
     )
+    train_am_parser.add_argument("--pcb-path", type=FileType("r"), default=None)
     train_am_parser.add_argument("--ddp-world-size", default=0, type=int)
     encoder_group = train_am_parser.add_mutually_exclusive_group()
     encoder_group.add_argument("--pretraining", action="store_true", default=False)

@@ -1,11 +1,12 @@
 model:
   frontend:
     recurrent_layers: 0
-    recurrent_size: 250
+    recurrent_size: 421
+    recurrent_bidirectional: false
   latent:
-    num_layers: 3
+    num_layers: 2
     embedding_size: 1
-    hidden_size: 250
+    hidden_size: 421
   merge:
     cond_input_is_post: false
 am:

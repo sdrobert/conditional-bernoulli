@@ -2,6 +2,6 @@ am:
   data:
     batch_size: 20
   training:
-    estimator: ctc
+    estimator: marginal
   decoding:
-    is_ctc: true
+    is_ctc: false

@@ -1,0 +1,8 @@
+am:
+  data:
+    batch_size: 8
+  training:
+    world_size: 1
+    estimator: pcb
+  decoding:
+    is_ctc: false

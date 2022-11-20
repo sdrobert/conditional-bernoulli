@@ -4,7 +4,6 @@ model:
     window_stride: 1
     convolutional_layers: 0
     recurrent_type: LSTM
-    recurrent_bidirectional: false
   
   latent:
     merge_cat: true
@@ -17,7 +16,7 @@ am:
     do_mvn: true
     drop_last: true
   training:
-    mc_samples: 64
+    mc_samples: 32
     mc_burn_in: 16
     dropout_prob: 0.0
     swap_prob: 0.0
@@ -29,6 +28,14 @@ am:
     keep_last_and_best_only: true
     optimizer: adam
     momentum: 0.9
+  pcb:
+    window_size: 1
+    window_stride: 1
+    recurrent_layers: 3
+    convolutional_layers: 0
+    recurrent_size: 250
+    recurrent_type: LSTM
+    recurrent_bidirectional: true
 lm:
   data:
     batch_size: 64

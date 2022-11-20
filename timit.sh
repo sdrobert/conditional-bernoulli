@@ -50,7 +50,7 @@ EOF
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
 ALL_MODELS=( deeprnn-uni lcjs )
 ALL_DEPENDENCIES=( full indep partial )
-ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc )
+ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc pcb )
 ALL_LMS=( lm-rnn lm-embedding nolm )
 ALL_REGIMES=( pretrained flatstart )
 CORE_INVALIDS=(
@@ -60,7 +60,7 @@ CORE_INVALIDS=(
 RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
   'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
-  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is'
+  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'indep_pcb' 'partial_pcb'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
@@ -237,6 +237,7 @@ unpack_combo() {
 
 combine() {
   yml="$(mktemp)"
+  # echo "${model},${dependency},${estimator},${lm}" 1>&2
   combine-yaml-files \
     --nested --quiet \
     conf/proto/${model}/{base,dep_${dependency},estimator_${estimator},lm_${lm}}.yaml \
@@ -414,9 +415,55 @@ if [ $stage -le 3 ]; then
   ((only)) && exit 0
 fi
 
+# train the PCB proposal
+if [ $stage -le 4 ]; then
+    if [[ "${estimators[*]}" =~ "pcb" ]]; then
+    N=$(get_combos model seed | wc -l)
+    for (( i = OFFSET; i < N; i += STRIDE )); do
+      unpack_combo $i model seed
+      dependency=pcb
+      lm=nolm
+      mname="${model}_${dependency}"
+      estimator=pcbpretrain
+      mdir="$encdir/$mname/$seed"
+      if [ ! -f "$mdir/final.pt" ]; then
+        ((onlycount+=1))
+        if ((only<2)); then
+          echo "Beginning stage 3 - pretraining $mname with seed $seed"
+          yml="$(combine)"
+          # set -x
+          $train_cmd \
+            asr.py \
+              ${ckpt_dir+--ckpt-dir "$ckpt_dir/${model}_${dependency}/$seed"} \
+              "$data" $quiet \
+              --read-yaml "$yml" \
+              --device "$device" \
+              --seed $seed \
+              train_am "$mdir" --pretraining
+          if ((cleanup)); then
+            echo "Cleaning up checkpoints"
+            if [ -z "$ckpt_dir" ]; then
+              rm -rf "$ckpt_dir/${model}_${dependency}/$seed" || true
+            else
+              rm -rf "$mdir/training" || true
+            fi
+          fi
+          echo "Ending stage 3 - pretraining $mname with seed $seed"
+        fi
+      elif ((only<2)); then
+        echo "Stage 3 - $mdir/final.pt exists. Skipping"
+      fi
+    done
+  elif ((only<2)); then
+    echo "'pretrained' not in selected regimes - skipping stage 3"
+  fi
+  ((only>1)) && echo "$onlycount"
+  ((only)) && exit 0
+fi 
+
 
 # train everything
-if [ $stage -le 4 ]; then
+if [ $stage -le 5 ]; then
   N=$(get_combos model dependency estimator lm regime seed | wc -l)
   for (( i = OFFSET; i < N; i += STRIDE )); do
     unpack_combo $i model dependency estimator lm regime seed
@@ -441,6 +488,15 @@ if [ $stage -le 4 ]; then
           exit 1
       fi
       xtra_args+=( "--pretrained-enc-path" "$encpth" )
+    fi
+    if [ "$estimator" = "pcb" ]; then
+      pcbpth="$encdir/${model}_pcb/$seed/final.pt"
+      if [ ! -f "$pcbpth" ]; then
+          echo "Cannot train $mname with seed $seed: '$pcbpth' does not exist"\
+            "(did you finish stage 3?)" 1>&2
+          exit 1
+      fi
+      xtra_args+=( "--pcb-path" "$pcbpth" )
     fi
     if [ ! -f "$mdir/final.pt" ]; then
       ((onlycount+=1))
@@ -474,7 +530,7 @@ if [ $stage -le 4 ]; then
 fi
 
 # decode and compute error rates
-if [ $stage -le 5 ]; then
+if [ $stage -le 6 ]; then
   N=$(get_combos model dependency estimator lm regime seed | wc -l)
   for (( i = OFFSET; i < N; i += STRIDE )); do
     unpack_combo $i model dependency estimator lm regime seed
