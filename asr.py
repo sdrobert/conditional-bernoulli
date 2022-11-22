@@ -721,7 +721,7 @@ def train_am_for_epoch(
     world_size: int,
 ) -> float:
     loader.epoch = epoch
-    non_blocking = device.type == "cpu" or loader.pin_memory
+    non_blocking = False  # device.type == "cpu" or loader.pin_memory
     if epoch == 1 or (controller.state_dir and controller.state_csv_path):
         controller.load_model_and_optimizer_for_epoch(model, optimizer, epoch - 1, True)
     torch.manual_seed((epoch + 5) * (controller.params.seed + 113))
@@ -817,14 +817,14 @@ def train_am(options, dict_):
                 "nccl",
                 rank=rank,
                 world_size=world_size,
-                timeout=datetime.timedelta(0, 10),
+                # timeout=datetime.timedelta(0, 10),
             )
         else:
             torch.distributed.init_process_group(
                 "gloo",
                 rank=rank,
                 world_size=world_size,
-                timeout=datetime.timedelta(0, 10),
+                # timeout=datetime.timedelta(0, 10),
             )
     if world_size != dict_["am"]["training"].world_size:
         raise ValueError(
@@ -844,7 +844,7 @@ def train_am(options, dict_):
     model_ = model = init_model(
         options, dict_["model"], dict_["am"]["data"].delta_order, options.pretraining
     )
-    if dict_["am"]["training"].estimator == "pcb":
+    if dict_["am"]["training"].estimator == "pcb" or options.pcb_path is not None:
         pcb = init_pcb(options, dict_["am"]["pcb"], dict_["am"]["data"].delta_order)
     else:
         pcb = None
@@ -859,7 +859,10 @@ def train_am(options, dict_):
     if rank >= 0:
         if local_rank >= 0:
             model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[local_rank], find_unused_parameters=True
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=True,
             )
         else:
             model = torch.nn.parallel.DistributedDataParallel(model)
@@ -892,7 +895,7 @@ def train_am(options, dict_):
         seed=seed,
         num_workers=num_data_workers,
         batch_first=False,
-        pin_memory=True,
+        pin_memory=False,
         feat_mean=stats["mean"],
         feat_std=stats["std"],
     )

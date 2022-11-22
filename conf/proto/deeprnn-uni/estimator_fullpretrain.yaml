@@ -1,8 +1,8 @@
 am:
   data:
-    batch_size: 4
+    batch_size: 2
   training:
-    world_size: 2
+    world_size: 4
     estimator: direct
   decoding:
     is_ctc: false

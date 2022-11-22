@@ -1,12 +1,11 @@
 # source this
 
-set -e
-
 mkdir -p logs/timit
 
-timit_dir="${1:-"$HOME/Databases/TIMIT"}"
-cpu_opts="${2:-"-p cpu"}"
-gpu_opts="${3:-"-p p100 --gpus-per-task=1"}"
+extra_flags="${1:-"-j"}"
+timit_dir="${2:-"$HOME/Databases/TIMIT"}"
+cpu_opts="${3:-"-p cpu"}"
+gpu_opts="${4:-"-p p100 --gpus-per-task=1"}"
 
 if [ ! -d "$timit_dir" ]; then
   echo "$timit_dir is not a directory"
@@ -16,18 +15,18 @@ fi
 check_and_do() {
   local opts="$1"
   shift
-  local leftover="$(./timit.sh "$@" -xxj)"
+  local leftover="$(./timit.sh "$@" $extra_flags -xx)"
   if ((leftover>0)); then
-    echo "Starting: ./timit.sh $* -xqj ($leftover tasks)"
-    sbatch $opts --ntasks=1 -a 1-$leftover -W scripts/slurm/timit_wrapper.sh "$@" -xqj
+    echo "Starting: ./timit.sh $* -xq $extra_flags ($leftover tasks)"
+    sbatch $opts --ntasks=1 -a 1-$leftover -W scripts/slurm/timit_wrapper.sh "$@" -xq $extra_flags
     v=$?
-    if [ $? -eq 0 ]; then
-      echo "./timit.sh $* -xqj succeeded"
+    if [ $v -eq 0 ]; then
+      echo "./timit.sh $* -xq $extra_flags succeeded"
     else
-      echo "./timit.sh $* -xqj failed"
+      echo "./timit.sh $* -xq $extra_flags failed"
     fi
-    return $?
+    return $v
   else
-    echo "./timit.sh $* -xqj already done"
+    echo "./timit.sh $* -xq $extra_flags already done"
   fi
 }

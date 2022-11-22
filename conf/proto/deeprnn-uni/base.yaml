@@ -7,17 +7,14 @@ model:
   
   latent:
     merge_cat: true
-
-  conditional:
-    hidden_size: 250
 am:
   data:
     delta_order: 2
     do_mvn: true
     drop_last: true
   training:
-    mc_samples: 32
-    mc_burn_in: 16
+    mc_samples: 64
+    mc_burn_in: 32
     dropout_prob: 0.0
     swap_prob: 0.0
     aug_er_thresh: 0.8
@@ -33,9 +30,9 @@ am:
     window_stride: 1
     recurrent_layers: 3
     convolutional_layers: 0
-    recurrent_size: 250
+    recurrent_size: 421
     recurrent_type: LSTM
-    recurrent_bidirectional: true
+    recurrent_bidirectional: false
 lm:
   data:
     batch_size: 64

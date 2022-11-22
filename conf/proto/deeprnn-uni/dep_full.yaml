@@ -4,7 +4,7 @@ model:
     recurrent_size: 421
     recurrent_bidirectional: false
   latent:
-    num_layers: 2
+    num_layers: 1
     embedding_size: 1
     hidden_size: 421
   merge:

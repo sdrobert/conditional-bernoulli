@@ -10,7 +10,6 @@ model:
   latent:
     merge_cat: true
     hidden_size: 300
-  
   conditional:
     hidden_size: 300
 am:
@@ -22,8 +21,8 @@ am:
     dropout_prob: 0.15
     swap_prob: 0.0
     aug_er_thresh: 0.8
-    mc_samples: 32
-    mc_burn_in: 16
+    mc_samples: 64
+    mc_burn_in: 32
     early_stopping_burnin: 20
     early_stopping_patience: 50
     early_stopping_threshold: 1e-3
@@ -34,20 +33,20 @@ am:
     # entropy_init: 1.0
     # entropy_decay: 0.97 ** (1/10000)
     # entropy_floor: 0.1
-    pcb:
-      window_size: 3
-      window_stride: 3
-      recurrent_layers: 4
-      recurrent_size: 250
-      recurrent_type: LSTM
-      recurrent_bidirectional: true
+  pcb:
+    window_size: 3
+    window_stride: 3
+    recurrent_layers: 4
+    recurrent_size: 250
+    recurrent_type: LSTM
+    recurrent_bidirectional: true
 lm:
   data:
     batch_size: 64
     drop_last: true
   training:
-    dropout_prob: 0.0
-    swap_prob: 0.0
+    dropout_prob: 0.6
+    swap_prob: 0.1
     aug_pp_thresh: 17
     early_stopping_patience: 50
     early_stopping_threshold: 0.1

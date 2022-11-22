@@ -50,12 +50,13 @@ EOF
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
 ALL_MODELS=( deeprnn-uni lcjs )
 ALL_DEPENDENCIES=( full indep partial )
-ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-g sf-biased sf-is ctc pcb )
-ALL_LMS=( lm-rnn lm-embedding nolm )
+ALL_ESTIMATORS=( direct marginal cb srswor ais-c sf-biased sf-is ctc pcb )
+ALL_LMS=( lm-rnn lm-embedding nolm lm-full )
 ALL_REGIMES=( pretrained flatstart )
 CORE_INVALIDS=(
   'full_marginal' 'full_cb' 'full_ctc' 'partial_marginal' 'partial_ctc'
-  'ctc_lm-rnn' 'ctc_lm-embedding' 'nolm_pretrained'
+  'ctc_lm-rnn' 'ctc_lm-embedding' 'nolm_pretrained' 'full_.*_lm-rnn'
+  'full_.*_nolm' 'full_.*_lm-embedding' 'indep_.*_lm-full' 'partial_.*_lm-full'
 )
 RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
@@ -248,7 +249,7 @@ combine() {
 if [ $world_size = 0 ]; then
   train_cmd=python
 else
-  train_cmd="torchrun --nnodes=1 --nproc_per_node=$world_size --rdzv_backend=c10d --rdzv_endpoint=localhost:0"
+  train_cmd="torchrun --nnodes=1 --nproc_per_node=$world_size --rdzv_backend=c10d --rdzv_endpoint=localhost:${MASTER_PORT:-0}"
 fi
 
 # prep the dataset
@@ -314,7 +315,7 @@ if [ $stage -le 2 ]; then
         if ((only<2)); then
           echo "Beginning stage 2 - training LM for $model, $lm and seed $seed"
           yml="$(combine)"
-          python asr.py "$data" \
+          python asr.py $quiet "$data" \
              ${ckpt_dir+--ckpt-dir "$ckpt_dir/${model}_${lm}/$seed"} \
             --read-yaml "$yml" \
             --device "$device" \
@@ -490,7 +491,7 @@ if [ $stage -le 5 ]; then
       xtra_args+=( "--pretrained-enc-path" "$encpth" )
     fi
     if [ "$estimator" = "pcb" ]; then
-      pcbpth="$encdir/${model}_pcb/$seed/final.pt"
+      pcbpth="$encdir/${model}_partial/$seed/final.pt"
       if [ ! -f "$pcbpth" ]; then
           echo "Cannot train $mname with seed $seed: '$pcbpth' does not exist"\
             "(did you finish stage 3?)" 1>&2

@@ -3,6 +3,7 @@
 #SBATCH --mem-per-cpu=2G
 #SBATCH --export=ALL
 #SBATCH --output=logs/timit/slurm-%j-%a.log
+#SBATCH --nodes=1
 #SBATCH --wait
 #SBATCH --wait-all-nodes=1
 
@@ -11,11 +12,11 @@ if [ ! -z "${SLURM_ARRAY_TASK_ID}" ]; then
   export TIMIT_STRIDE="${SLURM_ARRAY_TASK_COUNT}"
 fi
 
+export MASTER_PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')"
 if [ "${SLURM_NTASKS}" != "1" ]; then
   export MASTER_ADDR"=$(hostname --fqdn)"
-  export MASTER_PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')"
+  # export MASTER_PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')"
   export NCCL_IB_DISABLE=1
-  export NCCL_DEBUG=INFO
   export WORLD_SIZE="${SLURM_NTASKS}"
   for ((i=0; i < SLURM_NTASKS; i++)); do
     /opt/slurm/bin/srun \
