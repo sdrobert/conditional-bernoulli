@@ -491,7 +491,7 @@ if [ $stage -le 5 ]; then
       xtra_args+=( "--pretrained-enc-path" "$encpth" )
     fi
     if [ "$estimator" = "pcb" ]; then
-      pcbpth="$encdir/${model}_partial/$seed/final.pt"
+      pcbpth="$encdir/${model}_pcb/$seed/final.pt"
       if [ ! -f "$pcbpth" ]; then
           echo "Cannot train $mname with seed $seed: '$pcbpth' does not exist"\
             "(did you finish stage 3?)" 1>&2

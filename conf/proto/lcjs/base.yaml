@@ -37,6 +37,7 @@ am:
     window_size: 3
     window_stride: 3
     recurrent_layers: 4
+    convolutional_layers: 0
     recurrent_size: 250
     recurrent_type: LSTM
     recurrent_bidirectional: true
