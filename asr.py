@@ -1,4 +1,3 @@
-import datetime
 import sys
 import argparse
 import os
@@ -74,6 +73,7 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
             "srswor",
             "ais-c",
             "ais-g",
+            "ais-l",
             "sf-biased",
             "sf-is",
             "ctc",
@@ -281,6 +281,8 @@ def init_pcb(options, frontend_params, delta_order) -> models.AcousticModel:
         True,
     )
     model.load_state_dict(state_dict, strict=False)
+    for param in model.parameters():
+        param.requires_grad = False
     return model.eval().to(device)
 
 
@@ -628,11 +630,20 @@ class TrainingAmWrapper(torch.nn.Module):
                     walk, N, prev, Tp
                 )
                 if self.estimator_name == "ais-c":
-                    adaptation_func = lambda x: x
+                    adaptation_func = lambda b: b
                 elif self.estimator_name == "ais-g":
                     adaptation_func = estimators.FixedCardinalityGibbsStatistic(
                         func, density, True
                     )
+                elif self.estimator_name == "ais-l":
+
+                    @torch.no_grad()
+                    def adaptation_func(b: torch.Tensor) -> torch.Tensor:
+                        logits = self.am.latent.calc_full_log_probs(
+                            b.T[:-1].long(), prev
+                        )
+                        return (logits[..., 1] - logits[..., 0]).T.log_softmax(1)
+
                 else:
                     assert False
                 estimator = estimators.AisImhEstimator(
@@ -862,7 +873,7 @@ def train_am(options, dict_):
                 model,
                 device_ids=[local_rank],
                 output_device=local_rank,
-                find_unused_parameters=True,
+                # find_unused_parameters=True,
             )
         else:
             model = torch.nn.parallel.DistributedDataParallel(model)

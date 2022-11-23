@@ -50,7 +50,7 @@ EOF
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
 ALL_MODELS=( deeprnn-uni lcjs )
 ALL_DEPENDENCIES=( full indep partial )
-ALL_ESTIMATORS=( direct marginal cb srswor ais-c sf-biased sf-is ctc pcb )
+ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-l sf-biased sf-is ctc pcb )
 ALL_LMS=( lm-rnn lm-embedding nolm lm-full )
 ALL_REGIMES=( pretrained flatstart )
 CORE_INVALIDS=(
@@ -62,6 +62,7 @@ RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
   'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
   'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'indep_pcb' 'partial_pcb'
+  'ais-l'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"

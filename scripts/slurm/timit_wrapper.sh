@@ -1,6 +1,6 @@
 #! /usr/bin/env bash
 #SBATCH --cpus-per-task=4
-#SBATCH --mem-per-cpu=2G
+#SBATCH --mem=8G
 #SBATCH --export=ALL
 #SBATCH --output=logs/timit/slurm-%j-%a.log
 #SBATCH --nodes=1
