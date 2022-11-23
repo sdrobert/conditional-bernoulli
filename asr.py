@@ -526,18 +526,12 @@ class TrainingAmWrapper(torch.nn.Module):
             refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
             b_ = b.flatten(0, 1).T.long()
             ll = self.am.calc_log_likelihood_given_latents(
-                b_, refs, {"latent_input": h, "latent_length": h_lens}, self.ec,
+                b_, refs, {"latent_input": h, "latent_length": h_lens}, func.joint,
             )
-            if self.ec:
-                ll, hidden = ll
-                ll_ = self.am.latent.calc_all_logits(
-                    {"input": h, "length": h_lens}, hidden
-                )
-                ll_ = ll_.gather(2, b_.unsqueeze(2)).squeeze(2).sum(0) / h_lens
-                ll = ll - self.ec * ll_
-                del ll_, hidden
+            # ll = ll + self.am.latent.calc_all_logits(
+            #     {"input": h, "length": h_lens}, hidden
+            # ).log_softmax(2).gather(2, b_.unsqueeze(2)).squeeze(2).sum(0)
             ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
-            ll = ll
             return ll
 
         if self.estimator_name == "marginal":
@@ -563,6 +557,7 @@ class TrainingAmWrapper(torch.nn.Module):
             func.h_lens = lens_
             func.refs = refs
             func.ref_lens = ref_lens
+            func.joint = self.estimator_name not in {"cb", "sf-biased"}
             prev = {
                 "input": h,
                 "post": h,
@@ -642,7 +637,7 @@ class TrainingAmWrapper(torch.nn.Module):
                         logits = self.am.latent.calc_full_log_probs(
                             b.T[:-1].long(), prev
                         )
-                        return (logits[..., 1] - logits[..., 0]).T.log_softmax(1)
+                        return (logits[..., 1] - logits[..., 0]).T
 
                 else:
                     assert False

@@ -247,7 +247,7 @@ combine() {
   echo "$yml"
 }
 
-if [ $world_size = 0 ]; then
+if [ $world_size -le 1 ]; then
   train_cmd=python
 else
   train_cmd="torchrun --nnodes=1 --nproc_per_node=$world_size --rdzv_backend=c10d --rdzv_endpoint=localhost:${MASTER_PORT:-0}"

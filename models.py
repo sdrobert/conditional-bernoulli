@@ -712,6 +712,9 @@ class LstmLm(MixableSequentialLanguageModel):
                 >= length
             ).unsqueeze(2)
             logits = torch.where(mask, self.past_length.expand_as(logits), logits)
+        # if logits.size(2) == 2:
+        #     with torch.no_grad():
+        #         print(logits[:, 0].max(0))
 
         return logits
 
@@ -802,7 +805,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         latent_hist: torch.Tensor,
         cond_hist: torch.Tensor,
         prev: StateDict = dict(),
-        include_latent_hidden: bool = False,
+        joint: bool = False,
     ) -> torch.Tensor:
         # we're in a better position than when calculating the log probabilities b/c
         # we don't need to worry about the rest of the pdf when the latent variable
@@ -819,7 +822,17 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             Lmax = L
         prev = self.update_input(prev.copy(), latent_hist)
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
-        hidden_r = hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
+        hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
+        if joint:
+            llogits = self.latent.calc_all_logits(prev_latent, hidden).log_softmax(2)
+            ll = (
+                llogits.gather(2, latent_hist.unsqueeze(2))
+                .squeeze(2)
+                .sum(0, keepdim=True)
+            )
+            del llogits
+        else:
+            ll = 0
 
         H = hidden.size(2)
         assert hidden.shape == (T, N, H)
@@ -835,16 +848,13 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         cond_hist = cond_hist.clamp(0, self.vocab_size - 1)
         hidden = self.conditional.calc_all_hidden(prev_cond, cond_hist[:-1])
         clogits = self.conditional.calc_all_logits(prev_cond, hidden).log_softmax(2)
-        ll = clogits.gather(2, cond_hist.unsqueeze(2)).squeeze(2)
+        ll = ll + clogits.gather(2, cond_hist.unsqueeze(2)).squeeze(2)
         ll = (
             ll.masked_fill(~hidden_mask.T, 0)
             .sum(0)
             .masked_fill(cond_lens > L, torch.finfo(torch.float).min)
         )
-        if include_latent_hidden:
-            return ll, hidden_r
-        else:
-            return ll
+        return ll
 
     def calc_marginal_log_likelihoods(
         self,
