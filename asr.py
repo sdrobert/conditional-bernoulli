@@ -526,7 +526,7 @@ class TrainingAmWrapper(torch.nn.Module):
             refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
             b_ = b.flatten(0, 1).T.long()
             ll = self.am.calc_log_likelihood_given_latents(
-                b_, refs, {"latent_input": h, "latent_length": h_lens}, func.joint,
+                b_, refs, {"latent_input": h, "latent_length": h_lens},
             )
             # ll = ll + self.am.latent.calc_all_logits(
             #     {"input": h, "length": h_lens}, hidden
@@ -557,7 +557,6 @@ class TrainingAmWrapper(torch.nn.Module):
             func.h_lens = lens_
             func.refs = refs
             func.ref_lens = ref_lens
-            func.joint = self.estimator_name not in {"cb", "sf-biased"}
             prev = {
                 "input": h,
                 "post": h,
