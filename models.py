@@ -383,6 +383,9 @@ class TokenSwapper(torch.nn.Module):
         return x
 
 
+_COUNT = 0
+
+
 class LstmLm(MixableSequentialLanguageModel):
 
     input_size: int
@@ -713,8 +716,12 @@ class LstmLm(MixableSequentialLanguageModel):
             ).unsqueeze(2)
             logits = torch.where(mask, self.past_length.expand_as(logits), logits)
         # if logits.size(2) == 2:
-        #     with torch.no_grad():
-        #         print(logits[:, 0].max(0))
+        #     global _COUNT
+        #     _COUNT += 1
+        #     if _COUNT % 1024 == 0:
+        #         _COUNT -= 1024
+        #         with torch.no_grad():
+        #             print(logits[:, 0].max(0))
 
         return logits
 

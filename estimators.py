@@ -82,25 +82,17 @@ class ConditionalBernoulliProposalMaker(object):
 
     eps: float
     given_count: torch.Tensor
-    are_logits: bool
 
     def __init__(
-        self,
-        given_count: torch.Tensor,
-        eps: float = torch.finfo(torch.float).eps,
-        are_logits: bool = False,
+        self, given_count: torch.Tensor, eps: float = torch.finfo(torch.float).eps,
     ):
         self.eps = eps
         self.given_count = given_count
-        self.are_logits = are_logits
 
     def __call__(self, h_n: torch.Tensor, n: int) -> distributions.ConditionalBernoulli:
-        if self.are_logits:
-            return distributions.ConditionalBernoulli(self.given_count, logits=h_n)
-        else:
-            return distributions.ConditionalBernoulli(
-                self.given_count, h_n.clamp(self.eps, 1 - self.eps)
-            )
+        return distributions.ConditionalBernoulli(
+            self.given_count, h_n.clamp(self.eps, 1 - self.eps)
+        )
 
 
 class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
@@ -184,7 +176,7 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
                 h_last_last * ((n - 1) / n) + self.adaptation_func(tau.squeeze(0)) / n
             )
             # if n % 8 == 0:
-                # print(n, h_last.exp()[:10], a)
+            #     print(n, h_last[0, :100])
         # cat not stack b/c 0 dim is sample dim
         if self.is_log:
             v = torch.cat(lomegas).logsumexp(0) - math.log(self.mc_samples)

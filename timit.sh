@@ -50,19 +50,21 @@ EOF
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
 ALL_MODELS=( deeprnn-uni lcjs )
 ALL_DEPENDENCIES=( full indep partial )
-ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-l sf-biased sf-is ctc pcb )
+ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-l sf-biased sf-is ctc )
 ALL_LMS=( lm-rnn lm-embedding nolm lm-full )
-ALL_REGIMES=( pretrained flatstart )
+ALL_REGIMES=( pretrained flatstart pcb )
 CORE_INVALIDS=(
   'full_marginal' 'full_cb' 'full_ctc' 'partial_marginal' 'partial_ctc'
   'ctc_lm-rnn' 'ctc_lm-embedding' 'nolm_pretrained' 'full_.*_lm-rnn'
   'full_.*_nolm' 'full_.*_lm-embedding' 'indep_.*_lm-full' 'partial_.*_lm-full'
+  'marginal_.*_pcb' 'cb_.*_pcb' 'direct_.*_pcb' 'sf-biased_.*_pcb'
+  'sf-is_.*_pcb'
 )
 RECOMMENDED_INVALIDS=(
   'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
   'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
-  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'indep_pcb' 'partial_pcb'
-  'ais-l'
+  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'pretrained'
+  'srswor_.*_flatstart' 'ais-c_.*_flatstart' 'ais-l_.*_flatstart'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
@@ -370,10 +372,10 @@ if [ $stage -le 3 ]; then
       lm=nolm
       mname="${model}_${dependency}"
       if [ "$dependency" = "full" ]; then
-        estimator=fullpretrain
+        estimator=direct
         mdir="$encdir/$mname/$seed"
       else
-        estimator=marginalpretrain
+        estimator=margina
         mdir="$encdir/${model}_indep/$seed"
         if [ "$dependency" = "partial" ]; then
           mkdir -p "$encdir/$mname"
@@ -419,14 +421,14 @@ fi
 
 # train the PCB proposal
 if [ $stage -le 4 ]; then
-    if [[ "${estimators[*]}" =~ "pcb" ]]; then
+    if [[ "${regime[*]}" =~ "pcb" ]]; then
     N=$(get_combos model seed | wc -l)
     for (( i = OFFSET; i < N; i += STRIDE )); do
       unpack_combo $i model seed
       dependency=pcb
       lm=nolm
       mname="${model}_${dependency}"
-      estimator=pcbpretrain
+      estimator=marginal
       mdir="$encdir/$mname/$seed"
       if [ ! -f "$mdir/final.pt" ]; then
         ((onlycount+=1))
@@ -490,8 +492,7 @@ if [ $stage -le 5 ]; then
           exit 1
       fi
       xtra_args+=( "--pretrained-enc-path" "$encpth" )
-    fi
-    if [ "$estimator" = "pcb" ]; then
+    elif [ "$regime" = "pcb" ]; then
       pcbpth="$encdir/${model}_pcb/$seed/final.pt"
       if [ ! -f "$pcbpth" ]; then
           echo "Cannot train $mname with seed $seed: '$pcbpth' does not exist"\

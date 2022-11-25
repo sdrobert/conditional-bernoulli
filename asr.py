@@ -77,7 +77,6 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
             "sf-biased",
             "sf-is",
             "ctc",
-            "pcb",
         ],
     )
     mc_samples = param.Integer(1, bounds=(1, None))
@@ -493,6 +492,7 @@ class TrainingAmWrapper(torch.nn.Module):
     pretraining: bool
     mse: bool
     pcb: Optional[models.AcousticModel]
+    adaptive: bool
 
     def __init__(
         self,
@@ -506,7 +506,7 @@ class TrainingAmWrapper(torch.nn.Module):
         self.am = am
         self.estimator_name, self.M, self.B = estimator_name, M, B
         self.ec = 0.0
-        self.pretraining = self.mse = False
+        self.pretraining = self.mse = self.adaptive = False
         self.pcb = pcb
 
     def forward_regular(
@@ -517,22 +517,6 @@ class TrainingAmWrapper(torch.nn.Module):
         ref_lens: torch.Tensor,
     ) -> torch.Tensor:
         T, N = feats.shape[:2]
-
-        def func(b: torch.Tensor) -> torch.Tensor:
-            M = b.size(0)
-            mismatch = b.sum(-1) != func.ref_lens  # (M, N)
-            h = func.h.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
-            h_lens = func.h_lens.unsqueeze(0).expand(M, -1).flatten()
-            refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
-            b_ = b.flatten(0, 1).T.long()
-            ll = self.am.calc_log_likelihood_given_latents(
-                b_, refs, {"latent_input": h, "latent_length": h_lens},
-            )
-            # ll = ll + self.am.latent.calc_all_logits(
-            #     {"input": h, "length": h_lens}, hidden
-            # ).log_softmax(2).gather(2, b_.unsqueeze(2)).squeeze(2).sum(0)
-            ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
-            return ll
 
         if self.estimator_name == "marginal":
             prev = {
@@ -551,6 +535,20 @@ class TrainingAmWrapper(torch.nn.Module):
                 lprobs, refs.T, lens_, ref_lens, self.am.vocab_size - 1, "mean"
             )
         else:
+
+            def func(b: torch.Tensor) -> torch.Tensor:
+                M = b.size(0)
+                mismatch = b.sum(-1) != func.ref_lens  # (M, N)
+                h = func.h.unsqueeze(1).expand(-1, M, -1, -1).flatten(1, 2)
+                h_lens = func.h_lens.unsqueeze(0).expand(M, -1).flatten()
+                refs = func.refs.unsqueeze(1).expand(-1, M, -1).flatten(1)
+                b_ = b.flatten(0, 1).T.long()
+                ll = self.am.calc_log_likelihood_given_latents(
+                    b_, refs, {"latent_input": h, "latent_length": h_lens},
+                )
+                ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
+                return ll
+
             Tp = self.am.compute_output_time_size(T).item()
             h, lens_ = self.am.frontend(feats.transpose(0, 1), feat_lens)
             func.h = h
@@ -564,6 +562,35 @@ class TrainingAmWrapper(torch.nn.Module):
                 "given": ref_lens,
             }
             prev = self.am.latent.update_input(prev, refs)
+
+            if self.pcb is not None and self.estimator_name in {
+                "ais-c",
+                "ais-g",
+                "ais-l",
+                "srswor",
+            }:
+                self.pcb.eval()
+                with torch.no_grad():
+                    h, lens_ = self.pcb.frontend(feats.transpose(0, 1), feat_lens)
+                    prev_ = {"input": h, "length": lens_, "given": ref_lens}
+                    hidden = self.pcb.latent.calc_all_hidden(prev_)
+                    logits = self.pcb.latent.calc_all_logits(prev_, hidden)
+                    del h, lens_, hidden, prev_
+                    logits = logits[..., 1] - logits[..., 0]
+                    proposal = distributions.ConditionalBernoulli(
+                        ref_lens, logits=logits.T
+                    )
+            elif self.estimator_name in {"ais-c", "ais-g", "ais-l", "srswor"}:
+                proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
+                    ref_lens, lens_, Tp
+                )
+            elif self.estimator_name == "sf-is":
+                model_ = models.SuffixForcingWrapper(self.am.latent, "length")
+                walk = modules.RandomWalk(model_)
+                proposal = pdistributions.SequentialLanguageModelDistribution(
+                    walk, N, prev, Tp, True
+                )
+
             v = 0
             if self.estimator_name == "cb":
                 hidden = self.am.latent.calc_all_hidden(prev)
@@ -586,39 +613,12 @@ class TrainingAmWrapper(torch.nn.Module):
                 )
             if self.estimator_name in {"direct", "cb", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(dist, func, self.M, is_log=True)
-                # estimator = estimators.SerialMCWrapper(estimator)
-            elif self.estimator_name in {"srswor", "sf-is", "pcb"}:
-                if self.estimator_name == "srswor":
-                    proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                        ref_lens, lens_, Tp
-                    )
-                elif self.estimator_name == "pcb":
-                    assert self.pcb is not None
-                    self.pcb.eval()
-                    with torch.no_grad():
-                        h, lens_ = self.pcb.frontend(feats.transpose(0, 1), feat_lens)
-                        prev = {"input": h, "length": lens_, "given": ref_lens}
-                        hidden = self.pcb.latent.calc_all_hidden(prev)
-                        logits = self.pcb.latent.calc_all_logits(prev, hidden)
-                        del h, lens_, hidden, prev
-                        logits = logits[..., 1] - logits[..., 0]
-                        proposal = distributions.ConditionalBernoulli(
-                            ref_lens, logits=logits.T
-                        )
-                else:
-                    model_ = models.SuffixForcingWrapper(self.am.latent, "length")
-                    walk = modules.RandomWalk(model_)
-                    proposal = pdistributions.SequentialLanguageModelDistribution(
-                        walk, N, prev, Tp, True
-                    )
+            elif not self.adaptive:
                 estimator = pestimators.ImportanceSamplingEstimator(
                     proposal, func, self.M, dist, is_log=True,
                 )
-                # estimator = estimators.SerialMCWrapper(estimator)
-            elif self.estimator_name.startswith("ais-"):
-                proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
-                    ref_lens, lens_, Tp
-                )
+            else:
+                assert self.estimator_name.startswith("ais-")
                 maker = estimators.ConditionalBernoulliProposalMaker(ref_lens)
                 density = pdistributions.SequentialLanguageModelDistribution(
                     walk, N, prev, Tp
@@ -636,7 +636,7 @@ class TrainingAmWrapper(torch.nn.Module):
                         logits = self.am.latent.calc_full_log_probs(
                             b.T[:-1].long(), prev
                         )
-                        return (logits[..., 1] - logits[..., 0]).T
+                        return (logits[..., 1] - logits[..., 0]).T.softmax(1)
 
                 else:
                     assert False
@@ -650,8 +650,6 @@ class TrainingAmWrapper(torch.nn.Module):
                     self.B,
                     is_log=True,
                 )
-            else:
-                assert False
             v = v + estimator()
         return -v.mean()
 
@@ -723,6 +721,7 @@ def train_am_for_epoch(
     device: torch.device,
     quiet: int,
     pretraining: bool,
+    do_aug: bool,
     world_size: int,
 ) -> float:
     loader.epoch = epoch
@@ -732,12 +731,17 @@ def train_am_for_epoch(
     torch.manual_seed((epoch + 5) * (controller.params.seed + 113))
     sa = lambda x, _: x
     wn_setup = wn_teardown = lambda: None
-    do_aug = controller.get_info(epoch - 1)["do_aug"]
     if do_aug:
-        model.dropout_prob = params.dropout_prob
-        model.swap_prob = params.swap_prob
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model_ = model.module
+        else:
+            model_ = model
+        assert isinstance(model_, TrainingAmWrapper)
+        model_.adaptive = params.estimator.startswith("ais-")
+        model_.am.dropout_prob = params.dropout_prob
+        model_.am.swap_prob = params.swap_prob
         if params.entropy_init:
-            model.ec = (
+            model_.ec = (
                 params.entropy_init
                 * params.entropy_decay ** ((epoch - 1) * len(loader))
                 + params.entropy_floor
@@ -888,7 +892,6 @@ def train_am(options, dict_):
     controller = training.TrainingStateController(
         dict_["am"]["training"], state_csv, state_dir, warn=options.quiet < 1
     )
-    controller.add_entry("do_aug", int)
 
     stats_file = os.path.join(options.data_dir, "ext", "train.mvn.pt")
     stats = torch.load(stats_file)
@@ -917,8 +920,12 @@ def train_am(options, dict_):
 
     # dev_er = float("inf")
     epoch = controller.get_last_epoch() + 1
-    do_aug = bool(controller.get_info(epoch - 1)["do_aug"])
     aug_er_thresh = dict_["am"]["training"].aug_er_thresh
+    if epoch == 1:
+        best_er = 1000
+    else:
+        best_er = controller.get_info(controller.get_best_epoch())["val_met"]
+    do_aug = best_er < aug_er_thresh
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
@@ -932,6 +939,7 @@ def train_am(options, dict_):
             options.device,
             options.quiet,
             options.pretraining,
+            do_aug,
             options.ddp_world_size,
         )
         if options.quiet < 1:
@@ -944,7 +952,6 @@ def train_am(options, dict_):
             options.quiet,
             options.pretraining,
         )
-        do_aug |= dev_er < aug_er_thresh
 
         controller.update_for_epoch(
             model,
@@ -952,9 +959,10 @@ def train_am(options, dict_):
             train_loss,
             dev_er,
             epoch,
-            do_aug=int(do_aug),
             # aug_er_patience_cd=aug_er_patience_cd,
         )
+        best_er = min(controller.get_info(epoch)["val_met"], best_er)
+        do_aug = best_er < aug_er_thresh
         if options.quiet < 2:
             print(
                 f"Epoch {epoch}: Train loss={train_loss:e}, dev error rate={dev_er:%}",

@@ -20,7 +20,7 @@ am:
   training:
     dropout_prob: 0.15
     swap_prob: 0.0
-    aug_er_thresh: 0.8
+    aug_er_thresh: 0.0
     mc_samples: 64
     mc_burn_in: 32
     early_stopping_burnin: 20
