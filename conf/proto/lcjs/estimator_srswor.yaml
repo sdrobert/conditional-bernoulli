@@ -1,8 +1,6 @@
 am:
-  data:
-    batch_size: 10
   training:
-    world_size: 2
+    mc_samples: 64
     estimator: srswor
   decoding:
     is_ctc: false

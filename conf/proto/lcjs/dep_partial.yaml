@@ -1,6 +1,8 @@
 model:
   frontend:
     recurrent_layers: 4
+    recurrent_size: 300
+    recurrent_bidirectional: false
   latent:
     num_layers: 0
     embedding_size: 0

@@ -1,5 +1,0 @@
-model:
-  conditional:
-    embedding_size: 250
-    hidden_size: 250
-    num_layers: 1

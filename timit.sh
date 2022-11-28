@@ -50,21 +50,23 @@ EOF
 # ALL_MODELS=( $(find conf/proto -mindepth 1 -type d -exec basename {} \;) )
 ALL_MODELS=( deeprnn-uni lcjs )
 ALL_DEPENDENCIES=( full indep partial )
-ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-l sf-biased sf-is ctc )
-ALL_LMS=( lm-rnn lm-embedding nolm lm-full )
+ALL_ESTIMATORS=( direct marginal cb srswor ais-c ais-s sf-biased sf-is ctc )
+ALL_LMS=( lm-rnn lm-embedding nolm )
 ALL_REGIMES=( pretrained flatstart pcb )
 CORE_INVALIDS=(
-  'full_marginal' 'full_cb' 'full_ctc' 'partial_marginal' 'partial_ctc'
-  'ctc_lm-rnn' 'ctc_lm-embedding' 'nolm_pretrained' 'full_.*_lm-rnn'
-  'full_.*_nolm' 'full_.*_lm-embedding' 'indep_.*_lm-full' 'partial_.*_lm-full'
-  'marginal_.*_pcb' 'cb_.*_pcb' 'direct_.*_pcb' 'sf-biased_.*_pcb'
-  'sf-is_.*_pcb'
+  'full_marginal' 'full_cb' 'full_ctc'
+  'partial_marginal' 'partial_ctc' 
+  'ctc_lm-rnn' 'ctc_lm-embedding'
+  'nolm_pretrained'
+  'marginal_.*_pcb' 'cb_.*_pcb' 'direct_.*_pcb' 'sf-biased_.*_pcb' 'sf-is_.*_pcb' 'ctc_.*_pcb'
 )
 RECOMMENDED_INVALIDS=(
-  'indep_direct' 'partial_direct' 'indep_cb' 'indep_srswor' 'partial_srswor'
-  'indep_ais-c' 'partial_ais-c' 'indep_ais-g' 'partial_ais-g' 'indep_sf-biased'
-  'partial_sf-biased' 'indep_sf-is' 'partial_sf-is' 'pretrained'
-  'srswor_.*_flatstart' 'ais-c_.*_flatstart' 'ais-l_.*_flatstart'
+  'indep_direct' 'indep_cb' 'indep_srswor' 'indep_ais-.' 'indep_sf-.*'
+  'partial_direct'  'partial_srswor' 'partial_ais-.' 'partial_sf-.*'
+  'full_.*_lm-embedding' 'full_.*_nolm'
+  'partial_.*_lm-embedding' 'partial_.*_nolm'
+  'srswor_.*_flatstart' 'ais-._.*_flatstart'
+  'pretrained'
 )
 OFFSET="${TIMIT_OFFSET:-0}"
 STRIDE="${TIMIT_STRIDE:-1}"
@@ -88,7 +90,7 @@ dependencies=( "${ALL_DEPENDENCIES[@]}" )
 estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
 regimes=( "${ALL_REGIMES[@]}" )
-beam_widths=( 1 2 4 8 16 32 64 128 )
+beam_widths=( 1 2 4 8 16 32 )
 only=0
 onlycount=0
 cleanup=0
@@ -375,7 +377,7 @@ if [ $stage -le 3 ]; then
         estimator=direct
         mdir="$encdir/$mname/$seed"
       else
-        estimator=margina
+        estimator=marginal
         mdir="$encdir/${model}_indep/$seed"
         if [ "$dependency" = "partial" ]; then
           mkdir -p "$encdir/$mname"
@@ -421,24 +423,24 @@ fi
 
 # train the PCB proposal
 if [ $stage -le 4 ]; then
-    if [[ "${regime[*]}" =~ "pcb" ]]; then
-    N=$(get_combos model seed | wc -l)
+  if [[ "${regimes[*]}" =~ "pcb" ]]; then
+    N=$(get_combos model marginal pcb seed | wc -l)
     for (( i = OFFSET; i < N; i += STRIDE )); do
-      unpack_combo $i model seed
+      unpack_combo $i model marginal pcb seed
       dependency=pcb
       lm=nolm
-      mname="${model}_${dependency}"
+      mname="${model}_pcb"
       estimator=marginal
       mdir="$encdir/$mname/$seed"
       if [ ! -f "$mdir/final.pt" ]; then
         ((onlycount+=1))
         if ((only<2)); then
-          echo "Beginning stage 3 - pretraining $mname with seed $seed"
+          echo "Beginning stage 4 - pretraining $mname with seed $seed"
           yml="$(combine)"
           # set -x
           $train_cmd \
             asr.py \
-              ${ckpt_dir+--ckpt-dir "$ckpt_dir/${model}_${dependency}/$seed"} \
+              ${ckpt_dir+--ckpt-dir "$ckpt_dir/${model}_pcb/$seed"} \
               "$data" $quiet \
               --read-yaml "$yml" \
               --device "$device" \
@@ -447,7 +449,7 @@ if [ $stage -le 4 ]; then
           if ((cleanup)); then
             echo "Cleaning up checkpoints"
             if [ -z "$ckpt_dir" ]; then
-              rm -rf "$ckpt_dir/${model}_${dependency}/$seed" || true
+              rm -rf "$ckpt_dir/${model}_pcb/$seed" || true
             else
               rm -rf "$mdir/training" || true
             fi
@@ -459,7 +461,7 @@ if [ $stage -le 4 ]; then
       fi
     done
   elif ((only<2)); then
-    echo "'pretrained' not in selected regimes - skipping stage 3"
+    echo "'pcb' not in selected regimes - skipping stage 4"
   fi
   ((only>1)) && echo "$onlycount"
   ((only)) && exit 0
@@ -471,9 +473,9 @@ if [ $stage -le 5 ]; then
   N=$(get_combos model dependency estimator lm regime seed | wc -l)
   for (( i = OFFSET; i < N; i += STRIDE )); do
     unpack_combo $i model dependency estimator lm regime seed
+    # echo "$model $dependency $estimator $lm $regime $seed"
     mname="${model}_${dependency}_${estimator}_${lm}_${regime}"
     mdir="$amdir/$mname/$seed"
-    mkdir -p "$mdir"
     xtra_args=( )
     if [ "$regime" = "pretrained" ]; then
       if [ "$lm" != "nolm" ]; then
@@ -496,7 +498,7 @@ if [ $stage -le 5 ]; then
       pcbpth="$encdir/${model}_pcb/$seed/final.pt"
       if [ ! -f "$pcbpth" ]; then
           echo "Cannot train $mname with seed $seed: '$pcbpth' does not exist"\
-            "(did you finish stage 3?)" 1>&2
+            "(did you finish stage 4?)" 1>&2
           exit 1
       fi
       xtra_args+=( "--pcb-path" "$pcbpth" )
@@ -504,8 +506,9 @@ if [ $stage -le 5 ]; then
     if [ ! -f "$mdir/final.pt" ]; then
       ((onlycount+=1))
       if ((only<2)); then
+        mkdir -p "$mdir"
         yml="$(combine)"
-        echo "Beginning stage 4 - training $mname with seed $seed"
+        echo "Beginning stage 5 - training $mname with seed $seed"
         $train_cmd \
           asr.py \
             ${ckpt_dir+--ckpt-dir "$ckpt_dir/$mname/$seed"} \
@@ -522,7 +525,7 @@ if [ $stage -le 5 ]; then
             rm -rf "$mdir/training" || true
           fi
         fi
-        echo "Ending stage 4 - training $mname with seed $seed"
+        echo "Ending stage 5 - training $mname with seed $seed"
       fi
     elif ((only<2)); then
       echo "Stage 4 - $mdir/final.pt exists. Skipping"
@@ -542,8 +545,8 @@ if [ $stage -le 6 ]; then
     mdir="$amdir/$mname/$seed"
     mpth="$mdir/final.pt"
     if [ ! -f "$mpth" ]; then
-          echo "Cannot decode $mname with seed $seed: '$mpth' does not exist" \
-            "(did you finish stage 4?)" 1>&2
+        echo "Cannot decode $mname with seed $seed: '$mpth' does not exist" \
+          "(did you finish stage 5?)" 1>&2
       exit 1
     fi
     curonlycount=0
@@ -568,7 +571,7 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         if [ ! -f "$bdir/.complete" ]; then
           curonlycount=1
           if ((only<2)); then
-            echo "Beginning stage 5 - decoding $part using $mname with seed" \
+            echo "Beginning stage 6 - decoding $part using $mname with seed" \
               "$seed and beam width $beam_width"
             python asr.py "$data" $quiet \
               --read-yaml "$yml" \
@@ -577,7 +580,7 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
                 "${xtra_args[@]}" --beam-width "$beam_width" \
                 "$mpth" "$bdir"
             touch "$bdir/.complete"
-            echo "Ending stage 5 - decoding $part using $mname with seed" \
+            echo "Ending stage 6 - decoding $part using $mname with seed" \
               "$seed and beam width $beam_width"
           fi
         elif ((only<2)); then
@@ -587,14 +590,14 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
           curonlycount=1
           if ((only<2)); then
-            echo "Beginning stage 5 - gathering hyps for $part using $mname" \
+            echo "Beginning stage 6 - gathering hyps for $part using $mname" \
               "with $seed and beam with $beam_width"
             torch-token-data-dir-to-trn \
               "$bdir" "$data/ext/id2token.txt" \
               "$mdir/$part.hyp.$beam_width.utrn"
             python prep/timit.py "$data" filter \
               "$mdir/$part.hyp.$beam_width."{u,}trn
-            echo "Ending stage 5 - gathering hyps for $part using $mname" \
+            echo "Ending stage 6 - gathering hyps for $part using $mname" \
               "with seed $seed and beam with $beam_width"
           fi
         fi

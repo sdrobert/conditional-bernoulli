@@ -1,8 +1,6 @@
 am:
-  data:
-    batch_size: 4
   training:
-    world_size: 2
+    mc_samples: 4
     estimator: sf-biased
   decoding:
     is_ctc: false

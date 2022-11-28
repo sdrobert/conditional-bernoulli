@@ -73,7 +73,7 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
             "srswor",
             "ais-c",
             "ais-g",
-            "ais-l",
+            "ais-s",
             "sf-biased",
             "sf-is",
             "ctc",
@@ -485,6 +485,7 @@ def val_error_rates(
 
 class TrainingAmWrapper(torch.nn.Module):
 
+    am: models.AcousticModel
     estimator_name: str
     M: int
     B: int
@@ -566,7 +567,7 @@ class TrainingAmWrapper(torch.nn.Module):
             if self.pcb is not None and self.estimator_name in {
                 "ais-c",
                 "ais-g",
-                "ais-l",
+                "ais-s",
                 "srswor",
             }:
                 self.pcb.eval()
@@ -580,7 +581,7 @@ class TrainingAmWrapper(torch.nn.Module):
                     proposal = distributions.ConditionalBernoulli(
                         ref_lens, logits=logits.T
                     )
-            elif self.estimator_name in {"ais-c", "ais-g", "ais-l", "srswor"}:
+            elif self.estimator_name in {"ais-c", "ais-g", "ais-s", "srswor"}:
                 proposal = pdistributions.SimpleRandomSamplingWithoutReplacement(
                     ref_lens, lens_, Tp
                 )
@@ -609,7 +610,7 @@ class TrainingAmWrapper(torch.nn.Module):
                     N,
                     prev,
                     Tp,
-                    self.estimator_name in {"direct", "cb", "sf-biased"},
+                    self.estimator_name in {"direct", "cb", "sf-biased", "sf-is"},
                 )
             if self.estimator_name in {"direct", "cb", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(dist, func, self.M, is_log=True)
@@ -629,7 +630,7 @@ class TrainingAmWrapper(torch.nn.Module):
                     adaptation_func = estimators.FixedCardinalityGibbsStatistic(
                         func, density, True
                     )
-                elif self.estimator_name == "ais-l":
+                elif self.estimator_name == "ais-s":
 
                     @torch.no_grad()
                     def adaptation_func(b: torch.Tensor) -> torch.Tensor:
@@ -731,13 +732,13 @@ def train_am_for_epoch(
     torch.manual_seed((epoch + 5) * (controller.params.seed + 113))
     sa = lambda x, _: x
     wn_setup = wn_teardown = lambda: None
-    if do_aug:
-        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            model_ = model.module
-        else:
-            model_ = model
-        assert isinstance(model_, TrainingAmWrapper)
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model_ = model.module
+    else:
+        model_ = model
+    if epoch > 1:
         model_.adaptive = params.estimator.startswith("ais-")
+    if do_aug:
         model_.am.dropout_prob = params.dropout_prob
         model_.am.swap_prob = params.swap_prob
         if params.entropy_init:

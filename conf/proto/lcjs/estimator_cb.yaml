@@ -1,7 +1,6 @@
 am:
-  data:
-    batch_size: 20
   training:
+    mc_samples: 256
     estimator: cb
   decoding:
     is_ctc: false

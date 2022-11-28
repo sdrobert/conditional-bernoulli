@@ -1,7 +1,7 @@
 am:
   training:
     mc_samples: 64
-    mc_burn_in: 32
-    estimator: ais-c
+    mc_burn_in: 1
+    estimator: ais-s
   decoding:
     is_ctc: false

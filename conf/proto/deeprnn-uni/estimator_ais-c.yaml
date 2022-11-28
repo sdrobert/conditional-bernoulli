@@ -1,9 +1,7 @@
 am:
-  data:
-    batch_size: 4
   training:
+    mc_samples: 32
     mc_burn_in: 16
-    world_size: 2
     estimator: ais-c
   decoding:
     is_ctc: false

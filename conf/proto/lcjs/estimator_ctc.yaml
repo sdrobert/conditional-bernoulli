@@ -1,6 +1,4 @@
 am:
-  data:
-    batch_size: 20
   training:
     estimator: ctc
   decoding:

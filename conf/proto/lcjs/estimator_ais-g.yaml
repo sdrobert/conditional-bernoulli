@@ -1,8 +1,0 @@
-am:
-  data:
-    batch_size: 1
-  training:
-    world_size: 20
-    estimator: ais-g
-  decoding:
-    is_ctc: false

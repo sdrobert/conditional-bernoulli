@@ -1,7 +1,5 @@
 model:
   frontend:
-    window_size: 3
-    window_stride: 3
     recurrent_layers: 4
     recurrent_size: 250
     recurrent_bidirectional: true

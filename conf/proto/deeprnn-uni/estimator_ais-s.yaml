@@ -1,6 +1,7 @@
 am:
   training:
     mc_samples: 32
-    estimator: sf-biased
+    mc_burn_in: 1
+    estimator: ais-s
   decoding:
     is_ctc: false

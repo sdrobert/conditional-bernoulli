@@ -7,19 +7,23 @@ model:
   
   latent:
     merge_cat: true
+    hidden_size: 421
+  
+  conditional:
+    hidden_size: 250
 am:
   data:
+    batch_size: 8
     delta_order: 2
     do_mvn: true
     drop_last: true
   training:
-    mc_samples: 32
     dropout_prob: 0.0
-    swap_prob: 0.1
+    swap_prob: 0.0
     aug_er_thresh: 0.5
     weight_noise_std: 0.075
-    early_stopping_burnin: 20
-    early_stopping_patience: 50
+    early_stopping_burnin: 0
+    early_stopping_patience: 20
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true
     optimizer: adam

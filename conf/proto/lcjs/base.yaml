@@ -4,8 +4,6 @@ model:
     window_stride: 3
     convolutional_layers: 0
     recurrent_type: LSTM
-    recurrent_bidirectional: false
-    recurrent_size: 300
 
   latent:
     merge_cat: true
@@ -14,17 +12,16 @@ model:
     hidden_size: 300
 am:
   data:
+    batch_size: 20
     delta_order: 0
     do_mvn: false
     drop_last: true
   training:
     dropout_prob: 0.15
     swap_prob: 0.0
-    aug_er_thresh: 0.0
-    mc_samples: 64
-    mc_burn_in: 32
-    early_stopping_burnin: 20
-    early_stopping_patience: 50
+    aug_er_thresh: 0.9
+    early_stopping_burnin: 0
+    early_stopping_patience: 20
     early_stopping_threshold: 1e-3
     keep_last_and_best_only: true
     log10_learning_rate: -4

@@ -1,7 +1,0 @@
-am:
-  data:
-    batch_size: 20
-  training:
-    estimator: marginal
-  decoding:
-    is_ctc: false
