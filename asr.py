@@ -610,7 +610,7 @@ class TrainingAmWrapper(torch.nn.Module):
                     N,
                     prev,
                     Tp,
-                    self.estimator_name in {"direct", "cb", "sf-biased", "sf-is"},
+                    # self.estimator_name in {"direct", "cb", "sf-biased", "sf-is"},
                 )
             if self.estimator_name in {"direct", "cb", "sf-biased"}:
                 estimator = pestimators.DirectEstimator(dist, func, self.M, is_log=True)
@@ -996,6 +996,7 @@ def train_am(options, dict_):
         torch.save(state_dict, os.path.join(options.model_dir, "final.pt"))
 
 
+@torch.no_grad()
 def decode_am(options, dict_):
     test_dir = os.path.join(options.data_dir, "dev" if options.dev else "test")
 

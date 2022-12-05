@@ -8,6 +8,7 @@
 #SBATCH --wait-all-nodes=1
 
 if [ ! -z "${SLURM_ARRAY_TASK_ID}" ]; then
+  sleep "${SLURM_ARRAY_TASK_ID}"  # avoid some parallel read-write shenanigans
   export TIMIT_OFFSET="$(( ${SLURM_ARRAY_TASK_ID} - 1 ))"
   export TIMIT_STRIDE="${SLURM_ARRAY_TASK_COUNT}"
 fi

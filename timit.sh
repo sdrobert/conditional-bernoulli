@@ -90,7 +90,7 @@ dependencies=( "${ALL_DEPENDENCIES[@]}" )
 estimators=( "${ALL_ESTIMATORS[@]}" )
 lms=( "${ALL_LMS[@]}" )
 regimes=( "${ALL_REGIMES[@]}" )
-beam_widths=( 1 2 4 8 16 32 )
+beam_widths=( 1 2 4 8 16 32 64 128 )
 only=0
 onlycount=0
 cleanup=0
@@ -334,7 +334,7 @@ if [ $stage -le 2 ]; then
               rm -rf "$mdir/training" || true
             fi
           fi
-          echo "Ending stage 2 - training LM for $model, $lm, and seed $seed"
+          echo "Ending stage 2 - trained LM for $model, $lm, and seed $seed"
         fi
       elif ((only<2)); then
         echo "Stage 2 - $mdir/final.pt exists. Skipping"
@@ -408,7 +408,7 @@ if [ $stage -le 3 ]; then
               rm -rf "$mdir/training" || true
             fi
           fi
-          echo "Ending stage 3 - pretraining $mname with seed $seed"
+          echo "Ending stage 3 - pretrained $mname with seed $seed"
         fi
       elif ((only<2)); then
         echo "Stage 3 - $mdir/final.pt exists. Skipping"
@@ -454,7 +454,7 @@ if [ $stage -le 4 ]; then
               rm -rf "$mdir/training" || true
             fi
           fi
-          echo "Ending stage 3 - pretraining $mname with seed $seed"
+          echo "Ending stage 3 - pretrained $mname with seed $seed"
         fi
       elif ((only<2)); then
         echo "Stage 3 - $mdir/final.pt exists. Skipping"
@@ -525,7 +525,7 @@ if [ $stage -le 5 ]; then
             rm -rf "$mdir/training" || true
           fi
         fi
-        echo "Ending stage 5 - training $mname with seed $seed"
+        echo "Ending stage 5 - trained $mname with seed $seed"
       fi
     elif ((only<2)); then
       echo "Stage 4 - $mdir/final.pt exists. Skipping"
@@ -580,7 +580,7 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
                 "${xtra_args[@]}" --beam-width "$beam_width" \
                 "$mpth" "$bdir"
             touch "$bdir/.complete"
-            echo "Ending stage 6 - decoding $part using $mname with seed" \
+            echo "Ending stage 6 - decoded $part using $mname with seed" \
               "$seed and beam width $beam_width"
           fi
         elif ((only<2)); then
@@ -593,11 +593,12 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
             echo "Beginning stage 6 - gathering hyps for $part using $mname" \
               "with $seed and beam with $beam_width"
             torch-token-data-dir-to-trn \
+              --num-workers=4 \
               "$bdir" "$data/ext/id2token.txt" \
               "$mdir/$part.hyp.$beam_width.utrn"
             python prep/timit.py "$data" filter \
               "$mdir/$part.hyp.$beam_width."{u,}trn
-            echo "Ending stage 6 - gathering hyps for $part using $mname" \
+            echo "Ending stage 6 - gathered hyps for $part using $mname" \
               "with seed $seed and beam with $beam_width"
           fi
         fi
