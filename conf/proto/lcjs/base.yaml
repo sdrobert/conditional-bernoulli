@@ -11,12 +11,11 @@ model:
   conditional:
     hidden_size: 300
 am:
-  data:
+  training:
     batch_size: 20
     delta_order: 0
     do_mvn: false
     drop_last: true
-  training:
     dropout_prob: 0.15
     swap_prob: 0.0
     aug_er_thresh: 0.9
@@ -39,14 +38,12 @@ am:
     recurrent_type: LSTM
     recurrent_bidirectional: true
 lm:
-  data:
-    batch_size: 64
-    drop_last: true
-  training:
-    dropout_prob: 0.6
-    swap_prob: 0.1
-    aug_pp_thresh: 17
-    early_stopping_patience: 50
-    early_stopping_threshold: 0.1
-    optimizer: adam
-    momentum: 0.9
+  batch_size: 64
+  drop_last: true
+  dropout_prob: 0.6
+  swap_prob: 0.1
+  aug_pp_thresh: 17
+  early_stopping_patience: 50
+  early_stopping_threshold: 0.1
+  optimizer: adam
+  momentum: 0.9

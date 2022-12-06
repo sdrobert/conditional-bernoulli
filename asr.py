@@ -63,7 +63,9 @@ class MergeParams(param.Parameterized):
     cond_input_is_post = param.Boolean(False)
 
 
-class AcousticModelTrainingStateParams(training.TrainingStateParams):
+class AcousticModelTrainingParams(
+    training.TrainingStateParams, data.SpectDataLoaderParams
+):
     estimator = param.ObjectSelector(
         "direct",
         objects=[
@@ -95,9 +97,12 @@ class AcousticModelTrainingStateParams(training.TrainingStateParams):
     entropy_floor = param.Magnitude(0.1)
     entropy_init = param.Magnitude(0.0)
     world_size = param.Integer(1, bounds=(1, None))
+    centering = param.Boolean(False)
 
 
-class LanguageModelTrainingStateParams(training.TrainingStateParams):
+class LanguageModelTrainingParams(
+    training.TrainingStateParams, data.LangDataLoaderParams
+):
     fraction_held_out = param.Magnitude(0.05)
     aug_pp_thresh = param.Number(0.0, bounds=(0, None))
     dropout_prob = param.Magnitude(0.0)
@@ -121,15 +126,11 @@ def construct_default_param_dict():
             "merge": MergeParams(name="model.merge"),
         },
         "am": {
-            "data": data.SpectDataLoaderParams(name="am.data"),
-            "training": AcousticModelTrainingStateParams(name="am.training"),
+            "training": AcousticModelTrainingParams(name="am.training"),
             "decoding": DecodingParams(name="am.decoding"),
             "pcb": models.FrontendParams(name="am.pcb"),
         },
-        "lm": {
-            "data": data.LangDataLoaderParams(name="lm.data"),
-            "training": LanguageModelTrainingStateParams(name="lm.training"),
-        },
+        "lm": LanguageModelTrainingParams(name="lm.training"),
     }
 
 
@@ -138,7 +139,7 @@ def train_lm_for_epoch(
     loader: data.LangDataLoader,
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
-    params: LanguageModelTrainingStateParams,
+    params: LanguageModelTrainingParams,
     epoch: int,
     device: torch.device,
     quiet: int,
@@ -295,17 +296,17 @@ def train_lm(options, dict_):
     dev_data_dir = os.path.join(options.data_dir, "dev", "ref")
     if not os.path.isdir(dev_data_dir):
         raise ValueError(f"'{dev_data_dir}' is not a directory. Did you initialize it?")
-    seed = dict_["lm"]["training"].seed
+    seed = dict_["lm"].seed
 
-    model = init_model(options, dict_["model"], dict_["am"]["data"].delta_order)
+    model = init_model(options, dict_["model"], dict_["am"]["training"].delta_order)
     model = model.conditional
     model.add_module("post_merger", None)
     model.add_module("input_merger", None)
-    if dict_["lm"]["training"].optimizer == "sgd":
+    if dict_["lm"].optimizer == "sgd":
         optimizer = torch.optim.SGD(
-            model.parameters(), 1e-4, momentum=dict_["lm"]["training"].momentum
+            model.parameters(), 1e-4, momentum=dict_["lm"].momentum
         )
-    elif dict_["lm"]["training"].optimizer == "adam":
+    elif dict_["lm"].optimizer == "adam":
         optimizer = torch.optim.Adam(model.parameters())
     else:
         assert False
@@ -317,24 +318,24 @@ def train_lm(options, dict_):
     os.makedirs(state_dir, exist_ok=True)
 
     controller = training.TrainingStateController(
-        dict_["lm"]["training"], state_csv, state_dir, warn=options.quiet < 1
+        dict_["lm"], state_csv, state_dir, warn=options.quiet < 1
     )
     controller.add_entry("do_aug", int)
 
     loader = data.LangDataLoader(
         train_data_dir,
-        dict_["lm"]["data"],
+        dict_["lm"],
         shuffle=True,
         seed=seed,
         batch_first=False,
-        num_workers=min(get_num_avail_cores() - 1, 4),
+        num_workers=min(max(get_num_avail_cores() - 1, 1), 4),
     )
 
-    val = data.LangDataSet(dev_data_dir, dict_["lm"]["data"])
+    val = data.LangDataSet(dev_data_dir, dict_["lm"])
 
     epoch = controller.get_last_epoch() + 1
     do_aug = bool(controller.get_info(epoch - 1)["do_aug"])
-    aug_pp_thresh = dict_["lm"]["training"].aug_pp_thresh
+    aug_pp_thresh = dict_["lm"].aug_pp_thresh
     while controller.continue_training(epoch - 1):
         if options.quiet < 1:
             print(f"Training epoch {epoch}...", file=sys.stderr)
@@ -343,7 +344,7 @@ def train_lm(options, dict_):
             loader,
             optimizer,
             controller,
-            dict_["lm"]["training"],
+            dict_["lm"],
             epoch,
             options.device,
             options.quiet,
@@ -392,7 +393,7 @@ def eval_lm(options, dict_):
 
     if options.load_path is not None:
         print(f"model: {options.load_path.name}, ", end="")
-        model = init_model(options, dict_["model"], dict_["am"]["data"].delta_order)
+        model = init_model(options, dict_["model"], dict_["am"]["training"].delta_order)
         if options.full_model:
             model.load_state_dict(torch.load(options.load_path, options.device), False)
         model = model.conditional
@@ -487,6 +488,7 @@ class TrainingAmWrapper(torch.nn.Module):
 
     am: models.AcousticModel
     estimator_name: str
+    centering: bool
     M: int
     B: int
     ec: float
@@ -502,6 +504,7 @@ class TrainingAmWrapper(torch.nn.Module):
         M: int,
         B: int,
         pcb: models.AcousticModel = None,
+        centering: bool = False,
     ):
         super().__init__()
         self.am = am
@@ -509,6 +512,7 @@ class TrainingAmWrapper(torch.nn.Module):
         self.ec = 0.0
         self.pretraining = self.mse = self.adaptive = False
         self.pcb = pcb
+        self.centering = centering
 
     def forward_regular(
         self,
@@ -548,6 +552,12 @@ class TrainingAmWrapper(torch.nn.Module):
                     b_, refs, {"latent_input": h, "latent_length": h_lens},
                 )
                 ll = ll.view(b.shape[:-1]).masked_fill(mismatch, -1e10)
+                if func.centering and M > 1:
+                    center = (
+                        (1.0 - torch.eye(M, device=b.device).unsqueeze(1))
+                        * ll.T.detach()
+                    ).logsumexp(2) - math.log(M - 1)
+                    ll = ll.logaddexp(-center)
                 return ll
 
             Tp = self.am.compute_output_time_size(T).item()
@@ -556,6 +566,7 @@ class TrainingAmWrapper(torch.nn.Module):
             func.h_lens = lens_
             func.refs = refs
             func.ref_lens = ref_lens
+            func.centering = self.centering
             prev = {
                 "input": h,
                 "post": h,
@@ -650,6 +661,7 @@ class TrainingAmWrapper(torch.nn.Module):
                     maker,
                     self.B,
                     is_log=True,
+                    centering=self.centering,
                 )
             v = v + estimator()
         return -v.mean()
@@ -717,7 +729,7 @@ def train_am_for_epoch(
     loader: data.SpectTrainingDataLoader,
     optimizer: torch.optim.Optimizer,
     controller: training.TrainingStateController,
-    params: AcousticModelTrainingStateParams,
+    params: AcousticModelTrainingParams,
     epoch: int,
     device: torch.device,
     quiet: int,
@@ -852,10 +864,13 @@ def train_am(options, dict_):
     seed = dict_["am"]["training"].seed
 
     model_ = model = init_model(
-        options, dict_["model"], dict_["am"]["data"].delta_order, options.pretraining
+        options,
+        dict_["model"],
+        dict_["am"]["training"].delta_order,
+        options.pretraining,
     )
     if dict_["am"]["training"].estimator == "pcb" or options.pcb_path is not None:
-        pcb = init_pcb(options, dict_["am"]["pcb"], dict_["am"]["data"].delta_order)
+        pcb = init_pcb(options, dict_["am"]["pcb"], dict_["am"]["training"].delta_order)
     else:
         pcb = None
     model = TrainingAmWrapper(
@@ -864,6 +879,7 @@ def train_am(options, dict_):
         dict_["am"]["training"].mc_samples,
         dict_["am"]["training"].mc_burn_in,
         pcb,
+        dict_["am"]["training"].centering,
     )
     model.pretraining = options.pretraining
     if rank >= 0:
@@ -899,7 +915,7 @@ def train_am(options, dict_):
 
     train_loader = data.SpectDataLoader(
         train_dir,
-        dict_["am"]["data"],
+        dict_["am"]["training"],
         shuffle=True,
         seed=seed,
         num_workers=num_data_workers,
@@ -911,7 +927,7 @@ def train_am(options, dict_):
 
     dev_loader = data.SpectDataLoader(
         dev_dir,
-        dict_["am"]["data"],
+        dict_["am"]["training"],
         shuffle=False,
         batch_first=False,
         num_workers=num_data_workers,
@@ -1000,7 +1016,7 @@ def train_am(options, dict_):
 def decode_am(options, dict_):
     test_dir = os.path.join(options.data_dir, "dev" if options.dev else "test")
 
-    model = init_model(options, dict_["model"], dict_["am"]["data"].delta_order)
+    model = init_model(options, dict_["model"], dict_["am"]["training"].delta_order)
     model.eval()
 
     if dict_["am"]["decoding"].style == "beam":
@@ -1019,7 +1035,7 @@ def decode_am(options, dict_):
 
     test_set = data.SpectDataSet(
         test_dir,
-        params=dict_["am"]["data"],
+        params=dict_["am"]["training"],
         feat_mean=stats["mean"],
         feat_std=stats["std"],
         suppress_alis=True,
@@ -1135,7 +1151,7 @@ def main(args=None):
     options = parser.parse_args(args)
 
     if options.seed is not None:
-        dict_["am"]["training"].seed = dict_["lm"]["training"].seed = options.seed
+        dict_["am"]["training"].seed = dict_["lm"].seed = options.seed
 
     if options.command == "train_lm":
         return train_lm(options, dict_)

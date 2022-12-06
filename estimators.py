@@ -100,6 +100,7 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
     adaptation_func: _e.FunctionOnSample
     proposal_maker: ProposalMaker
     density: torch.distributions.Distribution
+    centering: bool
 
     def __init__(
         self,
@@ -113,9 +114,11 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
         initial_sample: Optional[torch.Tensor] = None,
         initial_sample_tries: int = 1000,
         is_log: bool = False,
+        centering: bool = False,
     ) -> None:
         self.adaptation_func = adaptation_func
         self.proposal_maker = proposal_maker
+        self.centering = centering
         if burn_in < 1:
             raise ValueError("burn_in must be at least 1")
         super().__init__(
@@ -157,9 +160,9 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
                 lpp = Q.log_prob(sample)
             if self.is_log:
                 density = laf + lpd
-                lomegas.append(density - lpp)
+                lomegas.append((density - lpp).T)
             else:
-                omegas.append(laf * (lpd - lpp).exp())
+                omegas.append((laf * (lpd - lpp).exp()).T)
                 laf = laf.abs().log()
                 density = laf + lpd
             with torch.no_grad():
@@ -177,11 +180,25 @@ class AisImhEstimator(_e.IndependentMetropolisHastingsEstimator):
             )
             # if n % 8 == 0:
             #     print(n, h_last[0, :100])
-        # cat not stack b/c 0 dim is sample dim
+        # cat not stack b/c 1 dim is sample dim
         if self.is_log:
-            v = torch.cat(lomegas).logsumexp(0) - math.log(self.mc_samples)
+            v = torch.cat(lomegas, 1)
+            if self.centering and self.mc_samples > 1:
+                center = (
+                    (1 - torch.eye(self.mc_samples, device=v.device)).unsqueeze(0)
+                    * v.unsqueeze(1).detach()
+                ).logsumexp(2) - math.log(self.mc_samples - 1)
+                v = v.logaddexp(-center)
+            v = v.logsumexp(1) - math.log(self.mc_samples)
         else:
-            v = torch.cat(omegas).mean(0)
+            v = torch.cat(omegas, 1)
+            if self.centering and self.mc_samples > 1:
+                center = (
+                    (1 - torch.eye(self.mc_samples, device=v.device)).unsqueeze(0)
+                    * v.unsqueeze(1).detach()
+                ).sum(2) / (self.mc_samples - 1)
+                v = v - center
+            v = v.mean(1)
         return v
 
 
