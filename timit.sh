@@ -92,7 +92,7 @@ lms=( "${ALL_LMS[@]}" )
 regimes=( "${ALL_REGIMES[@]}" )
 beam_widths=( 1 2 4 8 16 32 64 128 )
 only=0
-onlycount=0
+declare -A onlyoffsets
 cleanup=0
 
 # for determinism
@@ -265,7 +265,7 @@ if [ $stage -le 1 ]; then
       exit 1
     fi
     argcheck_is_writable d "$data"
-    ((onlycount+=1))
+    onlyoffsets[0]=1
     if ((only<2)); then
       echo "Beginning stage 1"
       python prep/timit.py "$data" preamble "$timit"
@@ -285,7 +285,7 @@ if [ $stage -le 1 ]; then
   elif ((only<2)); then
     echo "$data/.complete exists already. Skipping stage 1."
   fi
-  ((only>1)) && echo "$onlycount"
+  ((only>1)) && (IFS=,; echo "${!onlyoffsets[*]}")
   ((only)) && exit 0
 fi
 
@@ -293,11 +293,10 @@ fi
 if [ $stage -le 2 ]; then
   if [[ "${regimes[*]}" =~ "pretrained" ]]; then
     N=$(get_combos model lm pretrained seed | wc -l)
-    onlycountmin=0
     if [ $N -gt 0 ]; then
       mkdir -p "$lmdir"
       if [ ! -f "$lmdir/results.ngram.txt" ] && [ $OFFSET -eq 0 ]; then
-        onlycountmin=1
+        onlyoffsets[0]=1
         if ((only<2)); then
           echo "Beginning stage 2 - results.ngram.txt"
           python asr.py "$data" $quiet eval_lm > "$lmdir/results.ngram.txt" \
@@ -313,10 +312,9 @@ if [ $stage -le 2 ]; then
       dependency=indep
       estimator=marginal
       mdir="$lmdir/${model}_${lm}/$seed"
-      curonlycount=0
       if [ ! -f "$mdir/final.pt" ]; then
         rm -f "$lmdir/results.${model}_${lm}.$seed.txt" || true
-        curonlycount=1
+        onlyoffsets[$i]=1
         if ((only<2)); then
           echo "Beginning stage 2 - training LM for $model, $lm and seed $seed"
           yml="$(combine)"
@@ -341,7 +339,7 @@ if [ $stage -le 2 ]; then
       fi
 
       if [ ! -f "$lmdir/results.${model}_${lm}.$seed.txt" ]; then
-        curonlycount=1
+        onlyoffsets[$i]=1
         if ((only<2)); then
           echo "Beginning stage 2 - computing LM perplexity $model, $lm, and seed $seed"
           yml="$(combine)"
@@ -353,15 +351,11 @@ if [ $stage -le 2 ]; then
           echo "Ending stage 2 - computing LM perplexity $model, $lm, and seed $seed"
         fi
       fi
-      ((onlycount+=curonlycount)) || true
     done
-    if [ $onlycount = 0 ]; then
-      onlycount=$onlycountmin
-    fi
   elif ((only<2)); then
     echo "'pretrained' not in selected regimes - skipping stage 2"
   fi
-  ((only>1)) && echo "$onlycount"
+  ((only>1)) && (IFS=,; echo "${!onlyoffsets[*]}")
   ((only)) && exit 0
 fi
 
@@ -387,7 +381,7 @@ if [ $stage -le 3 ]; then
         fi
       fi
       if [ ! -f "$mdir/final.pt" ]; then
-        ((onlycount+=1))
+        onlyoffsets[$i]=1
         if ((only<2)); then
           echo "Beginning stage 3 - pretraining $mname with seed $seed"
           yml="$(combine)"
@@ -417,7 +411,7 @@ if [ $stage -le 3 ]; then
   elif ((only<2)); then
     echo "'pretrained' not in selected regimes - skipping stage 3"
   fi
-  ((only>1)) && echo "$onlycount"
+  ((only>1)) && (IFS=,; echo "${!onlyoffsets[*]}")
   ((only)) && exit 0
 fi
 
@@ -433,7 +427,7 @@ if [ $stage -le 4 ]; then
       estimator=marginal
       mdir="$encdir/$mname/$seed"
       if [ ! -f "$mdir/final.pt" ]; then
-        ((onlycount+=1))
+        onlyoffsets[$i]=1
         if ((only<2)); then
           echo "Beginning stage 4 - pretraining $mname with seed $seed"
           yml="$(combine)"
@@ -463,7 +457,7 @@ if [ $stage -le 4 ]; then
   elif ((only<2)); then
     echo "'pcb' not in selected regimes - skipping stage 4"
   fi
-  ((only>1)) && echo "$onlycount"
+  ((only>1)) && (IFS=,; echo "${!onlyoffsets[*]}")
   ((only)) && exit 0
 fi 
 
@@ -504,7 +498,7 @@ if [ $stage -le 5 ]; then
       xtra_args+=( "--pcb-path" "$pcbpth" )
     fi
     if [ ! -f "$mdir/final.pt" ]; then
-      ((onlycount+=1))
+      onlyoffsets[$i]=1
       if ((only<2)); then
         mkdir -p "$mdir"
         yml="$(combine)"
@@ -531,7 +525,7 @@ if [ $stage -le 5 ]; then
       echo "Stage 4 - $mdir/final.pt exists. Skipping"
     fi
   done
-  ((only>1)) && echo "$onlycount"
+  ((only>1)) && (IFS=,; echo "${!onlyoffsets[*]}")
   ((only)) && exit 0
 fi
 
@@ -549,11 +543,7 @@ if [ $stage -le 6 ]; then
           "(did you finish stage 5?)" 1>&2
       exit 1
     fi
-    curonlycount=0
     for part in dev test; do
-      if ((curonlycount)) && ((only>1)); then
-        break
-      fi
       hdir="$mdir/hyp/$part"
       if [ "$part" = dev ]; then
         xtra_args=( "--dev" )
@@ -569,7 +559,7 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         bdir="$hdir/$beam_width"
         mkdir -p "$bdir"
         if [ ! -f "$bdir/.complete" ]; then
-          curonlycount=1
+          onlyoffsets[$i]=1
           if ((only<2)); then
             echo "Beginning stage 6 - decoding $part using $mname with seed" \
               "$seed and beam width $beam_width"
@@ -588,7 +578,7 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
             "$mname with seed $seed and beam width $beam_width"
         fi
         if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
-          curonlycount=1
+          onlyoffsets[$i]=1
           if ((only<2)); then
             echo "Beginning stage 6 - gathering hyps for $part using $mname" \
               "with $seed and beam with $beam_width"
@@ -616,17 +606,16 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
         fi
       fi
       if [ ! -f "$amdir/$mname/results.$part.$seed.txt" ]; then
-        curonlycount=1
+        onlyoffsets[$i]=1
         if ((only<2)); then
           python prep/error-rates-from-trn.py \
             "$data/ext/$part.ref.trn" "$mdir/$part.hyp."*.trn \
             --suppress-warning > "$amdir/$mname/results.$part.$seed.txt"
         fi
       fi
-      ((onlycount+=curonlycount)) || true
     done
   done
-  ((only>1)) && echo "$onlycount"
+  ((only>1)) && (IFS=,; echo "${!onlyoffsets[*]}")
   ((only)) && exit 0
 fi
 

@@ -9,8 +9,8 @@
 
 if [ ! -z "${SLURM_ARRAY_TASK_ID}" ]; then
   sleep "${SLURM_ARRAY_TASK_ID}"  # avoid some parallel read-write shenanigans
-  export TIMIT_OFFSET="$(( ${SLURM_ARRAY_TASK_ID} - 1 ))"
-  export TIMIT_STRIDE="${SLURM_ARRAY_TASK_COUNT}"
+  export TIMIT_OFFSET="${SLURM_ARRAY_TASK_ID}"
+  export TIMIT_STRIDE="$(( ${SLURM_ARRAY_TASK_MAX} + 1))"
 fi
 
 export MASTER_PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')"

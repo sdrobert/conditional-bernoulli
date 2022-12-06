@@ -16,9 +16,9 @@ check_and_do() {
   local opts="$1"
   shift
   local leftover="$(./timit.sh "$@" $extra_flags -xx)"
-  if ((leftover>0)); then
-    echo "Starting: ./timit.sh $* -xq $extra_flags ($leftover tasks)"
-    sbatch $opts --ntasks=1 -a 1-$leftover -W scripts/slurm/timit_wrapper.sh "$@" -xq $extra_flags
+  if [ ! -z "$leftover" ]; then
+    echo "Starting: ./timit.sh $* -xq $extra_flags ($leftover)"
+    sbatch $opts --ntasks=1 -a $leftover -W scripts/slurm/timit_wrapper.sh "$@" -xq $extra_flags
     v=$?
     if [ $v -eq 0 ]; then
       echo "./timit.sh $* -xq $extra_flags succeeded"
