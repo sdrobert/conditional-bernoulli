@@ -425,9 +425,6 @@ class TokenSwapper(torch.nn.Module):
         return x
 
 
-_COUNT = 0
-
-
 class LstmLm(MixableSequentialLanguageModel):
 
     input_size: int
@@ -461,8 +458,6 @@ class LstmLm(MixableSequentialLanguageModel):
     ):
         if params is None:
             params = LstmLmParams()
-        # FIXME(sdrobert): bad coding
-        self._params = params
         using_names = [
             input_name,
             alt_input_name,
@@ -691,6 +686,10 @@ class LstmLm(MixableSequentialLanguageModel):
                 idx_ = (idx - 1).clamp_min_(0)
                 tok = in_.gather(0, idx_).masked_fill_(idx == 0, A)
                 tok = tok.squeeze(0)
+            if self.alt_input_name in prev:
+                cur[self.alt_input_name] = prev[self.alt_input_name]
+            else:
+                cur[self.alt_input_name] = tok.unsqueeze(0)
             in_ = self.dropout(self.alt_embedder(tok))
             if x is None:
                 x = in_
@@ -935,10 +934,11 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             Lmax = L
         prev = self.update_input(prev.copy(), latent_hist)
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
-        hist = conditional_and_latent_hist_to_extended(
-            latent_hist, cond_hist, self.conditional.vocab_size, False, cond_lens
-        )
-        prev_latent[self.extended_hist_name] = hist[:-1]
+        if self.latent.alt_embedder is not None:
+            hist = conditional_and_latent_hist_to_extended(
+                latent_hist, cond_hist, self.conditional.vocab_size, False, cond_lens
+            )
+            prev_latent[self.extended_hist_name] = hist[:-1]
         hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
         if joint:
             llogits = self.latent.calc_all_logits(prev_latent, hidden).log_softmax(2)
@@ -1537,9 +1537,11 @@ def test_joint_latent_model():
 def test_lstm_lm():
     torch.manual_seed(3)
 
-    T, N, V, H = 10, 3, 5, 20
+    T, N, V, A, H = 10, 3, 5, 4, 20
     loss_fn = torch.nn.CrossEntropyLoss()
-    for embedding_size, input_size in itertools.product(range(0, 10, 5), repeat=2):
+    for embedding_size, alt_embedding_size, input_size in itertools.product(
+        range(0, 10, 5), repeat=3
+    ):
         input_posts = [False, True]
         if embedding_size == 0:
             if input_size == 0:
@@ -1550,6 +1552,7 @@ def test_lstm_lm():
                 continue
             print(
                 f"embedding_size={embedding_size}, "
+                f"alt_embedding_size={alt_embedding_size}, "
                 f"input_size={input_size}, input_post={input_post}"
             )
             post_input_size = 0
@@ -1558,14 +1561,22 @@ def test_lstm_lm():
             if input_post:
                 post_input_size, input_size = input_size, post_input_size
                 input_name = "post"
-            params = LstmLmParams(embedding_size=embedding_size, hidden_size=H,)
+            params = LstmLmParams(
+                embedding_size=embedding_size,
+                alt_embedding_size=alt_embedding_size,
+                hidden_size=H,
+            )
             hist = torch.randint(V, (T, N))
+            alt = torch.randint(A, (T - 1, N))
             length = torch.randint(T + 1, (N,))
             prev = {
                 input_name: torch.randn(T, N, V),
+                "alt": alt,
                 "length": length,
             }
-            lm = LstmLm(V, input_size, post_input_size=post_input_size, params=params)
+            lm = LstmLm(
+                V, input_size, A, post_input_size=post_input_size, params=params
+            )
             logits_exp = lm(hist[:-1], prev)
             for n in range(N):
                 assert (
