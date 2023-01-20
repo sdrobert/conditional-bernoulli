@@ -547,6 +547,9 @@ if [ $stage -le 6 ]; then
     fi
     for part in dev test; do
       hdir="$mdir/hyp/$part"
+      if [ ! -z "${onlyoffsets[$i]}" ] && ((only>1)); then
+        break
+      fi
       if [ "$part" = dev ]; then
         xtra_args=( "--dev" )
         active_widths=( "${beam_widths[@]}" )

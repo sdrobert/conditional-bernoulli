@@ -5,7 +5,7 @@ mkdir -p logs/timit
 extra_flags="${1:-"-j"}"
 timit_dir="${2:-"$HOME/Databases/TIMIT"}"
 cpu_opts="${3:-"-p cpu"}"
-gpu_opts="${4:-"-p p100 --gpus-per-task=1"}"
+gpu_opts="${4:-"-p t4v2 --gpus-per-task=1"}"
 
 if [ ! -d "$timit_dir" ]; then
   echo "$timit_dir is not a directory"
