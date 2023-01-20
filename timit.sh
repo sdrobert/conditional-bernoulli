@@ -562,12 +562,15 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
       for beam_width in "${active_widths[@]}"; do
         beam_width="$(printf '%02d' $((10#$beam_width + 0)))"
         bdir="$hdir/$beam_width"
-        mkdir -p "$bdir"
-        if [ ! -f "$bdir/.complete" ]; then
+        # don't need to regenerate hypotheses if we've already got their
+        # transcriptions
+        if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
           onlyoffsets[$i]=1
-          if ((only<2)); then
+          ((only>1)) && break
+          if [ ! -f "$bdir/.complete" ]; then
             echo "Beginning stage 6 - decoding $part using $mname with seed" \
               "$seed and beam width $beam_width"
+            mkdir -p "$bdir"
             python asr.py "$data" $quiet \
               --read-yaml "$yml" \
               --device "$device" \
@@ -577,25 +580,20 @@ $1 ~ /^best/ {a=gensub(/.*\/dev\.hyp\.([^.]*).*$/, "\\1", 1, $3); print a}
             touch "$bdir/.complete"
             echo "Ending stage 6 - decoded $part using $mname with seed" \
               "$seed and beam width $beam_width"
+          else
+            echo "'$bdir/.complete' exists. Skipping decoding $part using" \
+              "$mname with seed $seed and beam width $beam_width"
           fi
-        elif ((only<2)); then
-          echo "'$bdir/.complete' exists. Skipping decoding $part using" \
-            "$mname with seed $seed and beam width $beam_width"
-        fi
-        if [ ! -f "$mdir/$part.hyp.$beam_width.trn" ]; then
-          onlyoffsets[$i]=1
-          if ((only<2)); then
-            echo "Beginning stage 6 - gathering hyps for $part using $mname" \
-              "with $seed and beam with $beam_width"
-            torch-token-data-dir-to-trn \
-              --num-workers=4 \
-              "$bdir" "$data/ext/id2token.txt" \
-              "$mdir/$part.hyp.$beam_width.utrn"
-            python prep/timit.py "$data" filter \
-              "$mdir/$part.hyp.$beam_width."{u,}trn
-            echo "Ending stage 6 - gathered hyps for $part using $mname" \
-              "with seed $seed and beam with $beam_width"
-          fi
+          echo "Beginning stage 6 - gathering hyps for $part using $mname" \
+            "with $seed and beam with $beam_width"
+          torch-token-data-dir-to-trn \
+            --num-workers=4 \
+            "$bdir" "$data/ext/id2token.txt" \
+            "$mdir/$part.hyp.$beam_width.utrn"
+          python prep/timit.py "$data" filter \
+            "$mdir/$part.hyp.$beam_width."{u,}trn
+          echo "Ending stage 6 - gathered hyps for $part using $mname" \
+            "with seed $seed and beam with $beam_width"
         fi
       done
       if ((only<2)); then
