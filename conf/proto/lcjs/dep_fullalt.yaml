@@ -9,7 +9,7 @@ model:
     cond_input_is_post: false
 am:
   training:
-    batch_size: 10
-    world_size: 2
+    batch_size: 5
+    world_size: 4
   decoding:
     style: beam
