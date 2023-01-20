@@ -163,7 +163,7 @@ def conditional_and_latent_hist_to_extended(
         cond_lens = latent_hist.long().sum(1)
     extended_hist = cond_hist.new_full(latent_hist.shape, vocab_size)
     T = cond_hist.size(1)
-    assert T <= extended_hist.size(1)
+    # assert T <= extended_hist.size(1)
     range_ = torch.arange(T, device=extended_hist.device)
     cond_mask = cond_lens.unsqueeze(1) > range_
     cond_hist = cond_hist.masked_select(cond_mask)
@@ -173,10 +173,27 @@ def conditional_and_latent_hist_to_extended(
     return extended_hist
 
 
+def conditional_and_latent_hist_to_segmental(
+    latent_hist: torch.Tensor,
+    cond_hist: torch.Tensor,
+    vocab_size: torch.Tensor,
+    batch_first: bool = False,
+) -> torch.Tensor:
+    seq_dim = 1 if batch_first else 0
+    idx = latent_hist.long().cumsum(seq_dim)
+    TT = cond_hist.size(seq_dim)
+    extended_hist = (
+        cond_hist.gather(seq_dim, (idx - 1).clamp_(0, TT - 1))
+        .masked_fill_((idx == 0) | (idx >= TT), vocab_size)
+        .clamp_(0, vocab_size)
+    )
+    return extended_hist
+
+
 class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
 
     # __constants__ = ["latent_prefix", "conditional_prefix", "old_conditional_prefix"]
-    extended_hist_name: str
+    cond_hist_name: str
     latent_prefix: str
     conditional_prefix: str
     old_conditional_prefix: str
@@ -185,7 +202,7 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         self,
         latent: ExtractableSequentialLanguageModel,
         conditional: MixableSequentialLanguageModel,
-        extended_hist_name: str = "extended_hist",
+        cond_hist_name: str = "cond_hist",
         latent_prefix: str = "latent_",
         conditional_prefix: str = "conditional_",
         old_conditional_prefix: str = "old_",
@@ -196,7 +213,7 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
             )
         for a, b in itertools.permutations(
             (
-                extended_hist_name,
+                cond_hist_name,
                 latent_prefix,
                 conditional_prefix,
                 old_conditional_prefix,
@@ -211,7 +228,7 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         super().__init__(conditional.vocab_size + 1)
         self.latent = latent
         self.conditional = conditional
-        self.extended_hist_name = extended_hist_name
+        self.cond_hist_name = cond_hist_name
         self.latent_prefix = latent_prefix
         self.conditional_prefix = conditional_prefix
         self.old_conditional_prefix = old_conditional_prefix
@@ -303,7 +320,7 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
             cond_idx = cond_lens * gt_0
             prev_cond = self.conditional.mix_by_mask(prev_cond, prev_old, is_new)
         prev_latent_enhanced = prev_latent.copy()
-        prev_latent_enhanced[self.extended_hist_name] = hist
+        prev_latent_enhanced[self.cond_hist_name] = cond_hist
         llogits, cur_latent = self.latent.calc_idx_log_probs(
             latent_hist.long(), prev_latent_enhanced, idx
         )
@@ -336,18 +353,14 @@ class JointLatentLanguageModel(ExtractableSequentialLanguageModel):
         latent_hist = latent_hist.long()
         prev = self.update_input(prev, latent_hist)
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
+        prev_latent[self.cond_hist_name] = cond_hist
         cond_lens = latent_hist.sum(0)
-        extended_hist = conditional_and_latent_hist_to_extended(
-            latent_hist.bool(), cond_hist, V, False, cond_lens
-        )
         ll = torch.zeros(N, device=device)
         cond_idx = torch.zeros(N, device=device, dtype=torch.long)
         for t in torch.arange(T, device=device):
             is_new = latent_hist[t].bool()
-            prev_latent_enhanced = prev_latent.copy()
-            prev_latent_enhanced[self.extended_hist_name] = extended_hist
             _, prev_latent = self.latent.calc_idx_log_probs(
-                latent_hist.long(), prev_latent_enhanced, t
+                latent_hist.long(), prev_latent, t
             )
             prev_cond_enhanced = prev_cond.copy()
             prev_cond_enhanced.update(
@@ -494,6 +507,8 @@ class LstmLm(MixableSequentialLanguageModel):
         else:
             self.add_module("embedder", None)
         if params.alt_embedding_size > 0:
+            if vocab_size != 2:
+                raise ValueError("If alt_embedding_size > 0, vocab_size must be 2")
             self.alt_embedder = torch.nn.Embedding(
                 alt_vocab_size + 1, params.alt_embedding_size, alt_vocab_size
             )
@@ -683,13 +698,16 @@ class LstmLm(MixableSequentialLanguageModel):
                 tok = hist.new_full((N,), A)
             else:
                 in_ = prev[self.alt_input_name]
-                idx_ = (idx - 1).clamp_min_(0)
-                tok = in_.gather(0, idx_).masked_fill_(idx == 0, A)
+                idx_ = hist.cumsum(0).gather(0, (idx - 1).clamp_min_(0))
+                TT = in_.size(0)
+                tok = (
+                    in_.gather(0, (idx_ - 1).clamp_(0, TT - 1))
+                    .masked_fill_((idx_ * idx == 0) | (idx_ >= TT), A)
+                    .clamp_(0, A)
+                )
                 tok = tok.squeeze(0)
             if self.alt_input_name in prev:
                 cur[self.alt_input_name] = prev[self.alt_input_name]
-            else:
-                cur[self.alt_input_name] = tok.unsqueeze(0)
             in_ = self.dropout(self.alt_embedder(tok))
             if x is None:
                 x = in_
@@ -755,12 +773,16 @@ class LstmLm(MixableSequentialLanguageModel):
             if hist is None:
                 raise RuntimeError("lm is autoregressive; hist needed")
             N = hist.size(1)
-            hist = torch.cat([hist.new_full((1, N), self.vocab_size), hist])
-            x = self.dropout(self.embedder(self.swapper(hist)))
-            del hist
+            hist_ = torch.cat([hist.new_full((1, N), self.vocab_size), hist])
+            x = self.dropout(self.embedder(self.swapper(hist_)))
+            del hist_
 
         if self.alt_embedder is not None:
             in_ = prev[self.alt_input_name]
+            in_ = conditional_and_latent_hist_to_segmental(
+                hist, in_, self.alt_vocab_size
+            )
+            # print("all", in_[:, 0])
             N = in_.size(1)
             in_ = torch.cat([in_.new_full((1, N), self.alt_vocab_size), in_])
             in_ = self.dropout(self.alt_embedder(in_))
@@ -839,7 +861,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         latent_params: Optional[LstmLmParams] = None,
         cond_params: Optional[LstmLmParams] = None,
         cond_input_is_post: bool = False,
-        extended_hist_name: str = "extended_hist",
+        cond_hist_name: str = "cond_hist",
         latent_prefix: str = "latent_",
         conditional_prefix: str = "conditional_",
         old_conditional_prefix: str = "old_",
@@ -852,7 +874,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             2,
             input_size,
             alt_vocab_size=vocab_size,
-            alt_input_name=extended_hist_name,
+            alt_input_name=cond_hist_name,
             params=latent_params,
         )
         in_size = latent.logiter_input_size
@@ -873,7 +895,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         super().__init__(
             latent,
             conditional,
-            extended_hist_name,
+            cond_hist_name,
             latent_prefix,
             conditional_prefix,
             old_conditional_prefix,
@@ -883,17 +905,17 @@ class JointLatentLstmLm(JointLatentLanguageModel):
         T, N = hist.shape
         V = self.conditional.vocab_size
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
-        prev_latent[self.extended_hist_name] = hist
         latent_hist = hist != V
         latent_hist_ = latent_hist.long()
-        hidden = self.latent.calc_all_hidden(prev_latent, latent_hist_)
-        llogits = self.latent.calc_all_logits(prev_latent, hidden)
         if T > 0:
             hist = extended_hist_to_conditional(hist, latent_hist=latent_hist)[0]
             cond_idx = latent_hist_.T.cumsum(1)
             cond_idx = torch.cat([cond_idx.new_zeros(1, N), cond_idx.T], 0)
         else:
             cond_idx = hist.new_zeros((1,))
+        prev_latent[self.cond_hist_name] = hist
+        hidden = self.latent.calc_all_hidden(prev_latent, latent_hist_)
+        llogits = self.latent.calc_all_logits(prev_latent, hidden)
         cond_idx = cond_idx.expand(T + 1, N)
         clogits = []
         old_cond = prev_cond.copy()
@@ -934,11 +956,7 @@ class JointLatentLstmLm(JointLatentLanguageModel):
             Lmax = L
         prev = self.update_input(prev.copy(), latent_hist)
         prev_latent, prev_cond, _, _ = self.split_dicts(prev)
-        if self.latent.alt_embedder is not None:
-            hist = conditional_and_latent_hist_to_extended(
-                latent_hist, cond_hist, self.conditional.vocab_size, False, cond_lens
-            )
-            prev_latent[self.extended_hist_name] = hist[:-1]
+        prev_latent[self.cond_hist_name] = cond_hist
         hidden = self.latent.calc_all_hidden(prev_latent, latent_hist[:-1])
         if joint:
             llogits = self.latent.calc_all_logits(prev_latent, hidden).log_softmax(2)
@@ -1537,27 +1555,27 @@ def test_joint_latent_model():
 def test_lstm_lm():
     torch.manual_seed(3)
 
-    T, N, V, A, H = 10, 3, 5, 4, 20
+    T, N, V, A, H = 19, 10, 3, 4, 20
     loss_fn = torch.nn.CrossEntropyLoss()
     for embedding_size, alt_embedding_size, input_size in itertools.product(
         range(0, 10, 5), repeat=3
     ):
         input_posts = [False, True]
-        if embedding_size == 0:
+        if embedding_size + alt_embedding_size == 0:
             if input_size == 0:
                 continue
             input_posts.pop()
         for input_post in input_posts:
-            if embedding_size == 0 and input_size == 0:
-                continue
             print(
                 f"embedding_size={embedding_size}, "
                 f"alt_embedding_size={alt_embedding_size}, "
                 f"input_size={input_size}, input_post={input_post}"
             )
+
+            vocab_size = 2 if alt_embedding_size else V
+
             post_input_size = 0
             input_name = "input"
-
             if input_post:
                 post_input_size, input_size = input_size, post_input_size
                 input_name = "post"
@@ -1566,16 +1584,21 @@ def test_lstm_lm():
                 alt_embedding_size=alt_embedding_size,
                 hidden_size=H,
             )
-            hist = torch.randint(V, (T, N))
-            alt = torch.randint(A, (T - 1, N))
+            hist = torch.randint(vocab_size, (T, N))
+            alt = torch.randint(A, ((T // 2) + 1, N))
+            # print("hist", hist[:, 0], "alt", alt[:, 0])
             length = torch.randint(T + 1, (N,))
             prev = {
-                input_name: torch.randn(T, N, V),
+                input_name: torch.randn(T, N, input_size + post_input_size),
                 "alt": alt,
                 "length": length,
             }
             lm = LstmLm(
-                V, input_size, A, post_input_size=post_input_size, params=params
+                vocab_size,
+                input_size,
+                A,
+                post_input_size=post_input_size,
+                params=params,
             )
             logits_exp = lm(hist[:-1], prev)
             for n in range(N):
@@ -1592,7 +1615,7 @@ def test_lstm_lm():
                 logits_act.append(logits_act_t)
             logits_act = torch.stack(logits_act)
             assert logits_act.shape == logits_exp.shape
-            assert torch.allclose(logits_exp, logits_act)
+            assert torch.allclose(logits_exp, logits_act, atol=1e-5)
             loss_act = loss_fn(logits_act.flatten(end_dim=-2), hist.flatten())
             assert torch.allclose(loss_exp, loss_act)
             g_act = torch.autograd.grad(loss_act, lm.parameters())

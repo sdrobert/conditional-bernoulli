@@ -1,0 +1,15 @@
+model:
+  frontend:
+    recurrent_layers: 0
+  latent:
+    num_layers: 6
+    embedding_size: 1
+    alt_embedding_size: 1
+  merge:
+    cond_input_is_post: false
+am:
+  training:
+    batch_size: 10
+    world_size: 2
+  decoding:
+    style: beam

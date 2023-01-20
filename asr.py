@@ -570,6 +570,7 @@ class TrainingAmWrapper(torch.nn.Module):
             prev = {
                 "input": h,
                 "post": h,
+                "cond_hist": refs,
                 "length": lens_,
                 "given": ref_lens,
             }
