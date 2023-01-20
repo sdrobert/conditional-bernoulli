@@ -135,6 +135,8 @@ def extended_hist_to_conditional(
     if latent_hist is None:
         assert vocab_size is not None
         latent_hist = hist != vocab_size
+    else:
+        latent_hist = latent_hist.bool()
     if not batch_first:
         hist, latent_hist = hist.T, latent_hist.T
     T = hist.size(1)
@@ -161,10 +163,9 @@ def conditional_and_latent_hist_to_extended(
         latent_hist, cond_hist = latent_hist.T, cond_hist.T
     if cond_lens is None:
         cond_lens = latent_hist.long().sum(1)
+    TT = cond_hist.size(1)
     extended_hist = cond_hist.new_full(latent_hist.shape, vocab_size)
-    T = cond_hist.size(1)
-    # assert T <= extended_hist.size(1)
-    range_ = torch.arange(T, device=extended_hist.device)
+    range_ = torch.arange(TT, device=extended_hist.device)
     cond_mask = cond_lens.unsqueeze(1) > range_
     cond_hist = cond_hist.masked_select(cond_mask)
     extended_hist.masked_scatter_(latent_hist.bool(), cond_hist)
@@ -184,7 +185,7 @@ def conditional_and_latent_hist_to_segmental(
     TT = cond_hist.size(seq_dim)
     extended_hist = (
         cond_hist.gather(seq_dim, (idx - 1).clamp_(0, TT - 1))
-        .masked_fill_((idx == 0) | (idx >= TT), vocab_size)
+        .masked_fill_((idx == 0) | (idx > TT), vocab_size)
         .clamp_(0, vocab_size)
     )
     return extended_hist
@@ -702,7 +703,7 @@ class LstmLm(MixableSequentialLanguageModel):
                 TT = in_.size(0)
                 tok = (
                     in_.gather(0, (idx_ - 1).clamp_(0, TT - 1))
-                    .masked_fill_((idx_ * idx == 0) | (idx_ >= TT), A)
+                    .masked_fill_((idx_ * idx == 0) | (idx_ > TT), A)
                     .clamp_(0, A)
                 )
                 tok = tok.squeeze(0)
@@ -1730,6 +1731,67 @@ def test_joint_latent_lstm_lm():
 
             exp = lm.calc_marginal_log_likelihoods(tok, given_count, prev)
             assert torch.allclose(exp, act, atol=1e-1)
+
+
+def test_hist_conversion():
+
+    # fmt: off
+    latent_hist = torch.tensor([
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1],
+        [1, 0, 0, 0, 0],
+        [0, 1, 1, 0, 0],
+        [1, 0, 1, 0, 1],
+        [1, 1, 1, 1, 1],
+    ])
+    V = latent_hist.numel()
+    N, T = latent_hist.shape
+    cond_hist = torch.arange(V).view_as(latent_hist)
+    exp_extended = torch.tensor([
+        [V, V, V, V, V],
+        [V, V, V, V, 0],
+        [0, V, V, V, V],
+        [V, 0, 1, V, V],
+        [0, V, 1, V, 2],
+        [0, 1, 2, 3, 4],
+    ])
+    exp_extended = (exp_extended + (T * torch.arange(N)).view(N, 1)).clamp_max_(V)
+    exp_segmental = torch.tensor([
+        [V, V, V, V, V],
+        [V, V, V, V, 0],
+        [0, 0, 0, 0, 0],
+        [V, 0, 1, 1, 1],
+        [0, 0, 1, 1, 2],
+        [0, 1, 2, 3, 4],
+    ])
+    exp_segmental = (exp_segmental + (T * torch.arange(N)).view(N, 1)).clamp_max_(V)
+    # fmt: on
+
+    act_extended = conditional_and_latent_hist_to_extended(
+        latent_hist, cond_hist, V, True
+    )
+    assert (exp_extended == act_extended).all()
+
+    act_segmental = conditional_and_latent_hist_to_segmental(
+        latent_hist, cond_hist, V, True
+    )
+    assert (exp_segmental == act_segmental).all()
+
+    act_cond_hist, cond_lens = extended_hist_to_conditional(
+        exp_extended, latent_hist=latent_hist, batch_first=True, pad_value=V
+    )
+    cond_mask = cond_lens.unsqueeze(1) > torch.arange(T)
+    assert (cond_hist.masked_fill(~cond_mask, V) == act_cond_hist).all()
+
+    # we can still come up with a segmental history when there are too few
+    # conditional history elements
+    T2 = T // 2
+    cond_hist = cond_hist[:, :T2]
+    exp_segmental = exp_segmental.masked_fill_((exp_segmental % T) >= T2, V)
+    act_segmental = conditional_and_latent_hist_to_segmental(
+        latent_hist, cond_hist, V, True
+    )
+    assert (exp_segmental == act_segmental).all()
 
 
 def test_frontend():
